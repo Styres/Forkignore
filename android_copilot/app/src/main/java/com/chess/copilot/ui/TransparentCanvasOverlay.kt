@@ -9,6 +9,7 @@ import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.RectF
 import android.os.Build
+import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import com.chess.copilot.engine.StockfishBridge
