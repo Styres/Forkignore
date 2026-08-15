@@ -24,6 +24,7 @@ import com.chess.copilot.service.FloatingBubbleService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * 主控制台与诊断界面
@@ -64,6 +65,15 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btnSelectImage).setOnClickListener {
             pickImageLauncher.launch("image/*")
+        }
+
+        // 展示上一次投影会话的落盘状态 (FloatingBubbleService 自取证)，辅助定位授权失效问题
+        try {
+            val stateFile = File(filesDir, "debug/projection_state.txt")
+            if (stateFile.exists()) {
+                tvResult.text = "【上次投影会话状态】\n${stateFile.readText()}"
+            }
+        } catch (_: Exception) {
         }
     }
 
@@ -111,40 +121,48 @@ class MainActivity : AppCompatActivity() {
                     ChessLocator.locateBoard(bitmap)
                 }
 
-                // 2. 纯 Kotlin 梯度场 NCC + 2-Means 识别
-                val res = withContext(Dispatchers.Default) {
-                    classifier?.classifyBoard(bitmap, boardRect)
+                // 2. 带取证看板的详尽决策管道 (MedianSim / 占位 / 拦截原因)
+                val detailedResp = withContext(Dispatchers.Default) {
+                    classifier?.classifyBoardDetailed(bitmap, boardRect)
                 }
 
-                if (res != null) {
-                    // 3. Stockfish 计算最佳走法
-                    val eval = StockfishBridge.evaluateFen(res.fullFen)
+                when (detailedResp) {
+                    is UltraRobustClassifier.ClassificationResponse.Success -> {
+                        val res = detailedResp.result
+                        // 3. Stockfish 计算最佳走法
+                        val eval = StockfishBridge.evaluateFen(res.fullFen)
 
-                    val sb = StringBuilder()
-                    sb.append("【离线诊断结果】\n")
-                    sb.append("棋盘坐标: [L=${boardRect.left}, T=${boardRect.top}, R=${boardRect.right}, B=${boardRect.bottom}]\n")
-                    sb.append("视角方向: ${if (res.isWhitePerspective) "执白 (White)" else "执黑 (Black)"}\n")
-                    sb.append("局面 FEN: ${res.boardFen}\n")
-                    sb.append("完整 FEN: ${res.fullFen}\n")
-                    sb.append("-----------------------------\n")
-                    val displayMove = when (eval.bestMove) {
-                        "(checkmate)" -> "无合法走法 (胜负已分/将杀)"
-                        "(stalemate)" -> "无合法走法 (和棋/逼和)"
-                        "(none)" -> "无合法走法"
-                        else -> eval.bestMove
-                    }
-                    sb.append("推荐走法: $displayMove\n")
-                    sb.append("局势评估分: ${if (eval.evalScore >= 0) "+" else ""}${String.format("%.2f", eval.evalScore)}\n")
-                    sb.append("搜索深度: ${if (eval.depth <= 0) "0 层 [兜底生成器]" else "${eval.depth} 层"}\n")
-                    if (eval.isMate) {
-                        sb.append("杀棋状态: 胜势已锁定\n")
-                    }
-                    sb.append("-----------------------------\n")
-                    sb.append("${StockfishBridge.lastDiagnosticInfo}\n")
+                        val sb = StringBuilder()
+                        sb.append("【离线诊断结果】\n")
+                        sb.append("棋盘坐标: [L=${boardRect.left}, T=${boardRect.top}, R=${boardRect.right}, B=${boardRect.bottom}]\n")
+                        sb.append("视角方向: ${if (res.isWhitePerspective) "执白 (White)" else "执黑 (Black)"}\n")
+                        sb.append("取证看板: MedianSim=${String.format("%.3f", detailedResp.medianSim)} | 占位=${detailedResp.occupiedCount}\n")
+                        sb.append("局面 FEN: ${res.boardFen}\n")
+                        sb.append("完整 FEN: ${res.fullFen}\n")
+                        sb.append("-----------------------------\n")
+                        val displayMove = when (eval.bestMove) {
+                            "(checkmate)" -> "无合法走法 (胜负已分/将杀)"
+                            "(stalemate)" -> "无合法走法 (和棋/逼和)"
+                            "(none)" -> "无合法走法"
+                            else -> eval.bestMove
+                        }
+                        sb.append("推荐走法: $displayMove\n")
+                        sb.append("局势评估分: ${if (eval.evalScore >= 0) "+" else ""}${String.format("%.2f", eval.evalScore)}\n")
+                        sb.append("搜索深度: ${if (eval.depth <= 0) "0 层 [兜底生成器]" else "${eval.depth} 层"}\n")
+                        if (eval.isMate) {
+                            sb.append("杀棋状态: 胜势已锁定\n")
+                        }
+                        sb.append("-----------------------------\n")
+                        sb.append("${StockfishBridge.lastDiagnosticInfo}\n")
 
-                    tvResult.text = sb.toString()
-                } else {
-                    tvResult.text = "【未检测到有效棋盘画面】\n语义质量中位数相似度低于 0.52 门禁或棋子数量不足，已自动拦截。"
+                        tvResult.text = sb.toString()
+                    }
+                    is UltraRobustClassifier.ClassificationResponse.Rejected -> {
+                        tvResult.text = "【门禁拦截】\n原因: ${detailedResp.reason}\n取证看板: MedianSim=${String.format("%.3f", detailedResp.medianSim)} | 占位=${detailedResp.occupiedCount}"
+                    }
+                    null -> {
+                        tvResult.text = "分类器未初始化"
+                    }
                 }
             } catch (e: Exception) {
                 tvResult.text = "诊断报错: ${e.message}"

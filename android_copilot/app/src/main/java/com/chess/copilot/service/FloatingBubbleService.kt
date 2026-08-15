@@ -110,7 +110,15 @@ class FloatingBubbleService : Service() {
 
             if (resultCode == Activity.RESULT_OK && resultData != null && mediaProjection == null) {
                 setupMediaProjection(resultCode, resultData)
+            } else if (mediaProjection == null) {
+                // 响亮失败：授权数据异常必须现场可见并落盘，杜绝静默跳过导致的"气泡假活"
+                val reason = "授权 Intent 异常 (resultCode=$resultCode, dataPresent=${resultData != null})"
+                recordProjectionState("初始化失败: $reason")
+                Toast.makeText(this, "截屏授权数据异常: $reason，请点击悬浮球重新授权", Toast.LENGTH_LONG).show()
             }
+        } else {
+            recordProjectionState("初始化失败: 服务被系统重启 (intent=null)，Token 已失效")
+            Toast.makeText(this, "服务被系统重启，截屏授权已失效，请点击悬浮球重新授权", Toast.LENGTH_LONG).show()
         }
 
         return START_NOT_STICKY
@@ -166,9 +174,13 @@ class FloatingBubbleService : Service() {
         try {
             mediaProjection = mediaProjectionManager?.getMediaProjection(resultCode, resultData)
             if (mediaProjection == null) {
+                recordProjectionState("初始化失败: getMediaProjection 返回 null (Token 无效或已被消费)")
                 Toast.makeText(this, "MediaProjection 初始化失败", Toast.LENGTH_SHORT).show()
                 return
             }
+
+            // 会话生命周期监听：系统终止共享时立即回收引用并大声告知，避免僵尸态 (引用非 null 但会话已死)
+            mediaProjection?.registerCallback(projectionCallback, captureHandler)
 
             imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 3)
 
@@ -190,10 +202,55 @@ class FloatingBubbleService : Service() {
                 }
             }, captureHandler)
 
+            recordProjectionState("投影会话建立成功 (${screenWidth}x${screenHeight}, dpi=$screenDensity)")
             Toast.makeText(this, "悬浮助手已就绪", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             e.printStackTrace()
+            // 半初始化回滚：任何一步失败都清掉已创建的资源，保证三引用状态一致，杜绝脏状态
+            recordProjectionState("投影会话启动异常: ${e.javaClass.simpleName}: ${e.message}")
+            rollbackProjection()
             Toast.makeText(this, "启动截屏会话异常: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private val projectionCallback = object : MediaProjection.Callback() {
+        override fun onStop() {
+            recordProjectionState("系统终止了屏幕共享会话 (MediaProjection.Callback#onStop)")
+            rollbackProjection()
+            serviceScope.launch(Dispatchers.Main) {
+                Toast.makeText(
+                    this@FloatingBubbleService,
+                    "屏幕共享会话已被系统终止，请点击悬浮球重新授权",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
+
+    /**
+     * 回滚/回收投影资源但不主动 stop() (onStop 回调中会话已由系统终止)
+     */
+    private fun rollbackProjection() {
+        try {
+            virtualDisplay?.release()
+        } catch (_: Exception) {}
+        try {
+            imageReader?.close()
+        } catch (_: Exception) {}
+        virtualDisplay = null
+        imageReader = null
+        mediaProjection = null
+    }
+
+    /**
+     * 投影会话状态落盘自取证 (filesDir/debug/projection_state.txt)，供 MainActivity 诊断页展示
+     */
+    private fun recordProjectionState(desc: String) {
+        try {
+            val debugDir = File(filesDir, "debug")
+            if (!debugDir.exists()) debugDir.mkdirs()
+            File(debugDir, "projection_state.txt").writeText("$desc\nTime: ${System.currentTimeMillis()}\n")
+        } catch (_: Exception) {
         }
     }
 
