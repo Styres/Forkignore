@@ -211,9 +211,8 @@ object StockfishBridge {
                 }
             }
 
-            // 3. 双重兜底：纯 Kotlin 合法走法评估
+            // 3. 双重兜底：纯 Kotlin 合法走法评估 (注：fallback 结果严禁写入 evalCache，以保证引擎恢复后能输出高质量建议)
             val fallback = evaluateFallback(fen)
-            evalCache.put(fen, fallback)
             return@withContext fallback
         }
     }

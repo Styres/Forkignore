@@ -266,8 +266,11 @@ class FloatingBubbleService : Service() {
                 }
 
                 if (res != null) {
-                    // 6. 异步保存真机落盘诊断图与 FEN
-                    saveDebugArtifactsAsync(screenBitmap, boardRect, res.fullFen)
+                    // 6. 异步保存真机落盘诊断图与 FEN (深拷贝一份传入，杜绝 finally recycle 竞态)
+                    val copyForDebug = try {
+                        screenBitmap.copy(screenBitmap.config ?: Bitmap.Config.ARGB_8888, false)
+                    } catch (_: Exception) { null }
+                    saveDebugArtifactsAsync(copyForDebug, boardRect, res.fullFen)
 
                     // 7. Stockfish 引擎高速算招 (带缓存与自愈)
                     val eval = StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = 120)
@@ -302,7 +305,12 @@ class FloatingBubbleService : Service() {
             try {
                 val image = ir.acquireLatestImage() ?: return@setOnImageAvailableListener
                 frameCount++
-                // 获取第一帧有效图像
+                // 丢弃首帧可能未完全刷新的黑帧，提取最新鲜的一帧
+                if (frameCount < 2) {
+                    image.close()
+                    return@setOnImageAvailableListener
+                }
+
                 if (!deferredBitmap.isCompleted) {
                     val planes = image.planes
                     val buffer = planes[0].buffer
@@ -357,7 +365,8 @@ class FloatingBubbleService : Service() {
         }
     }
 
-    private fun saveDebugArtifactsAsync(bitmap: Bitmap, rect: android.graphics.Rect, fen: String) {
+    private fun saveDebugArtifactsAsync(bitmap: Bitmap?, rect: android.graphics.Rect, fen: String) {
+        val b = bitmap ?: return
         serviceScope.launch(Dispatchers.IO) {
             try {
                 val debugDir = File(filesDir, "debug")
@@ -365,13 +374,16 @@ class FloatingBubbleService : Service() {
 
                 val imgFile = File(debugDir, "last_capture.png")
                 val fos = FileOutputStream(imgFile)
-                bitmap.compress(Bitmap.CompressFormat.PNG, 90, fos)
+                b.compress(Bitmap.CompressFormat.PNG, 90, fos)
                 fos.flush()
                 fos.close()
 
                 val txtFile = File(debugDir, "last_diagnostic.txt")
                 txtFile.writeText("BoardRect: $rect\nFEN: $fen\nTime: ${System.currentTimeMillis()}\n")
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+            } finally {
+                b.recycle()
+            }
         }
     }
 

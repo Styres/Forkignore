@@ -306,7 +306,7 @@ class UltraRobustClassifier(context: Context? = null) {
                 }
             }
 
-            // 2. 统计子力数量并执行上限约束
+            // 2. 统计子力数量并执行上限约束（容量感知降级，避免二次超限）
             val pieceCounts = mutableMapOf<Char, Int>()
             val maxLimits = mapOf(
                 'K' to 1, 'k' to 1,
@@ -325,14 +325,19 @@ class UltraRobustClassifier(context: Context? = null) {
                     pieceCounts[p] = count
                     val maxAllowed = maxLimits[p] ?: 8
                     if (count > maxAllowed) {
-                        // 超限降级：多余的王/后降级为车/马/空
-                        result[r][c] = when (p) {
-                            'K' -> 'R'
-                            'k' -> 'r'
-                            'Q' -> 'B'
-                            'q' -> 'b'
-                            else -> '.'
+                        // 超限降级：寻找尚未达标的备选子力，若都满额则置为 '.'
+                        val isWhite = p.isUpperCase()
+                        val candidates = if (isWhite) charArrayOf('R', 'B', 'N') else charArrayOf('r', 'b', 'n')
+                        var fallbackPiece = '.'
+                        for (cand in candidates) {
+                            val candCount = pieceCounts.getOrDefault(cand, 0)
+                            if (candCount < (maxLimits[cand] ?: 2)) {
+                                fallbackPiece = cand
+                                pieceCounts[cand] = candCount + 1
+                                break
+                            }
                         }
+                        result[r][c] = fallbackPiece
                     }
                 }
             }
@@ -397,6 +402,21 @@ class UltraRobustClassifier(context: Context? = null) {
                             }
                         }
                         if (placed) break
+                    }
+                }
+            }
+
+            // 4. 终极自检：消除任何二次超限
+            val finalCounts = mutableMapOf<Char, Int>()
+            for (r in 0..7) {
+                for (c in 0..7) {
+                    val p = result[r][c]
+                    if (p == '.') continue
+                    val cnt = finalCounts.getOrDefault(p, 0) + 1
+                    finalCounts[p] = cnt
+                    val limit = maxLimits[p] ?: 8
+                    if (cnt > limit) {
+                        result[r][c] = '.'
                     }
                 }
             }

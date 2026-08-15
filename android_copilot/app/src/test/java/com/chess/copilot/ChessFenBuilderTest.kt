@@ -33,21 +33,21 @@ class ChessFenBuilderTest {
     @Test
     fun testBlackPerspectiveFlipping() {
         val rawScreenBoard = arrayOf(
-            charArrayOf('R', 'N', 'B', 'K', 'Q', 'B', 'N', 'R'),
+            charArrayOf('R', 'N', 'B', 'Q', 'K', 'B', 'N', 'R'),
             charArrayOf('P', 'P', 'P', 'P', '.', 'P', 'P', 'P'),
             charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
             charArrayOf('.', '.', '.', '.', 'P', '.', '.', '.'),
             charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
             charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
             charArrayOf('p', 'p', 'p', 'p', 'p', 'p', 'p', 'p'),
-            charArrayOf('r', 'n', 'b', 'k', 'q', 'b', 'n', 'r')
+            charArrayOf('r', 'n', 'b', 'q', 'k', 'b', 'n', 'r')
         )
 
         val result = UltraRobustClassifier.buildFenFromBoard(rawScreenBoard, isWhitePerspective = false)
         assertFalse(result.isWhitePerspective)
         assertEquals("b", result.activeColor)
-        assertTrue(result.boardFen.startsWith("rnb"))
-        assertTrue(result.boardFen.endsWith("RNB") || result.boardFen.endsWith("R") || result.boardFen.endsWith("NR"))
+        assertEquals("rnbqkbnr", result.boardFen.split('/')[0])
+        assertEquals("RNBQKBNR", result.boardFen.split('/')[7])
     }
 
     @Test
@@ -62,7 +62,7 @@ class ChessFenBuilderTest {
 
     @Test
     fun testZeroKingRecovery() {
-        // 关键用例：测试当识别结果中白王数量为 0 时（例如被切掉或误判为空格），算法能否在白方底线自动回填国王
+        // 关键用例：测试当识别结果中白王数量为 0 时，算法自动在白方底线回填国王
         val boardWithNoWhiteKing = arrayOf(
             charArrayOf('r', 'n', 'b', 'q', 'k', 'b', 'n', 'r'),
             charArrayOf('p', 'p', 'p', 'p', 'p', 'p', 'p', 'p'),
@@ -113,7 +113,7 @@ class ChessFenBuilderTest {
 
     @Test
     fun testPieceCountMaxLimits() {
-        // 关键用例：测试某类子力（如白后超过 1 个、白兵超过 8 个）时的超限降级
+        // 关键用例：测试某类子力（如白后超过 1 个、白兵超过 8 个）时的严格超限降级
         val boardWithThreeQueens = arrayOf(
             charArrayOf('r', 'n', 'b', 'q', 'k', 'b', 'n', 'r'),
             charArrayOf('p', 'p', 'p', 'p', 'p', 'p', 'p', 'p'),
@@ -132,12 +132,11 @@ class ChessFenBuilderTest {
                 if (sanitized[r][c] == 'Q') whiteQueenCount++
             }
         }
-        assertTrue("White queen count should be <= 2", whiteQueenCount <= 2)
+        assertEquals("White queen count should strictly be 1", 1, whiteQueenCount)
     }
 
     @Test
     fun testRowConservation() {
-        // 验证生成 FEN 每一行求和严格守恒等于 8
         val board = arrayOf(
             charArrayOf('r', 'n', 'b', 'q', 'k', 'b', 'n', 'r'),
             charArrayOf('.', 'p', '.', 'p', '.', 'p', '.', 'p'),
