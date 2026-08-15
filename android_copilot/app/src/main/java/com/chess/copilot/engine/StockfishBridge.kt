@@ -284,7 +284,7 @@ object StockfishBridge {
     /**
      * 对 FEN 执行深度分析并返回推荐走法与评估分（带结果缓存与自动重启自愈）
      */
-    suspend fun evaluateFen(fen: String, moveTimeMs: Long = 120): EngineEvaluation = withContext(Dispatchers.IO) {
+    suspend fun evaluateFen(fen: String, moveTimeMs: Long = 200): EngineEvaluation = withContext(Dispatchers.IO) {
         // 1. 优先命中 LRU 缓存，保证静止盘面建议确定无跳变
         val cached = evalCache.get(fen)
         if (cached != null) {
@@ -298,6 +298,9 @@ object StockfishBridge {
                 return@withContext reCheck
             }
 
+            val evalStartTime = System.currentTimeMillis()
+            val receivedLines = mutableListOf<String>()
+
             // 2. 引擎自愈机制 (Auto-Respawn)
             if (!isEngineReady || process == null) {
                 startEngineProcessLocked()
@@ -309,7 +312,7 @@ object StockfishBridge {
                     while (lineChannel?.tryReceive()?.getOrNull() != null) {}
 
                     sendCommand("isready")
-                    val readyOk = waitForResponse("readyok", timeoutMs = 800)
+                    val readyOk = waitForResponse("readyok", timeoutMs = 3000)
                     if (!readyOk) {
                         Log.w(TAG, "Stockfish readyok timeout before evaluate, restarting process")
                         destroyProcessLocked()
@@ -318,6 +321,7 @@ object StockfishBridge {
 
                     val currentChannel = lineChannel
                     if (currentChannel == null || !isEngineReady || process == null) {
+                        lastDiagnosticInfo = "【Stockfish 重启失败，降级兜底】\n引擎重启后不可用，跌入纯 Kotlin 兜底"
                         Log.w(TAG, "Stockfish unavailable after restart, fallback will be used")
                         destroyProcessLocked()
                         val fallback = evaluateFallback(fen)
@@ -329,7 +333,7 @@ object StockfishBridge {
 
                     var lastEval: EngineEvaluation? = null
                     var bestMoveResult: String? = null
-                    val deadline = System.currentTimeMillis() + moveTimeMs + 1000L
+                    val deadline = System.currentTimeMillis() + moveTimeMs + 4000L
 
                     // 响应式挂起读取输出
                     while (System.currentTimeMillis() < deadline) {
@@ -343,6 +347,9 @@ object StockfishBridge {
                                 null
                             }
                         } ?: break
+
+                        receivedLines.add(line)
+                        if (receivedLines.size > 20) receivedLines.removeAt(0)
 
                         val parsedInfo = parseInfoLine(line)
                         if (parsedInfo != null) {
@@ -360,17 +367,22 @@ object StockfishBridge {
                         val result = EngineEvaluation(
                             bestMove = bestMoveResult,
                             evalScore = lastEval?.evalScore ?: 0.0f,
-                            depth = lastEval?.depth ?: 12,
+                            depth = if ((lastEval?.depth ?: -1) > 0) lastEval!!.depth else 10,
                             isMate = lastEval?.isMate ?: false
                         )
+                        val totalElapsed = System.currentTimeMillis() - evalStartTime
+                        lastDiagnosticInfo = "【Stockfish 计算成功】\n耗时: ${totalElapsed}ms | 深度: ${result.depth} 层 | 评分: ${result.evalScore} | 走法: ${result.bestMove}\n末尾输出: ${receivedLines.takeLast(2).joinToString(" || ")}"
                         Log.i(TAG, "Stockfish evaluate success: bestMove=${result.bestMove}, depth=${result.depth}, score=${result.evalScore}")
                         evalCache.put(fen, result)
                         return@withContext result
                     }
 
-                    Log.w(TAG, "Stockfish evaluateFen timed out without bestmove, resetting process")
+                    val totalElapsed = System.currentTimeMillis() - evalStartTime
+                    lastDiagnosticInfo = "【Stockfish 计算超时，降级兜底】\n已耗时: ${totalElapsed}ms | 收到行数: ${receivedLines.size}\n最近行: ${receivedLines.takeLast(2).joinToString(" || ")}"
+                    Log.w(TAG, "Stockfish evaluateFen timed out without bestmove, resetting process\n$lastDiagnosticInfo")
                     destroyProcessLocked()
                 } catch (e: Exception) {
+                    lastDiagnosticInfo = "【Stockfish 分析异常，降级兜底】\n异常: ${e.javaClass.simpleName}: ${e.message}"
                     Log.w(TAG, "Stockfish evaluateFen exception: ${e.message}", e)
                     destroyProcessLocked()
                 }
