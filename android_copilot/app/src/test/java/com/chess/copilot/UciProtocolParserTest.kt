@@ -3,6 +3,7 @@ package com.chess.copilot
 import com.chess.copilot.engine.StockfishBridge
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -24,6 +25,22 @@ class UciProtocolParserTest {
         val line3 = "bestmove (none)"
         val move3 = StockfishBridge.parseBestMoveLine(line3)
         assertEquals("(none)", move3)
+    }
+
+    @Test
+    fun testParseBestMovePromotion() {
+        // 关键用例：兵升变 (Promotion)
+        val lineQueen = "bestmove e7e8q ponder d8d7"
+        assertEquals("e7e8q", StockfishBridge.parseBestMoveLine(lineQueen))
+
+        val lineKnight = "bestmove a2a1n"
+        assertEquals("a2a1n", StockfishBridge.parseBestMoveLine(lineKnight))
+
+        val lineRook = "bestmove b7b8r"
+        assertEquals("b7b8r", StockfishBridge.parseBestMoveLine(lineRook))
+
+        val lineBishop = "bestmove h2h1b"
+        assertEquals("h2h1b", StockfishBridge.parseBestMoveLine(lineBishop))
     }
 
     @Test
@@ -63,11 +80,33 @@ class UciProtocolParserTest {
     }
 
     @Test
+    fun testFallbackEvaluatorFindsExistingPieceMove() {
+        // 测试降级评估器在真实盘面上绝不指向空格
+        val fen = "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3"
+        val eval = StockfishBridge.evaluateFallback(fen)
+        assertNotNull(eval.bestMove)
+        assertTrue(eval.bestMove.length in 4..5)
+        
+        val fromCol = eval.bestMove[0] - 'a'
+        val fromRank = eval.bestMove[1] - '1'
+        // 验证移动的起点必须存在己方棋子
+        val rows = fen.split(" ")[0].split("/")
+        val board = Array(8) { r ->
+            val rowStr = rows[r]
+            val expanded = StringBuilder()
+            for (ch in rowStr) {
+                if (ch.isDigit()) repeat(ch - '0') { expanded.append('.') }
+                else expanded.append(ch)
+            }
+            expanded.toString().toCharArray()
+        }
+        val pieceAtFrom = board[7 - fromRank][fromCol]
+        assertTrue("Piece at from square should be white", pieceAtFrom.isUpperCase())
+    }
+
+    @Test
     fun testInvalidOrIrrelevantLines() {
         val invalidLine = "info currmove e2e4 currmovenumber 1"
-        val eval = StockfishBridge.parseInfoLine(invalidLine)
-        // 没有 score 和 depth 时应安全返回 null 或不崩溃
-        // 验证容错性
         assertEquals(null, StockfishBridge.parseBestMoveLine(invalidLine))
     }
 }

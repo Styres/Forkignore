@@ -144,6 +144,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        StockfishBridge.release()
+        // 保持 Stockfish 引擎常驻供 FloatingBubbleService 持续调用，不在此处 release
     }
 }

@@ -26,13 +26,16 @@ import android.view.WindowManager
 import android.widget.ImageView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import androidx.core.content.IntentCompat
 import com.chess.copilot.core.ChessLocator
 import com.chess.copilot.core.UltraRobustClassifier
 import com.chess.copilot.engine.StockfishBridge
+import com.chess.copilot.ui.MainActivity
 import com.chess.copilot.ui.TransparentCanvasOverlay
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -64,7 +67,8 @@ class FloatingBubbleService : Service() {
     private var screenDensity = 420
     private var isAnalyzing = false
 
-    private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
+    private val serviceJob = Job()
+    private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
 
     override fun onCreate() {
         super.onCreate()
@@ -83,14 +87,16 @@ class FloatingBubbleService : Service() {
         startForegroundNotification()
 
         // 2. 提取截屏授权 Token 并初始化投影
-        val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
-        val resultData = intent?.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
+        if (intent != null) {
+            val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
+            val resultData = IntentCompat.getParcelableExtra(intent, EXTRA_RESULT_DATA, Intent::class.java)
 
-        if (resultCode == Activity.RESULT_OK && resultData != null && mediaProjection == null) {
-            setupMediaProjection(resultCode, resultData)
+            if (resultCode == Activity.RESULT_OK && resultData != null) {
+                setupMediaProjection(resultCode, resultData)
+            }
         }
 
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     private fun startForegroundNotification() {
@@ -128,6 +134,7 @@ class FloatingBubbleService : Service() {
 
     private fun setupMediaProjection(resultCode: Int, data: Intent) {
         try {
+            cleanupProjection()
             mediaProjection = mediaProjectionManager?.getMediaProjection(resultCode, data)
             mediaProjection?.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() {
@@ -220,15 +227,26 @@ class FloatingBubbleService : Service() {
 
     private fun onBubbleClicked() {
         if (isAnalyzing) return
+
+        // 检查截屏授权有效性
+        if (mediaProjection == null || imageReader == null) {
+            Toast.makeText(this, "截屏授权已失效，请重新开启悬浮助手", Toast.LENGTH_LONG).show()
+            val reAuthIntent = Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            startActivity(reAuthIntent)
+            return
+        }
+
         isAnalyzing = true
 
         serviceScope.launch {
+            var screenBitmap: Bitmap? = null
             try {
                 // 1. 截取当前屏幕一帧 Bitmap
-                val screenBitmap = captureScreenBitmap()
+                screenBitmap = captureScreenBitmap()
                 if (screenBitmap == null) {
                     Toast.makeText(this@FloatingBubbleService, "正在捕获画面，请稍后重试", Toast.LENGTH_SHORT).show()
-                    isAnalyzing = false
                     return@launch
                 }
 
@@ -243,7 +261,7 @@ class FloatingBubbleService : Service() {
                 }
 
                 if (res != null) {
-                    // 4. Stockfish 引擎高速算招
+                    // 4. Stockfish 引擎高速算招 (超时安全)
                     val eval = StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = 120)
 
                     // 5. 在全透明 Canvas 上绘制走法箭头与局势胶囊
@@ -252,6 +270,7 @@ class FloatingBubbleService : Service() {
             } catch (e: Exception) {
                 e.printStackTrace()
             } finally {
+                screenBitmap?.recycle()
                 isAnalyzing = false
             }
         }
@@ -274,7 +293,9 @@ class FloatingBubbleService : Service() {
                 Bitmap.Config.ARGB_8888
             )
             bmp.copyPixelsFromBuffer(buffer)
-            return@withContext Bitmap.createBitmap(bmp, 0, 0, screenWidth, screenHeight)
+            val resultBmp = Bitmap.createBitmap(bmp, 0, 0, screenWidth, screenHeight)
+            bmp.recycle()
+            return@withContext resultBmp
         } catch (e: Exception) {
             e.printStackTrace()
             return@withContext null
@@ -287,14 +308,16 @@ class FloatingBubbleService : Service() {
         try {
             virtualDisplay?.release()
             imageReader?.close()
-            mediaProjection = null
-            virtualDisplay = null
-            imageReader = null
+            mediaProjection?.stop()
         } catch (_: Exception) {}
+        mediaProjection = null
+        virtualDisplay = null
+        imageReader = null
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        serviceScope.cancel()
         bubbleView?.let { windowManager.removeView(it) }
         transparentOverlay?.hide()
         cleanupProjection()

@@ -236,10 +236,19 @@ class UltraRobustClassifier(context: Context? = null) {
          */
         fun calculateTwoMeansThreshold(means: FloatArray): Float {
             if (means.isEmpty()) return 128.0f
-            if (means.size == 1) return means[0]
+            if (means.size == 1) return if (means[0] >= 120f) means[0] - 1f else means[0] + 1f
 
-            var c1 = means.minOrNull() ?: 0.0f
-            var c2 = means.maxOrNull() ?: 255.0f
+            val minVal = means.minOrNull() ?: 0.0f
+            val maxVal = means.maxOrNull() ?: 255.0f
+
+            // 单色残局保护：当所有棋子亮度极度接近（极差 < 35）时
+            if (maxVal - minVal < 35.0f) {
+                val avg = means.average().toFloat()
+                return if (avg >= 120.0f) minVal - 1.0f else maxVal + 1.0f
+            }
+
+            var c1 = minVal
+            var c2 = maxVal
 
             for (iter in 0 until 10) {
                 var sum1 = 0.0f

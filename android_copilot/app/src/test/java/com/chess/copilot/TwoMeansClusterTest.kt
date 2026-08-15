@@ -12,8 +12,6 @@ class TwoMeansClusterTest {
     @Test
     fun testBimodalDistributionConvergence() {
         // 模拟明显黑白棋子的中心平均亮度
-        // 黑棋中心平均亮度集中在 20~40
-        // 白棋中心平均亮度集中在 180~220
         val pieceMeans = floatArrayOf(22.5f, 25.0f, 31.2f, 28.4f, 185.0f, 192.3f, 210.0f, 205.5f)
 
         val threshold = UltraRobustClassifier.calculateTwoMeansThreshold(pieceMeans)
@@ -42,10 +40,22 @@ class TwoMeansClusterTest {
     }
 
     @Test
-    fun testSingleGroupEdgeCase() {
-        // 当棋盘上全是一种颜色的极端残局
-        val singleColorMeans = floatArrayOf(200f, 205f, 202f)
-        val threshold = UltraRobustClassifier.calculateTwoMeansThreshold(singleColorMeans)
-        assertTrue(threshold >= 0f)
+    fun testSingleColorWhiteEndgame() {
+        // 棋盘上只有白棋的单色残局 (如白王白后残局)
+        val allWhiteMeans = floatArrayOf(190f, 195f, 205f)
+        val threshold = UltraRobustClassifier.calculateTwoMeansThreshold(allWhiteMeans)
+        for (m in allWhiteMeans) {
+            assertTrue("All pieces should be classified as white", m >= threshold)
+        }
+    }
+
+    @Test
+    fun testSingleColorBlackEndgame() {
+        // 棋盘上只有黑棋的单色残局
+        val allBlackMeans = floatArrayOf(25f, 30f, 35f)
+        val threshold = UltraRobustClassifier.calculateTwoMeansThreshold(allBlackMeans)
+        for (m in allBlackMeans) {
+            assertTrue("All pieces should be classified as black", m < threshold)
+        }
     }
 }
