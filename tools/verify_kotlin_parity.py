@@ -16,7 +16,6 @@ def run_parity_verification():
     for tf in template_files:
         cls_name = os.path.basename(tf).split("_")[0].upper()
         img = cv2.imread(tf)
-        feat = cv2.resize(img, (48, 48))
         from tools.extract_refined_templates import extract_features_from_cell
         f = extract_features_from_cell(img)
         templates.append((cls_name, f['f_body'], f['f_head']))
@@ -26,7 +25,10 @@ def run_parity_verification():
     
     # 负样本拦截
     for neg_img in NEGATIVE_SAMPLES:
-        if not os.path.exists(neg_img): continue
+        if not os.path.exists(neg_img):
+            print(f"[FATAL ERROR] Required negative benchmark image '{neg_img}' is MISSING from disk!")
+            all_passed = False
+            continue
         img = cv2.imread(neg_img)
         res = run_detection_pipeline(img, templates)
         if res is not None:
