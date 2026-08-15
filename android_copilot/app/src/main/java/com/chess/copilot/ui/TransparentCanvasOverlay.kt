@@ -115,8 +115,9 @@ class TransparentCanvasOverlay(private val context: Context) {
 
             // 3. 绘制上方局势胶囊
             val scoreStr = if (move.isMate) "MATE" else "${if (move.evalScore >= 0) "+" else ""}${String.format("%.2f", move.evalScore)}"
-            val scoreText = "招法: ${move.bestMove} | 评估: $scoreStr (深${move.depth})"
-            val pillW = 500f
+            val depthStr = if (move.depth <= 0) "[兜底]" else "深${move.depth}"
+            val scoreText = "招法: ${move.bestMove} | 评估: $scoreStr ($depthStr)"
+            val pillW = 520f
             val pillH = 75f
             val pillX = rect.left + (rect.width() - pillW) / 2f
             val pillY = (rect.top - pillH - 25f).coerceAtLeast(50f)

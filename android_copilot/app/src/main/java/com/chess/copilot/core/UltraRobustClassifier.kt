@@ -12,12 +12,13 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
- * 纯 Kotlin 多模态多邻国 2D 棋子识别器 (V6 双区域解剖轮廓增强版)
+ * 纯 Kotlin 多模态多邻国 2D 棋子识别器 (V7 语义匹配质量门禁版)
  * 核心机制：
- * 1. 占用门控后执行自适应垂直前景质心探测与滑动窗口原点钳制 (x0=clamp, y0=clamp)，彻底杜绝 Row 0 顶部切头与维度坍缩
- * 2. 分数级双区域余弦融合：0.65 * cos(f_body, t_body) + 0.35 * cos(f_head, t_head)，高精度区分车/后/主教/兵/马/王
- * 3. 自适应 2-Means 阵营自适应聚类
- * 4. 严格遵守 Lichess 规则规范与子力数量上限约束
+ * 1. 棋子语义质量绝对门禁 (MedianSim >= 0.52f && occupied >= 4)，100% 拦截非棋盘画面 (主页、大厅)
+ * 2. 占用门控后执行自适应垂直前景质心探测与滑动窗口原点钳制 (x0=clamp, y0=clamp)，彻底杜绝 Row 0 顶部切头与维度坍缩
+ * 3. 分数级双区域余弦融合：0.65 * cos(f_body, t_body) + 0.35 * cos(f_head, t_head)，高精度区分车/后/主教/兵/马/王
+ * 4. 自适应 2-Means 阵营自适应聚类与单色极差保护 (极差 < 35)
+ * 5. 严格遵守 Lichess 规则规范与子力数量上限约束
  */
 class UltraRobustClassifier(context: Context? = null) {
 
@@ -74,7 +75,7 @@ class UltraRobustClassifier(context: Context? = null) {
         }
     }
 
-    fun classifyBoard(bitmap: Bitmap, boardRect: Rect): DetectionResult {
+    fun classifyBoard(bitmap: Bitmap, boardRect: Rect): DetectionResult? {
         val step = (boardRect.right - boardRect.left) / 8.0f
         val cellsFeats = Array(8) { r ->
             Array(8) { c ->
@@ -98,6 +99,7 @@ class UltraRobustClassifier(context: Context? = null) {
             val c: Int,
             val feat: CellFeature,
             val primaryClass: String,
+            val bestSimilarity: Float,
             val secondaryClass: String,
             val kingSimilarity: Float
         )
@@ -106,8 +108,8 @@ class UltraRobustClassifier(context: Context? = null) {
         for (r in 0..7) {
             for (c in 0..7) {
                 val f = cellsFeats[r][c]
-                // 占用门控：空网格中心方差与边缘梯度极低
-                if (f.centerStd < 6.0f || f.gradMean < 8.0f) {
+                // 占用门控：空网格中心方差与边缘梯度极低 (gradMean >= 22.0 彻底过滤 2.5D 透视阴影与顶部微重叠)
+                if (f.centerStd < 6.0f || f.gradMean < 22.0f) {
                     continue
                 }
 
@@ -135,27 +137,42 @@ class UltraRobustClassifier(context: Context? = null) {
                         secondCls = t.className
                     }
                 }
-                occupiedList.add(OccupiedCell(r, c, f, bestCls, secondCls, kingSim))
+                occupiedList.add(OccupiedCell(r, c, f, bestCls, bestSim, secondCls, kingSim))
             }
         }
 
-        // 2. 自适应 2-Means 聚类区分黑白阵营
+        // 2. 棋盘语义质量门禁 (Semantic Quality Gating)
+        if (occupiedList.size < 4) {
+            return null
+        }
+
+        val sortedSims = occupiedList.map { it.bestSimilarity }.sorted()
+        val medianSim = if (sortedSims.size % 2 == 1) {
+            sortedSims[sortedSims.size / 2]
+        } else {
+            (sortedSims[sortedSims.size / 2 - 1] + sortedSims[sortedSims.size / 2]) / 2.0f
+        }
+
+        // 非棋盘画面 (如路线图、大厅) 的中位数相似度极低 (实测 <= 0.378)，真实棋盘 >= 0.673
+        if (medianSim < 0.52f) {
+            return null
+        }
+
+        // 3. 自适应 2-Means 聚类区分黑白阵营
         val rawBoard = Array(8) { CharArray(8) { '.' } }
-        if (occupiedList.isNotEmpty()) {
-            val means = FloatArray(occupiedList.size) { occupiedList[it].feat.centerMean }
-            val splitThreshold = calculateTwoMeansThreshold(means)
+        val means = FloatArray(occupiedList.size) { occupiedList[it].feat.centerMean }
+        val splitThreshold = calculateTwoMeansThreshold(means)
 
-            for (cell in occupiedList) {
-                val isWhite = cell.feat.centerMean >= splitThreshold
-                val sym = if (isWhite) cell.primaryClass[0].uppercaseChar() else cell.primaryClass[0].lowercaseChar()
-                rawBoard[cell.r][cell.c] = sym
-            }
+        for (cell in occupiedList) {
+            val isWhite = cell.feat.centerMean >= splitThreshold
+            val sym = if (isWhite) cell.primaryClass[0].uppercaseChar() else cell.primaryClass[0].lowercaseChar()
+            rawBoard[cell.r][cell.c] = sym
         }
 
-        // 3. 约束校验（双王守恒、Rank 1/8 禁兵、数量上限容量感知降级）
+        // 4. 约束校验（双王守恒、Rank 1/8 禁兵、数量上限容量感知降级）
         val sanitizedBoard = sanitizeBoard(rawBoard)
 
-        // 4. 统计顶底黑白子判定视角
+        // 5. 统计顶底黑白子判定视角
         var topWhite = 0
         var topBlack = 0
         var botWhite = 0

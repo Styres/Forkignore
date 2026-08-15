@@ -127,14 +127,16 @@ class MainActivity : AppCompatActivity() {
                     sb.append("局面 FEN: ${res.boardFen}\n")
                     sb.append("完整 FEN: ${res.fullFen}\n")
                     sb.append("-----------------------------\n")
-                    sb.append("Stockfish 建议: ${eval.bestMove}\n")
+                    sb.append("推荐走法: ${eval.bestMove}\n")
                     sb.append("局势评估分: ${if (eval.evalScore >= 0) "+" else ""}${String.format("%.2f", eval.evalScore)}\n")
-                    sb.append("搜索深度: ${eval.depth} 层\n")
+                    sb.append("搜索深度: ${if (eval.depth <= 0) "0 层 [兜底生成器]" else "${eval.depth} 层"}\n")
                     if (eval.isMate) {
                         sb.append("杀棋状态: 胜势已锁定\n")
                     }
 
                     tvResult.text = sb.toString()
+                } else {
+                    tvResult.text = "【未检测到有效棋盘画面】\n语义质量中位数相似度低于 0.52 门禁或棋子数量不足，已自动拦截。"
                 }
             } catch (e: Exception) {
                 tvResult.text = "诊断报错: ${e.message}"

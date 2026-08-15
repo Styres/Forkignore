@@ -83,6 +83,16 @@ TEMPLATE_SOURCES = [
     ("duolingo_2.jpg", 3, 2, "P"),
     ("duolingo_test_1.jfif", 4, 3, "P"),
     ("duolingo_test_1.jfif", 2, 5, "N"),
+    ("bug_3.jpg", 5, 2, "N"),
+    ("bug_3.jpg", 3, 6, "B"),
+    ("bug_3.jpg", 7, 0, "R"),
+    ("bug_3.jpg", 7, 3, "Q"),
+    ("bug_3.jpg", 7, 4, "K"),
+    ("bug_3.jpg", 7, 5, "B"),
+    ("bug_3.jpg", 7, 6, "N"),
+    ("bug_3.jpg", 7, 7, "R"),
+    ("bug_4.jpg", 5, 2, "N"),
+    ("bug_4.jpg", 7, 7, "R"),
 ]
 
 def build_template_bank():

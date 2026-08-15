@@ -105,6 +105,23 @@ class UciProtocolParserTest {
     }
 
     @Test
+    fun testFallbackBishopMovesDiagonally() {
+        // 白方只有一个主教在 g5，验证走法必须为斜向 (绝对不能出现 g5g6 等直冲走法)
+        val fen = "8/8/8/6B1/8/8/8/4K2k w - - 0 1"
+        val eval = StockfishBridge.evaluateFallback(fen)
+        assertEquals(0, eval.depth)
+        assertEquals(0.0f, eval.evalScore, 0.001f)
+        
+        val fromSquare = eval.bestMove.substring(0, 2)
+        val toSquare = eval.bestMove.substring(2, 4)
+        assertEquals("g5", fromSquare)
+        
+        val dc = Math.abs(toSquare[0] - fromSquare[0])
+        val dr = Math.abs(toSquare[1] - fromSquare[1])
+        assertTrue("Bishop move must be diagonal (dc == dr)", dc == dr && dc > 0)
+    }
+
+    @Test
     fun testInvalidOrIrrelevantLines() {
         val invalidLine = "info currmove e2e4 currmovenumber 1"
         assertEquals(null, StockfishBridge.parseBestMoveLine(invalidLine))

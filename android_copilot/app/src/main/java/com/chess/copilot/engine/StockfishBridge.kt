@@ -16,17 +16,20 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.util.regex.Pattern
 
 /**
- * 响应式 Stockfish UCI 引擎管道桥接（借鉴 Lichess Mobile 官方事件流架构）
+ * 响应式 Stockfish UCI 引擎管道桥接（V7 双保险执行与严格棋规版）
  * 核心机制：
- * 1. 专职后台 I/O 读协程持续阻塞读取管道，通过 Channel<String> 异步推流，彻底告别 ready() 轮询
- * 2. 严密的生命周期管理：进程销毁自然关闭管道、Respawn 清理旧 Channel、go 前排空历史残行
- * 3. 严格的 UCI 握手与全链路诊断日志
- * 4. 局势结果 LRU 缓存（仅缓存真实引擎结果，严禁缓存 fallback 兜底）
+ * 1. nativeLibraryDir 优先 + filesDir 自动复制与 setExecutable(true) 兜底双保险
+ * 2. 专职后台 I/O 读协程持续阻塞读取管道，通过 Channel<String> 异步推流
+ * 3. 严格 UCI 握手与全链路诊断日志
+ * 4. 彻底重构 evaluateFallback 走法规则（主教斜走、车直走、后八向），标明 depth=0 兜底
+ * 5. 严格遵守"fallback 结果绝对不写入 evalCache"规则
  */
 object StockfishBridge {
 
@@ -35,7 +38,7 @@ object StockfishBridge {
     data class EngineEvaluation(
         val bestMove: String,     // UCI 走法，如 "e2e4", "e7e8q"
         val evalScore: Float,     // 局面评分，如 +0.58, -1.20
-        val depth: Int,           // 搜索深度，如 12
+        val depth: Int,           // 搜索深度 (真实引擎 >= 10, 兜底为 0)
         val isMate: Boolean = false
     )
 
@@ -52,7 +55,7 @@ object StockfishBridge {
     private val engineMutex = Mutex()
     private val scope = CoroutineScope(Dispatchers.IO)
 
-    // LRU 缓存：缓存最近 32 个局面的分析结果，保证确定性
+    // LRU 缓存：缓存最近 32 个局面的真实分析结果
     private val evalCache = LruCache<String, EngineEvaluation>(32)
 
     private val bestMovePattern = Pattern.compile("^bestmove\\s+([a-h][1-8][a-h][1-8][qrbnQRBN]?|\\(none\\))")
@@ -80,11 +83,33 @@ object StockfishBridge {
 
         try {
             val nativeLibDir = context.applicationInfo.nativeLibraryDir
-            val binaryFile = File(nativeLibDir, "libstockfish.so")
-            Log.i(TAG, "Locating Stockfish binary at: ${binaryFile.absolutePath}, exists=${binaryFile.exists()}, canExec=${binaryFile.canExecute()}")
+            var binaryFile = File(nativeLibDir, "libstockfish.so")
+            Log.i(TAG, "Locating Stockfish binary at nativeLibraryDir: ${binaryFile.absolutePath}, exists=${binaryFile.exists()}, canExec=${binaryFile.canExecute()}")
 
+            // 双保险方案：若 nativeLibraryDir 无法执行，复制到 filesDir 赋予 +x 权限
             if (!binaryFile.exists() || !binaryFile.canExecute()) {
-                Log.w(TAG, "libstockfish.so not found or not executable in $nativeLibDir, fallback will be used")
+                val fallbackBin = File(context.filesDir, "libstockfish.so")
+                if (binaryFile.exists()) {
+                    try {
+                        if (!fallbackBin.exists() || fallbackBin.length() != binaryFile.length()) {
+                            Log.i(TAG, "Copying libstockfish.so to filesDir: ${fallbackBin.absolutePath}")
+                            FileInputStream(binaryFile).use { input ->
+                                FileOutputStream(fallbackBin).use { output ->
+                                    input.copyTo(output)
+                                }
+                            }
+                        }
+                        fallbackBin.setExecutable(true, false)
+                        Log.i(TAG, "filesDir binary prepared: exists=${fallbackBin.exists()}, canExec=${fallbackBin.canExecute()}")
+                        binaryFile = fallbackBin
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to copy libstockfish.so to filesDir: ${e.message}")
+                    }
+                }
+            }
+
+            if (!binaryFile.exists()) {
+                Log.w(TAG, "libstockfish.so binary not found, fallback will be used")
                 isEngineReady = false
                 return
             }
@@ -329,7 +354,7 @@ object StockfishBridge {
     }
 
     /**
-     * 智能合法走法兜底生成器（仅作底层二进制不可用时的极端兜底）
+     * 智能合法走法兜底生成器（严格棋规实现：主教斜走、车直走、后八向、马日字、兵直行斜吃）
      */
     fun evaluateFallback(fen: String): EngineEvaluation {
         val parts = fen.split(" ")
@@ -373,6 +398,19 @@ object StockfishBridge {
                                 legalMoves.add("$fromSquare${('a' + c)}${8 - doubleNextR}")
                             }
                         }
+                        // 斜向吃子
+                        for (dc in arrayOf(-1, 1)) {
+                            val targetC = c + dc
+                            if (nextR in 0..7 && targetC in 0..7) {
+                                val target = board[nextR][targetC]
+                                val isEnemy = if (isWhite) (target != '.' && target.isLowerCase())
+                                else (target != '.' && target.isUpperCase())
+                                if (isEnemy) {
+                                    val promoSuffix = if (nextR == 0 || nextR == 7) "q" else ""
+                                    legalMoves.add("$fromSquare${('a' + targetC)}${8 - nextR}$promoSuffix")
+                                }
+                            }
+                        }
                     }
                     'N' -> {
                         val offsets = arrayOf(
@@ -392,13 +430,94 @@ object StockfishBridge {
                             }
                         }
                     }
-                    else -> {
-                        val steps = arrayOf(Pair(-1, 0), Pair(1, 0), Pair(0, -1), Pair(0, 1))
-                        for ((dr, dc) in steps) {
+                    'B' -> {
+                        // 主教：仅沿 4 个斜对角线移动
+                        val diagDirs = arrayOf(Pair(-1, -1), Pair(-1, 1), Pair(1, -1), Pair(1, 1))
+                        for ((dr, dc) in diagDirs) {
+                            var step = 1
+                            while (true) {
+                                val nr = r + dr * step
+                                val nc = c + dc * step
+                                if (nr !in 0..7 || nc !in 0..7) break
+                                val target = board[nr][nc]
+                                if (target == '.') {
+                                    legalMoves.add("$fromSquare${('a' + nc)}${8 - nr}")
+                                } else {
+                                    val isEnemy = if (isWhite) target.isLowerCase() else target.isUpperCase()
+                                    if (isEnemy) {
+                                        legalMoves.add("$fromSquare${('a' + nc)}${8 - nr}")
+                                    }
+                                    break
+                                }
+                                step++
+                            }
+                        }
+                    }
+                    'R' -> {
+                        // 车：仅沿 4 个正交方向移动
+                        val orthDirs = arrayOf(Pair(-1, 0), Pair(1, 0), Pair(0, -1), Pair(0, 1))
+                        for ((dr, dc) in orthDirs) {
+                            var step = 1
+                            while (true) {
+                                val nr = r + dr * step
+                                val nc = c + dc * step
+                                if (nr !in 0..7 || nc !in 0..7) break
+                                val target = board[nr][nc]
+                                if (target == '.') {
+                                    legalMoves.add("$fromSquare${('a' + nc)}${8 - nr}")
+                                } else {
+                                    val isEnemy = if (isWhite) target.isLowerCase() else target.isUpperCase()
+                                    if (isEnemy) {
+                                        legalMoves.add("$fromSquare${('a' + nc)}${8 - nr}")
+                                    }
+                                    break
+                                }
+                                step++
+                            }
+                        }
+                    }
+                    'Q' -> {
+                        // 后：8 个方向射线移动
+                        val allDirs = arrayOf(
+                            Pair(-1, 0), Pair(1, 0), Pair(0, -1), Pair(0, 1),
+                            Pair(-1, -1), Pair(-1, 1), Pair(1, -1), Pair(1, 1)
+                        )
+                        for ((dr, dc) in allDirs) {
+                            var step = 1
+                            while (true) {
+                                val nr = r + dr * step
+                                val nc = c + dc * step
+                                if (nr !in 0..7 || nc !in 0..7) break
+                                val target = board[nr][nc]
+                                if (target == '.') {
+                                    legalMoves.add("$fromSquare${('a' + nc)}${8 - nr}")
+                                } else {
+                                    val isEnemy = if (isWhite) target.isLowerCase() else target.isUpperCase()
+                                    if (isEnemy) {
+                                        legalMoves.add("$fromSquare${('a' + nc)}${8 - nr}")
+                                    }
+                                    break
+                                }
+                                step++
+                            }
+                        }
+                    }
+                    'K' -> {
+                        // 王：8 个方向单步移动
+                        val kingDirs = arrayOf(
+                            Pair(-1, 0), Pair(1, 0), Pair(0, -1), Pair(0, 1),
+                            Pair(-1, -1), Pair(-1, 1), Pair(1, -1), Pair(1, 1)
+                        )
+                        for ((dr, dc) in kingDirs) {
                             val nr = r + dr
                             val nc = c + dc
-                            if (nr in 0..7 && nc in 0..7 && board[nr][nc] == '.') {
-                                legalMoves.add("$fromSquare${('a' + nc)}${8 - nr}")
+                            if (nr in 0..7 && nc in 0..7) {
+                                val target = board[nr][nc]
+                                val isEnemyOrEmpty = if (isWhite) (target == '.' || target.isLowerCase())
+                                else (target == '.' || target.isUpperCase())
+                                if (isEnemyOrEmpty) {
+                                    legalMoves.add("$fromSquare${('a' + nc)}${8 - nr}")
+                                }
                             }
                         }
                     }
@@ -412,8 +531,8 @@ object StockfishBridge {
 
         return EngineEvaluation(
             bestMove = bestMove,
-            evalScore = if (isWhite) 0.15f else -0.15f,
-            depth = 6,
+            evalScore = 0.0f,
+            depth = 0,
             isMate = false
         )
     }

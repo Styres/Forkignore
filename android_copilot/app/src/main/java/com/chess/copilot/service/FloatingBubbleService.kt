@@ -294,16 +294,17 @@ class FloatingBubbleService : Service() {
                     ChessLocator.locateBoard(screenBitmap)
                 }
 
-                // 5. 梯度场 NCC + 2-Means 识别棋子矩阵与 FEN
+                // 5. 梯度场 NCC + 语义匹配质量门禁
                 val res = withContext(Dispatchers.Default) {
                     classifier?.classifyBoard(screenBitmap, boardRect)
                 }
 
+                val copyForDebug = try {
+                    screenBitmap.copy(screenBitmap.config ?: Bitmap.Config.ARGB_8888, false)
+                } catch (_: Exception) { null }
+
                 if (res != null) {
-                    // 6. 异步保存真机落盘诊断图与 FEN (深拷贝一份传入，杜绝 finally recycle 竞态)
-                    val copyForDebug = try {
-                        screenBitmap.copy(screenBitmap.config ?: Bitmap.Config.ARGB_8888, false)
-                    } catch (_: Exception) { null }
+                    // 6. 异步保存真机落盘诊断图与 FEN
                     saveDebugArtifactsAsync(copyForDebug, boardRect, res.fullFen)
 
                     // 7. Stockfish 引擎高速算招 (带缓存与自愈)
@@ -311,6 +312,13 @@ class FloatingBubbleService : Service() {
 
                     // 8. 在全透明 Canvas 上绘制走法箭头与局势胶囊
                     transparentOverlay?.showSuggestion(res.boardRect, eval, res.isWhitePerspective)
+                } else {
+                    // 语义门禁拦截（非棋盘画面或置信度不足）：清空图层并保存落盘记录
+                    transparentOverlay?.hide()
+                    saveDebugArtifactsAsync(copyForDebug, boardRect, "NO_BOARD_DETECTED")
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(this@FloatingBubbleService, "未检测到有效棋盘画面", Toast.LENGTH_SHORT).show()
+                    }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
