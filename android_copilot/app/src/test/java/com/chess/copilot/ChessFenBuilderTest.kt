@@ -160,4 +160,33 @@ class ChessFenBuilderTest {
             assertEquals(8, sum)
         }
     }
+
+    @Test
+    fun testBuildFenWithTelemetryAndPerspectiveLock() {
+        // 残局局面：白方兵子大举挺进中路，底线仅剩白王，黑后与黑车杀入白方底线 (底线黑子比白子多)
+        val endgameBoard = arrayOf(
+            charArrayOf('r', '.', '.', '.', 'k', '.', '.', '.'),
+            charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+            charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+            charArrayOf('.', '.', 'P', '.', '.', 'P', '.', '.'),
+            charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+            charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+            charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+            charArrayOf('q', '.', '.', '.', 'K', '.', '.', 'r')
+        )
+
+        // 验证 1: 带有底层 telemetry 参数的 buildFenFromBoard
+        val result = UltraRobustClassifier.buildFenFromBoard(
+            rawBoard = endgameBoard,
+            isWhitePerspective = true, // 会话视角锁定为执白
+            medianSim = 0.985f,
+            occupiedCount = 6
+        )
+
+        assertEquals("w", result.activeColor)
+        assertTrue(result.isWhitePerspective)
+        assertEquals(0.985f, result.medianSim, 0.001f)
+        assertEquals(6, result.occupiedCount)
+        assertEquals("r3k3/8/8/2P2P2/8/8/8/q3K2r", result.boardFen)
+    }
 }

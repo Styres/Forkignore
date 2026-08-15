@@ -36,6 +36,21 @@ class UltraRobustClassifier(context: Context? = null) {
         val gradMean: Float
     )
 
+    sealed class ClassificationResponse {
+        data class Success(
+            val result: DetectionResult,
+            val medianSim: Float,
+            val occupiedCount: Int,
+            val detectedPerspective: Boolean
+        ) : ClassificationResponse()
+
+        data class Rejected(
+            val reason: String,
+            val medianSim: Float,
+            val occupiedCount: Int
+        ) : ClassificationResponse()
+    }
+
     data class DetectionResult(
         val boardFen: String,
         val fullFen: String,
@@ -43,7 +58,9 @@ class UltraRobustClassifier(context: Context? = null) {
         val isWhitePerspective: Boolean,
         val rawBoard: Array<CharArray>,
         val standardBoard: Array<CharArray>,
-        val boardRect: Rect
+        val boardRect: Rect,
+        val medianSim: Float = 1.0f,
+        val occupiedCount: Int = 0
     )
 
     private val templates = mutableListOf<TemplateFeature>()
@@ -75,7 +92,15 @@ class UltraRobustClassifier(context: Context? = null) {
         }
     }
 
-    fun classifyBoard(bitmap: Bitmap, boardRect: Rect): DetectionResult? {
+    /**
+     * 详尽棋盘分类决策管道：返回带有底层置信度指标 (medianSim, occupiedCount) 与拦截原因的响应
+     * 支持传入会话锁定的 overridePerspective 防止残局视角误判
+     */
+    fun classifyBoardDetailed(
+        bitmap: Bitmap,
+        boardRect: Rect,
+        overridePerspective: Boolean? = null
+    ): ClassificationResponse {
         val step = (boardRect.right - boardRect.left) / 8.0f
         val cellsFeats = Array(8) { r ->
             Array(8) { c ->
@@ -143,7 +168,11 @@ class UltraRobustClassifier(context: Context? = null) {
 
         // 2. 棋盘语义质量门禁 (Semantic Quality Gating)
         if (occupiedList.size < 4) {
-            return null
+            return ClassificationResponse.Rejected(
+                reason = "占位棋子数不足 (${occupiedList.size} < 4)",
+                medianSim = 0.0f,
+                occupiedCount = occupiedList.size
+            )
         }
 
         val sortedSims = occupiedList.map { it.bestSimilarity }.sorted()
@@ -155,7 +184,11 @@ class UltraRobustClassifier(context: Context? = null) {
 
         // 非棋盘画面 (如路线图、大厅) 的中位数相似度极低 (实测 <= 0.378)，真实棋盘 >= 0.673
         if (medianSim < 0.52f) {
-            return null
+            return ClassificationResponse.Rejected(
+                reason = "相似度过低 (MedianSim=${String.format("%.3f", medianSim)} < 0.520)",
+                medianSim = medianSim,
+                occupiedCount = occupiedList.size
+            )
         }
 
         // 3. 自适应 2-Means 聚类区分黑白阵营
@@ -190,8 +223,29 @@ class UltraRobustClassifier(context: Context? = null) {
             }
         }
 
-        val isWhitePerspective = botWhite >= botBlack
-        return buildFenFromBoard(sanitizedBoard, isWhitePerspective, boardRect)
+        val detectedPerspective = botWhite >= botBlack
+        val effectivePerspective = overridePerspective ?: detectedPerspective
+        val result = buildFenFromBoard(
+            rawBoard = sanitizedBoard,
+            isWhitePerspective = effectivePerspective,
+            boardRect = boardRect,
+            medianSim = medianSim,
+            occupiedCount = occupiedList.size
+        )
+
+        return ClassificationResponse.Success(
+            result = result,
+            medianSim = medianSim,
+            occupiedCount = occupiedList.size,
+            detectedPerspective = detectedPerspective
+        )
+    }
+
+    fun classifyBoard(bitmap: Bitmap, boardRect: Rect): DetectionResult? {
+        return when (val resp = classifyBoardDetailed(bitmap, boardRect)) {
+            is ClassificationResponse.Success -> resp.result
+            is ClassificationResponse.Rejected -> null
+        }
     }
 
     /**
@@ -521,7 +575,9 @@ class UltraRobustClassifier(context: Context? = null) {
         fun buildFenFromBoard(
             rawBoard: Array<CharArray>,
             isWhitePerspective: Boolean,
-            boardRect: Rect = Rect()
+            boardRect: Rect = Rect(),
+            medianSim: Float = 1.0f,
+            occupiedCount: Int = 0
         ): DetectionResult {
             val standardBoard = if (isWhitePerspective) {
                 rawBoard
@@ -541,7 +597,9 @@ class UltraRobustClassifier(context: Context? = null) {
                 isWhitePerspective = isWhitePerspective,
                 rawBoard = rawBoard,
                 standardBoard = standardBoard,
-                boardRect = boardRect
+                boardRect = boardRect,
+                medianSim = medianSim,
+                occupiedCount = occupiedCount
             )
         }
     }

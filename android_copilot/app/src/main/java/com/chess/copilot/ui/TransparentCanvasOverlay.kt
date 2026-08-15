@@ -38,6 +38,8 @@ class TransparentCanvasOverlay(private val context: Context) {
         var boardRect: Rect? = null
         var moveInfo: StockfishBridge.EngineEvaluation? = null
         var isWhitePerspective: Boolean = true
+        var medianSim: Float = 1.0f
+        var occupiedCount: Int = 0
 
         private val startPaint = Paint().apply {
             color = Color.argb(130, 0, 230, 115) // 半透明青绿
@@ -53,10 +55,10 @@ class TransparentCanvasOverlay(private val context: Context) {
 
         private val arrowPaint = Paint().apply {
             color = Color.rgb(0, 255, 128) // 荧光亮绿
-            style = Paint.Style.STROKE
             strokeWidth = 14f
             strokeCap = Paint.Cap.ROUND
             strokeJoin = Paint.Join.ROUND
+            style = Paint.Style.STROKE
             isAntiAlias = true
         }
 
@@ -67,16 +69,22 @@ class TransparentCanvasOverlay(private val context: Context) {
         }
 
         private val textBgPaint = Paint().apply {
-            color = Color.argb(225, 25, 25, 25)
+            color = Color.argb(230, 20, 24, 30)
             style = Paint.Style.FILL
             isAntiAlias = true
         }
 
         private val textPaint = Paint().apply {
             color = Color.WHITE
-            textSize = 38f
+            textSize = 34f
             isAntiAlias = true
             isFakeBoldText = true
+        }
+
+        private val subTextPaint = Paint().apply {
+            color = Color.rgb(180, 215, 255)
+            textSize = 26f
+            isAntiAlias = true
         }
 
         override fun onDraw(canvas: Canvas) {
@@ -86,20 +94,24 @@ class TransparentCanvasOverlay(private val context: Context) {
 
             val step = (rect.right - rect.left) / 8.0f
             val uci = move.bestMove
+            val perspectiveStr = if (isWhitePerspective) "执白" else "执黑"
+            val pillW = 580f
+            val pillH = 105f
+            val pillX = rect.left + (rect.width() - pillW) / 2f
+            val pillY = (rect.top - pillH - 25f).coerceAtLeast(50f)
+
             if (uci.length < 4 || uci == "(none)" || uci == "(checkmate)" || uci == "(stalemate)") {
                 val statusStr = when {
                     move.isMate || uci == "(checkmate)" -> "胜负已分 (将杀)"
                     uci == "(stalemate)" -> "和棋 (逼和)"
                     else -> "无合法走法"
                 }
-                val scoreText = "局面: $statusStr"
-                val pillW = 520f
-                val pillH = 75f
-                val pillX = rect.left + (rect.width() - pillW) / 2f
-                val pillY = (rect.top - pillH - 25f).coerceAtLeast(50f)
+                val line1 = "局面: $statusStr"
+                val line2 = "视角: $perspectiveStr | Sim: ${String.format("%.3f", medianSim)} | 占位: $occupiedCount"
 
-                canvas.drawRoundRect(RectF(pillX, pillY, pillX + pillW, pillY + pillH), 38f, 38f, textBgPaint)
-                canvas.drawText(scoreText, pillX + 30f, pillY + 50f, textPaint)
+                canvas.drawRoundRect(RectF(pillX, pillY, pillX + pillW, pillY + pillH), 24f, 24f, textBgPaint)
+                canvas.drawText(line1, pillX + 24f, pillY + 42f, textPaint)
+                canvas.drawText(line2, pillX + 24f, pillY + 84f, subTextPaint)
                 return
             }
 
@@ -128,17 +140,15 @@ class TransparentCanvasOverlay(private val context: Context) {
             canvas.drawLine(x1, y1, x2, y2, arrowPaint)
             drawArrowHead(canvas, x1, y1, x2, y2)
 
-            // 3. 绘制上方局势胶囊
+            // 3. 绘制上方局势胶囊 (双行卡片: 招法评估 + 底层取证遥测)
             val scoreStr = if (move.isMate) "MATE" else "${if (move.evalScore >= 0) "+" else ""}${String.format("%.2f", move.evalScore)}"
             val depthStr = if (move.depth <= 0) "[兜底]" else "深${move.depth}"
-            val scoreText = "招法: ${move.bestMove} | 评估: $scoreStr ($depthStr)"
-            val pillW = 520f
-            val pillH = 75f
-            val pillX = rect.left + (rect.width() - pillW) / 2f
-            val pillY = (rect.top - pillH - 25f).coerceAtLeast(50f)
+            val line1 = "招法: ${move.bestMove} | 评估: $scoreStr ($depthStr)"
+            val line2 = "视角: $perspectiveStr | Sim: ${String.format("%.3f", medianSim)} | 占位: $occupiedCount"
 
-            canvas.drawRoundRect(RectF(pillX, pillY, pillX + pillW, pillY + pillH), 38f, 38f, textBgPaint)
-            canvas.drawText(scoreText, pillX + 30f, pillY + 50f, textPaint)
+            canvas.drawRoundRect(RectF(pillX, pillY, pillX + pillW, pillY + pillH), 24f, 24f, textBgPaint)
+            canvas.drawText(line1, pillX + 24f, pillY + 42f, textPaint)
+            canvas.drawText(line2, pillX + 24f, pillY + 84f, subTextPaint)
         }
 
         private fun drawArrowHead(canvas: Canvas, x1: Float, y1: Float, x2: Float, y2: Float) {
@@ -161,7 +171,13 @@ class TransparentCanvasOverlay(private val context: Context) {
         }
     }
 
-    fun showSuggestion(boardRect: Rect, moveInfo: StockfishBridge.EngineEvaluation, isWhitePerspective: Boolean) {
+    fun showSuggestion(
+        boardRect: Rect,
+        moveInfo: StockfishBridge.EngineEvaluation,
+        isWhitePerspective: Boolean,
+        medianSim: Float = 1.0f,
+        occupiedCount: Int = 0
+    ) {
         if (overlayView == null) {
             overlayView = OverlayDrawView(context)
             val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -194,6 +210,8 @@ class TransparentCanvasOverlay(private val context: Context) {
             this.boardRect = boardRect
             this.moveInfo = moveInfo
             this.isWhitePerspective = isWhitePerspective
+            this.medianSim = medianSim
+            this.occupiedCount = occupiedCount
             postInvalidate()
         }
 

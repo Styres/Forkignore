@@ -80,6 +80,8 @@ class FloatingBubbleService : Service() {
     private var isAnalyzing = false
     @Volatile
     private var isCapturingFrame = false
+    @Volatile
+    private var sessionLockedPerspective: Boolean? = null
 
     private val serviceJob = Job()
     private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
@@ -100,10 +102,8 @@ class FloatingBubbleService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // 1. Android 14 严格要求：必须先调用 startForeground 指定 mediaProjection 类型
         startForegroundNotification()
 
-        // 2. 提取截屏授权 Token 并初始化常驻 VirtualDisplay 会话
         if (intent != null) {
             val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
             val resultData = IntentCompat.getParcelableExtra(intent, EXTRA_RESULT_DATA, Intent::class.java)
@@ -120,17 +120,22 @@ class FloatingBubbleService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Duolingo Chess Copilot",
+                "多邻国国象助手",
                 NotificationManager.IMPORTANCE_LOW
-            )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(channel)
+            ).apply {
+                description = "屏幕悬浮辅助服务"
+                setShowBadge(false)
+            }
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(channel)
         }
 
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Duolingo Chess Copilot")
-            .setContentText("悬浮助手正在运行，轻点屏幕悬浮球即可出招")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("多邻国国际象棋助手正在运行")
+            .setContentText("点击屏幕悬浮球即可获取 Stockfish 实时最佳走法")
+            .setSmallIcon(android.R.drawable.ic_menu_compass)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -142,60 +147,62 @@ class FloatingBubbleService : Service() {
 
     private fun updateScreenMetrics() {
         val metrics = DisplayMetrics()
-        @Suppress("DEPRECATION")
-        windowManager.defaultDisplay.getRealMetrics(metrics)
-        screenWidth = metrics.widthPixels
-        screenHeight = metrics.heightPixels
-        screenDensity = metrics.densityDpi
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val windowMetrics = windowManager.currentWindowMetrics
+            val bounds = windowMetrics.bounds
+            screenWidth = bounds.width()
+            screenHeight = bounds.height()
+            screenDensity = resources.displayMetrics.densityDpi
+        } else {
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.getRealMetrics(metrics)
+            screenWidth = metrics.widthPixels
+            screenHeight = metrics.heightPixels
+            screenDensity = metrics.densityDpi
+        }
     }
 
-    private fun setupMediaProjection(resultCode: Int, data: Intent) {
+    private fun setupMediaProjection(resultCode: Int, resultData: Intent) {
         try {
-            cleanupProjection()
-            updateScreenMetrics()
+            mediaProjection = mediaProjectionManager?.getMediaProjection(resultCode, resultData)
+            if (mediaProjection == null) {
+                Toast.makeText(this, "MediaProjection 初始化失败", Toast.LENGTH_SHORT).show()
+                return
+            }
 
-            val proj = mediaProjectionManager?.getMediaProjection(resultCode, data)
-            mediaProjection = proj
-            proj?.registerCallback(object : MediaProjection.Callback() {
-                override fun onStop() {
-                    cleanupProjection()
-                }
-            }, captureHandler)
+            imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 3)
 
-            val reader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
-            imageReader = reader
-
-            // 挂载后台长驻监听，持续消费并丢弃过渡帧，确保缓冲区不堆积
-            reader.setOnImageAvailableListener({ ir ->
-                if (!isCapturingFrame) {
-                    try {
-                        val img = ir.acquireLatestImage()
-                        img?.close()
-                    } catch (_: Exception) {}
-                }
-            }, captureHandler)
-
-            virtualDisplay = proj?.createVirtualDisplay(
-                "ChessPersistentDisplay",
+            virtualDisplay = mediaProjection?.createVirtualDisplay(
+                "ChessScreenCapture",
                 screenWidth,
                 screenHeight,
                 screenDensity,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                reader.surface,
+                imageReader!!.surface,
                 null,
                 captureHandler
             )
+
+            imageReader?.setOnImageAvailableListener({ reader ->
+                if (!isCapturingFrame) {
+                    val img = reader.acquireLatestImage()
+                    img?.close()
+                }
+            }, captureHandler)
+
+            Toast.makeText(this, "悬浮助手已就绪", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             e.printStackTrace()
-            Toast.makeText(this, "截屏初始化异常: ${e.message}", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "启动截屏会话异常: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
     private fun createFloatingBubble() {
         bubbleView = ImageView(this).apply {
             setImageResource(android.R.drawable.ic_menu_compass)
-            setBackgroundColor(Color.argb(220, 30, 180, 80))
+            setBackgroundColor(Color.argb(210, 88, 204, 2))
             setPadding(20, 20, 20, 20)
+            elevation = 25f
         }
 
         val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -205,15 +212,15 @@ class FloatingBubbleService : Service() {
         }
 
         val params = WindowManager.LayoutParams(
-            135,
-            135,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
             layoutType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 30
-            y = 500
+            x = screenWidth - 180
+            y = screenHeight / 3
         }
 
         bubbleView?.setOnTouchListener(object : View.OnTouchListener {
@@ -223,7 +230,7 @@ class FloatingBubbleService : Service() {
             private var initialTouchY = 0f
             private var isClick = false
 
-            override fun onTouch(v: View?, event: MotionEvent): Boolean {
+            override fun onTouch(v: View, event: MotionEvent): Boolean {
                 when (event.action) {
                     MotionEvent.ACTION_DOWN -> {
                         initialX = params.x
@@ -236,9 +243,11 @@ class FloatingBubbleService : Service() {
                     MotionEvent.ACTION_MOVE -> {
                         val dx = event.rawX - initialTouchX
                         val dy = event.rawY - initialTouchY
-                        if (dx * dx + dy * dy > 100) isClick = false
-                        params.x = initialX + dx.toInt()
-                        params.y = initialY + dy.toInt()
+                        if (dx * dx + dy * dy > 25) {
+                            isClick = false
+                        }
+                        params.x = (initialX + dx).toInt()
+                        params.y = (initialY + dy).toInt()
                         windowManager.updateViewLayout(bubbleView, params)
                         return true
                     }
@@ -273,15 +282,12 @@ class FloatingBubbleService : Service() {
         serviceScope.launch {
             var screenBitmap: Bitmap? = null
             try {
-                // 1. 消除 Overlay 自污染：截帧前隐藏悬浮球与透明走法图层
                 transparentOverlay?.hide()
                 bubbleView?.visibility = View.INVISIBLE
-                delay(45) // 等待 45ms 确保屏幕完成无图层合成
+                delay(60)
 
-                // 2. 从常驻 ImageReader 中获取最新纯净鲜活帧
                 screenBitmap = captureCurrentScreenBitmap()
 
-                // 3. 恢复悬浮球显示
                 bubbleView?.visibility = View.VISIBLE
 
                 if (screenBitmap == null) {
@@ -289,35 +295,67 @@ class FloatingBubbleService : Service() {
                     return@launch
                 }
 
-                // 4. SAT 棋盘定位
                 val boardRect = withContext(Dispatchers.Default) {
                     ChessLocator.locateBoard(screenBitmap)
                 }
 
-                // 5. 梯度场 NCC + 语义匹配质量门禁
-                val res = withContext(Dispatchers.Default) {
-                    classifier?.classifyBoard(screenBitmap, boardRect)
+                val detailedResp = withContext(Dispatchers.Default) {
+                    classifier?.classifyBoardDetailed(
+                        bitmap = screenBitmap,
+                        boardRect = boardRect,
+                        overridePerspective = sessionLockedPerspective
+                    )
                 }
 
                 val copyForDebug = try {
                     screenBitmap.copy(screenBitmap.config ?: Bitmap.Config.ARGB_8888, false)
                 } catch (_: Exception) { null }
 
-                if (res != null) {
-                    // 6. 异步保存真机落盘诊断图与 FEN
-                    saveDebugArtifactsAsync(copyForDebug, boardRect, res.fullFen)
+                when (detailedResp) {
+                    is UltraRobustClassifier.ClassificationResponse.Success -> {
+                        val res = detailedResp.result
+                        if (sessionLockedPerspective == null || detailedResp.occupiedCount >= 28) {
+                            sessionLockedPerspective = res.isWhitePerspective
+                        }
+                        val lockedStateDesc = if (sessionLockedPerspective != null) "(锁定)" else ""
+                        val perspectiveName = if (res.isWhitePerspective) "执白$lockedStateDesc" else "执黑$lockedStateDesc"
 
-                    // 7. Stockfish 引擎高速算招 (带缓存与自愈)
-                    val eval = StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = 120)
+                        saveDebugArtifactsAsync(copyForDebug, boardRect, res.fullFen)
 
-                    // 8. 在全透明 Canvas 上绘制走法箭头与局势胶囊
-                    transparentOverlay?.showSuggestion(res.boardRect, eval, res.isWhitePerspective)
-                } else {
-                    // 语义门禁拦截（非棋盘画面或置信度不足）：清空图层并保存落盘记录
-                    transparentOverlay?.hide()
-                    saveDebugArtifactsAsync(copyForDebug, boardRect, "NO_BOARD_DETECTED")
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(this@FloatingBubbleService, "未检测到有效棋盘画面", Toast.LENGTH_SHORT).show()
+                        val eval = StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = 200)
+
+                        transparentOverlay?.showSuggestion(
+                            boardRect = res.boardRect,
+                            moveInfo = eval,
+                            isWhitePerspective = res.isWhitePerspective,
+                            medianSim = detailedResp.medianSim,
+                            occupiedCount = detailedResp.occupiedCount
+                        )
+
+                        withContext(Dispatchers.Main) {
+                            Toast.makeText(
+                                this@FloatingBubbleService,
+                                "【检测成功】视角: $perspectiveName | Sim: ${String.format("%.3f", detailedResp.medianSim)} | 占位: ${detailedResp.occupiedCount}",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                    is UltraRobustClassifier.ClassificationResponse.Rejected -> {
+                        transparentOverlay?.hide()
+                        saveDebugArtifactsAsync(copyForDebug, boardRect, "REJECTED_${detailedResp.reason}")
+                        withContext(Dispatchers.Main) {
+                            Toast.makeText(
+                                this@FloatingBubbleService,
+                                "【门禁拦截】原因: ${detailedResp.reason} (Sim=${String.format("%.3f", detailedResp.medianSim)}, 占位=${detailedResp.occupiedCount})",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                    null -> {
+                        transparentOverlay?.hide()
+                        withContext(Dispatchers.Main) {
+                            Toast.makeText(this@FloatingBubbleService, "分类器未初始化", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -330,16 +368,18 @@ class FloatingBubbleService : Service() {
         }
     }
 
-    /**
-     * 从常驻 ImageReader 中提取当前最新鲜一帧 Bitmap
-     */
     private suspend fun captureCurrentScreenBitmap(): Bitmap? = withContext(Dispatchers.IO) {
         val reader = imageReader ?: return@withContext null
         isCapturingFrame = true
         try {
+            while (true) {
+                val stale = reader.acquireLatestImage() ?: break
+                stale.close()
+            }
+
             var bmp: Bitmap? = null
             val start = System.currentTimeMillis()
-            while (System.currentTimeMillis() - start < 250L) {
+            while (System.currentTimeMillis() - start < 350L) {
                 val image = reader.acquireLatestImage()
                 if (image != null) {
                     try {
@@ -366,7 +406,7 @@ class FloatingBubbleService : Service() {
                     }
                     break
                 } else {
-                    delay(10)
+                    delay(15)
                 }
             }
             return@withContext bmp
