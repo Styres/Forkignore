@@ -85,6 +85,29 @@ class FallbackRulesTest {
     }
 
     @Test
+    fun testBug8Bug10RealGameNoFalseCheckFiltering() {
+        // bug_8.jpg / bug_10.jpg 真机局面 (OCR 视角: 执黑): 黑王 e8 未被将军
+        // (Qg4 的 g 线被黑方 g7 兵自挡，斜线被 d7 兵挡)，真机兜底确定性输出 b8a8 (rxa8)
+        // 回归目标: 试走过滤器不得误判该局面为被将/误杀合法走法，且非法王走法 (走入 Bd6 射线) 必须被剔除
+        val fenBug8 = "Nrb1k2r/pp1p2pp/3B1p2/3Bp3/4P1Q1/8/PPP2P1P/RN1R2K1 b KQkq - 0 1"
+        val eval = StockfishBridge.evaluateFallback(fenBug8)
+
+        val legalMoves = setOf(
+            "b8a8", "e8d8", "h8g8", "h8f8",
+            "a7a6", "a7a5", "b7b6", "b7b5",
+            "g7g6", "g7g5", "h7h6", "h7h5", "f6f5"
+        )
+        val illegalKingMoves = setOf("e8e7", "e8f8", "e8f7")
+
+        println("testBug8Bug10RealGameNoFalseCheckFiltering bestMove=${eval.bestMove}")
+        assertTrue("生成的走法 ${eval.bestMove} 必须属于合法走法集合 $legalMoves", legalMoves.contains(eval.bestMove))
+        assertFalse("不得输出走入 Bd6 射线的非法王走法", illegalKingMoves.contains(eval.bestMove))
+        assertEquals("真机 bug_8/bug_10 确定性输出应为 b8a8", "b8a8", eval.bestMove)
+        assertEquals(0, eval.depth)
+        assertFalse(eval.isMate)
+    }
+
+    @Test
     fun testExtractBinaryFromZipSynthetic() {
         // 纯内存合成包含 lib/arm64-v8a/libstockfish.so 的测试 Zip 文件
         val tempZipFile = File.createTempFile("test_apk", ".zip")

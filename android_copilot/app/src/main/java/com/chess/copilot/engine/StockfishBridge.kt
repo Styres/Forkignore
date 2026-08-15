@@ -36,6 +36,10 @@ object StockfishBridge {
 
     private const val TAG = "StockfishBridge"
 
+    // NNUE 评估网络 (bug_10 真机取证: 缺网络时引擎在首次搜索时自行终止，握手成功是假就绪)
+    // 文件名与引擎编译期内置默认网络严格一致，切勿随意更名
+    private const val NNUE_ASSET_NAME = "nnue/nn-5af11540bbfe.nnue"
+
     data class EngineEvaluation(
         val bestMove: String,     // UCI 走法，如 "e2e4", "e7e8q"
         val evalScore: Float,     // 局面评分，如 +0.58, -1.20
@@ -52,6 +56,9 @@ object StockfishBridge {
     @Volatile
     private var isEngineReady: Boolean = false
     private var appContext: Context? = null
+
+    // 引擎自报的 ERROR 行 (如缺 NNUE 网络)，供握手失败诊断引用
+    private var lastEngineError: String? = null
 
     @Volatile
     var lastDiagnosticInfo: String = "引擎尚未初始化"
@@ -179,8 +186,14 @@ object StockfishBridge {
                 return
             }
 
+            // 保障 2.5: NNUE 评估网络就绪 (缺网络时引擎会在首次搜索时打印 ERROR 并自杀)
+            val nnueDir = File(context.filesDir, "nnue")
+            val nnueFile = ensureNnueFile(context, nnueDir, diag)
+
             val pb = ProcessBuilder(selectedBinary.absolutePath)
             pb.redirectErrorStream(true)
+            // 引擎默认从工作目录按内置默认文件名查找网络，cwd 指向网络目录双保险
+            pb.directory(nnueDir)
             val p = pb.start()
             process = p
             diag.append("进程启动: 成功 ($startupPathDesc)\n")
@@ -215,6 +228,8 @@ object StockfishBridge {
             diag.append("握手 [uciok]: ${if (uciOk) "成功 (${uciElapsed}ms)" else "超时失败 (${uciElapsed}ms)"}\n")
 
             if (uciOk) {
+                // 显式指定评估网络绝对路径 (与 cwd 双保险)
+                nnueFile?.let { sendCommand("setoption name EvalFile value ${it.absolutePath}") }
                 sendCommand("ucinewgame")
                 val readyStart = System.currentTimeMillis()
                 sendCommand("isready")
@@ -229,12 +244,12 @@ object StockfishBridge {
                     lastDiagnosticInfo = "【引擎就绪 ($startupPathDesc)】\n$diag"
                     Log.i(TAG, "Stockfish ready successfully\n$diag")
                 } else {
-                    lastDiagnosticInfo = "【引擎握手失败】\n$diag\nreadyok 超时，销毁进程"
+                    lastDiagnosticInfo = "【引擎握手失败】\n$diag\nreadyok 超时，销毁进程${lastEngineError?.let { "\n引擎报错: $it" } ?: ""}"
                     isEngineReady = false
                     destroyProcessLocked()
                 }
             } else {
-                lastDiagnosticInfo = "【引擎握手失败】\n$diag\nuciok 超时，销毁进程"
+                lastDiagnosticInfo = "【引擎握手失败】\n$diag\nuciok 超时，销毁进程${lastEngineError?.let { "\n引擎报错: $it" } ?: ""}"
                 isEngineReady = false
                 destroyProcessLocked()
             }
@@ -243,6 +258,35 @@ object StockfishBridge {
             lastDiagnosticInfo = "【引擎启动异常】\n$diag"
             Log.e(TAG, "Failed to start Stockfish process\n$diag", e)
             destroyProcessLocked()
+        }
+    }
+
+    /**
+     * 确保 NNUE 评估网络在 filesDir 就绪 (assets -> .tmp 原子拷贝 -> rename，带尺寸复查与缓存复用)
+     */
+    private fun ensureNnueFile(context: Context, nnueDir: File, diag: StringBuilder): File? {
+        try {
+            if (!nnueDir.exists()) nnueDir.mkdirs()
+            val target = File(nnueDir, NNUE_ASSET_NAME.substringAfterLast('/'))
+            if (target.exists() && target.length() > 1024 * 1024) {
+                diag.append("NNUE [缓存]: 就绪 (${target.length()} bytes)\n")
+                return target
+            }
+            val tmp = File(nnueDir, target.name + ".tmp")
+            context.assets.open(NNUE_ASSET_NAME).use { input ->
+                FileOutputStream(tmp).use { out -> input.copyTo(out) }
+            }
+            return if (tmp.length() > 1024 * 1024 && tmp.renameTo(target)) {
+                diag.append("NNUE [提取]: 成功 (${target.length()} bytes)\n")
+                target
+            } else {
+                tmp.delete()
+                diag.append("NNUE [提取]: 失败 (尺寸或 rename 异常)\n")
+                null
+            }
+        } catch (e: Exception) {
+            diag.append("NNUE [提取异常]: ${e.javaClass.simpleName}: ${e.message}\n")
+            return null
         }
     }
 
@@ -273,6 +317,13 @@ object StockfishBridge {
                     null
                 }
             } ?: break
+
+            // 引擎自报 ERROR (如缺 NNUE 网络) 时立即判负，避免傻等到超时
+            if (line.contains("ERROR")) {
+                lastEngineError = line
+                Log.w(TAG, "Stockfish reported ERROR during handshake: $line")
+                return false
+            }
 
             if (line.contains(expected)) {
                 return true
@@ -367,7 +418,7 @@ object StockfishBridge {
                         val result = EngineEvaluation(
                             bestMove = bestMoveResult,
                             evalScore = lastEval?.evalScore ?: 0.0f,
-                            depth = if ((lastEval?.depth ?: -1) > 0) lastEval!!.depth else 10,
+                            depth = if ((lastEval?.depth ?: -1) > 0) lastEval!!.depth else 0,
                             isMate = lastEval?.isMate ?: false
                         )
                         val totalElapsed = System.currentTimeMillis() - evalStartTime
