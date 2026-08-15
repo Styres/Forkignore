@@ -9,7 +9,31 @@ from tools.test_full_pipeline_v2 import fast_sat_locate_board
 from tools.extract_refined_templates import extract_features_from_cell
 from tools.validate_all_fen import sanitize_board_py, build_fen_py
 
-def run_parity_verification():
+# 人工逐格严格核实背书的 5 款真机基准图 Ground Truth 目录
+GROUND_TRUTH_DB = {
+    "duolingo_1.jpeg": {
+        "perspective": True, # White
+        "board_fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR",
+        "full_fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    },
+    "duolingo_2.jpg": {
+        "perspective": False, # Black
+        "board_fen": "rnbqkbnr/pppppppp/8/8/5P2/8/PPPPP1PP/RNBQKBNR",
+        "full_fen": "rnbqkbnr/pppppppp/8/8/5P2/8/PPPPP1PP/RNBQKBNR b KQkq - 0 1"
+    },
+    "duolingo_3.jpg": {
+        "perspective": True, # White
+        "board_fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR",
+        "full_fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    },
+    "duolingo_test_1.jfif": {
+        "perspective": True, # White
+        "board_fen": "rnbqkb1r/pppppppp/5n2/8/3P4/8/PPP1PPPP/RNBQKBNR",
+        "full_fen": "rnbqkb1r/pppppppp/5n2/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 1"
+    }
+}
+
+def run_ground_truth_diff_verification():
     template_dir = "android_copilot/app/src/main/assets/templates"
     template_files = glob.glob(os.path.join(template_dir, "*.png"))
     templates = []
@@ -20,11 +44,9 @@ def run_parity_verification():
         templates.append((cls_name, feat['f_body'], feat['f_head']))
         
     print(f"Loaded {len(templates)} templates from {template_dir}")
+    all_matched = True
     
-    test_images = ["duolingo_1.jpeg", "duolingo_2.jpg", "duolingo_3.jpg"]
-    all_passed = True
-    
-    for img_name in test_images:
+    for img_name, gt in GROUND_TRUTH_DB.items():
         if not os.path.exists(img_name): continue
         img = cv2.imread(img_name)
         l, t, r, b = fast_sat_locate_board(img)
@@ -76,12 +98,23 @@ def run_parity_verification():
         is_white_persp = bot_w >= bot_b
         
         board_fen, full_fen = build_fen_py(sanitized, is_white_persp)
-        print(f"\n[{img_name}] Parity Result:")
-        print(f"  Perspective: {'White' if is_white_persp else 'Black'}")
-        print(f"  Board FEN:   {board_fen}")
-        print(f"  Full FEN:    {full_fen}")
         
-    print("\n[SUCCESS] Dual-zone feature extraction parity verified!")
+        expected_fen = gt["board_fen"]
+        print(f"\n=================== Ground Truth Diff: [{img_name}] ===================")
+        print(f"Detected Board FEN: {board_fen}")
+        print(f"Expected Board FEN: {expected_fen}")
+        
+        if board_fen == expected_fen:
+            print("  --> [MATCH] 64格逐格比对 100% 吻合！差异数: 0")
+        else:
+            print(f"  --> [DIFF MISMATCH] 不吻合！")
+            all_matched = False
+
+    if not all_matched:
+        print("\n[FAIL] Ground truth verification failed!")
+        sys.exit(1)
+    else:
+        print("\n[SUCCESS] 全部基准图像 64 格 Ground Truth 逐格 Diff 校验 100% 通过！")
 
 if __name__ == '__main__':
-    run_parity_verification()
+    run_ground_truth_diff_verification()

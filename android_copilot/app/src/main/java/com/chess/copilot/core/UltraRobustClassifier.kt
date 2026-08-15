@@ -7,22 +7,29 @@ import android.graphics.Rect
 import java.io.InputStream
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
- * 纯 Kotlin 移植版多模态多邻国 2D 棋子识别器
- * 基于 48x48 核心 ROI 梯度场余弦互相关 (Cosine NCC) 与 2-Means 阵营自适应聚类
- * 结合 chess-position-detector 数量约束与 Lichess 合规 FEN 清洗
+ * 纯 Kotlin 多模态多邻国 2D 棋子识别器 (V6 双区域解剖轮廓增强版)
+ * 核心机制：
+ * 1. 占用门控后执行自适应垂直前景质心探测与滑动窗口原点钳制 (x0=clamp, y0=clamp)，彻底杜绝 Row 0 顶部切头与维度坍缩
+ * 2. 分数级双区域余弦融合：0.65 * cos(f_body, t_body) + 0.35 * cos(f_head, t_head)，高精度区分车/后/主教/兵/马/王
+ * 3. 自适应 2-Means 阵营自适应聚类
+ * 4. 严格遵守 Lichess 规则规范与子力数量上限约束
  */
 class UltraRobustClassifier(context: Context? = null) {
 
     data class TemplateFeature(
         val className: String,
-        val magNorm: FloatArray
+        val bodyNorm: FloatArray,
+        val headNorm: FloatArray
     )
 
     data class CellFeature(
-        val magNorm: FloatArray,
+        val bodyNorm: FloatArray,
+        val headNorm: FloatArray,
         val centerStd: Float,
         val centerMean: Float,
         val gradMean: Float
@@ -46,9 +53,6 @@ class UltraRobustClassifier(context: Context? = null) {
         }
     }
 
-    /**
-     * 从 assets/templates/ 目录动态载入多样本模板
-     */
     private fun loadTemplatesFromAssets(context: Context) {
         try {
             val templateFiles = context.assets.list("templates") ?: emptyArray()
@@ -61,7 +65,8 @@ class UltraRobustClassifier(context: Context? = null) {
 
                 if (bmp != null) {
                     val feat = extractFeatureFromBitmap(bmp)
-                    templates.add(TemplateFeature(clsName, feat.magNorm))
+                    templates.add(TemplateFeature(clsName, feat.bodyNorm, feat.headNorm))
+                    bmp.recycle()
                 }
             }
         } catch (e: Exception) {
@@ -69,9 +74,6 @@ class UltraRobustClassifier(context: Context? = null) {
         }
     }
 
-    /**
-     * 针对整个棋盘进行切割并分类识别
-     */
     fun classifyBoard(bitmap: Bitmap, boardRect: Rect): DetectionResult {
         val step = (boardRect.right - boardRect.left) / 8.0f
         val cellsFeats = Array(8) { r ->
@@ -90,7 +92,7 @@ class UltraRobustClassifier(context: Context? = null) {
             }
         }
 
-        // 1. 识别各格子棋子种类，记录第一与第二置信度候选
+        // 1. 占用门控与模板余弦匹配
         data class OccupiedCell(
             val r: Int,
             val c: Int,
@@ -104,7 +106,7 @@ class UltraRobustClassifier(context: Context? = null) {
         for (r in 0..7) {
             for (c in 0..7) {
                 val f = cellsFeats[r][c]
-                // 阈值判断：空网格中心方差与边缘梯度极低
+                // 占用门控：空网格中心方差与边缘梯度极低
                 if (f.centerStd < 6.0f || f.gradMean < 8.0f) {
                     continue
                 }
@@ -116,17 +118,20 @@ class UltraRobustClassifier(context: Context? = null) {
                 var kingSim = -1e9f
 
                 for (t in templates) {
-                    val sim = computeCosineSimilarity(f.magNorm, t.magNorm)
-                    if (t.className == "K" && sim > kingSim) {
-                        kingSim = sim
+                    val bodyCos = computeCosineSimilarity(f.bodyNorm, t.bodyNorm)
+                    val headCos = computeCosineSimilarity(f.headNorm, t.headNorm)
+                    val score = 0.65f * bodyCos + 0.35f * headCos
+
+                    if (t.className == "K" && score > kingSim) {
+                        kingSim = score
                     }
-                    if (sim > bestSim) {
+                    if (score > bestSim) {
                         secondSim = bestSim
                         secondCls = bestCls
-                        bestSim = sim
+                        bestSim = score
                         bestCls = t.className
-                    } else if (sim > secondSim && t.className != bestCls) {
-                        secondSim = sim
+                    } else if (score > secondSim && t.className != bestCls) {
+                        secondSim = score
                         secondCls = t.className
                     }
                 }
@@ -147,7 +152,7 @@ class UltraRobustClassifier(context: Context? = null) {
             }
         }
 
-        // 3. 约束校验（双王守恒、Rank 1/8 禁兵、数量上限重分类）
+        // 3. 约束校验（双王守恒、Rank 1/8 禁兵、数量上限容量感知降级）
         val sanitizedBoard = sanitizeBoard(rawBoard)
 
         // 4. 统计顶底黑白子判定视角
@@ -173,10 +178,14 @@ class UltraRobustClassifier(context: Context? = null) {
     }
 
     /**
-     * 提取 48x48 格子的核心梯度特征 (30x30 ROI)
+     * 提取 48x48 格子的双区域解剖特征 (30x30 身体 + 10x30 头部)
      */
-    private fun extractFeatureFromBitmap(cellBmp: Bitmap): CellFeature {
-        val resized = Bitmap.createScaledBitmap(cellBmp, 48, 48, true)
+    fun extractFeatureFromBitmap(cellBmp: Bitmap): CellFeature {
+        val resized = if (cellBmp.width == 48 && cellBmp.height == 48) {
+            cellBmp
+        } else {
+            Bitmap.createScaledBitmap(cellBmp, 48, 48, true)
+        }
         val pixels = IntArray(48 * 48)
         resized.getPixels(pixels, 0, 48, 0, 0, 48, 48)
         if (resized !== cellBmp) resized.recycle()
@@ -190,59 +199,113 @@ class UltraRobustClassifier(context: Context? = null) {
             gray[i] = 0.299f * r + 0.587f * g + 0.114f * b
         }
 
-        // 裁剪 18%..82% 核心区域：行 9..38, 列 9..38 (共 30x30 = 900 像素)
-        val roiW = 30
-        val roiH = 30
-        val magArray = FloatArray(roiW * roiH)
+        // 1. 占用门控统计 (基于 30x30 中心区: 行 9..38, 列 9..38)
         var sumGray = 0.0f
         var sumSqGray = 0.0f
-        var sumMag = 0.0f
-
-        for (r in 0 until roiH) {
-            val gy = 9 + r
-            for (c in 0 until roiW) {
-                val gx = 9 + c
-                val v = gray[gy * 48 + gx]
+        for (r in 9..38) {
+            for (c in 9..38) {
+                val v = gray[r * 48 + c]
                 sumGray += v
                 sumSqGray += v * v
+            }
+        }
+        val centerMean = sumGray / 900.0f
+        val centerVariance = max(0f, (sumSqGray / 900.0f) - (centerMean * centerMean))
+        val centerStd = sqrt(centerVariance)
 
-                // Sobel 算子 (3x3) 计算梯度
-                val v00 = gray[(gy - 1) * 48 + (gx - 1)]
-                val v01 = gray[(gy - 1) * 48 + gx]
-                val v02 = gray[(gy - 1) * 48 + (gx + 1)]
-                val v10 = gray[gy * 48 + (gx - 1)]
-                val v12 = gray[gy * 48 + (gx + 1)]
-                val v20 = gray[(gy + 1) * 48 + (gx - 1)]
-                val v21 = gray[(gy + 1) * 48 + gx]
-                val v22 = gray[(gy + 1) * 48 + (gx + 1)]
+        // 2. 全图 Sobel 梯度
+        val mag = FloatArray(48 * 48)
+        var sumCenterMag = 0.0f
+        for (gy in 1..46) {
+            val yOffset = gy * 48
+            val yPrev = (gy - 1) * 48
+            val yNext = (gy + 1) * 48
+            for (gx in 1..46) {
+                val v00 = gray[yPrev + gx - 1]
+                val v02 = gray[yPrev + gx + 1]
+                val v10 = gray[yOffset + gx - 1]
+                val v12 = gray[yOffset + gx + 1]
+                val v20 = gray[yNext + gx - 1]
+                val v22 = gray[yNext + gx + 1]
+                val v01 = gray[yPrev + gx]
+                val v21 = gray[yNext + gx]
 
                 val sobelX = (v02 + 2f * v12 + v22) - (v00 + 2f * v10 + v20)
                 val sobelY = (v20 + 2f * v21 + v22) - (v00 + 2f * v01 + v02)
-                val mag = sqrt(sobelX * sobelX + sobelY * sobelY)
+                val m = sqrt(sobelX * sobelX + sobelY * sobelY)
+                mag[yOffset + gx] = m
+                if (gy in 9..38 && gx in 9..38) {
+                    sumCenterMag += m
+                }
+            }
+        }
+        val gradMean = sumCenterMag / 900.0f
 
-                magArray[r * roiW + c] = mag
-                sumMag += mag
+        // 3. 4 角中值背景差分探测前景质心
+        val cornerVals = floatArrayOf(
+            gray[0], gray[1], gray[2], gray[48], gray[49], gray[50], // top-left
+            gray[45], gray[46], gray[47], gray[93], gray[94], gray[95], // top-right
+            gray[45 * 48], gray[45 * 48 + 1], gray[46 * 48], gray[46 * 48 + 1], // bottom-left
+            gray[45 * 48 + 46], gray[45 * 48 + 47], gray[46 * 48 + 46], gray[46 * 48 + 47] // bottom-right
+        )
+        cornerVals.sort()
+        val bgVal = cornerVals[cornerVals.size / 2]
+
+        var sumFgY = 0.0
+        var sumFgX = 0.0
+        var fgCount = 0
+        for (y in 0..47) {
+            val yOff = y * 48
+            for (x in 0..47) {
+                if (abs(gray[yOff + x] - bgVal) > 15.0f) {
+                    sumFgY += y
+                    sumFgX += x
+                    fgCount++
+                }
             }
         }
 
-        val totalPixels = (roiW * roiH).toFloat()
-        val meanVal = sumGray / totalPixels
-        val variance = max(0f, (sumSqGray / totalPixels) - (meanVal * meanVal))
-        val stdVal = sqrt(variance)
-        val gradMean = sumMag / totalPixels
+        val cy = if (fgCount > 0) (sumFgY / fgCount).toFloat() else 24.0f
+        val cx = if (fgCount > 0) (sumFgX / fgCount).toFloat() else 24.0f
 
-        // L2 范数归一化
-        var normSq = 0.0f
-        for (m in magArray) normSq += m * m
-        val norm = sqrt(normSq) + 1e-5f
-        val magNorm = FloatArray(magArray.size) { magArray[it] / norm }
+        // 4. 滑动窗口原点钳制 (保证 ROI 恒为 36x36，绝无维度坍缩)
+        val x0 = max(0, min(12, (cx - 18f).roundToInt()))
+        val y0 = max(0, min(12, (cy - 18f).roundToInt()))
 
-        return CellFeature(magNorm, stdVal, meanVal, gradMean)
+        // 5. 身体特征: 30x30 (从 36x36 居中截取，共 900 维)
+        val bodyMag = FloatArray(900)
+        var bodySumSq = 0.0f
+        for (r in 0..29) {
+            val srcY = y0 + 3 + r
+            for (c in 0..29) {
+                val srcX = x0 + 3 + c
+                val v = mag[srcY * 48 + srcX]
+                bodyMag[r * 30 + c] = v
+                bodySumSq += v * v
+            }
+        }
+        val bodyNormVal = sqrt(bodySumSq) + 1e-5f
+        val bodyNorm = FloatArray(900) { bodyMag[it] / bodyNormVal }
+
+        // 6. 头部解剖特征: 10x30 (从 30x30 身体取顶端 10 行，共 300 维)
+        val headMag = FloatArray(300)
+        var headSumSq = 0.0f
+        for (r in 0..9) {
+            for (c in 0..29) {
+                val v = bodyMag[r * 30 + c]
+                headMag[r * 30 + c] = v
+                headSumSq += v * v
+            }
+        }
+        val headNormVal = sqrt(headSumSq) + 1e-5f
+        val headNorm = FloatArray(300) { headMag[it] / headNormVal }
+
+        return CellFeature(bodyNorm, headNorm, centerStd, centerMean, gradMean)
     }
 
     private fun computeCosineSimilarity(a: FloatArray, b: FloatArray): Float {
         var dot = 0.0f
-        val len = a.size
+        val len = min(a.size, b.size)
         for (i in 0 until len) {
             dot += a[i] * b[i]
         }
@@ -250,9 +313,6 @@ class UltraRobustClassifier(context: Context? = null) {
     }
 
     companion object {
-        /**
-         * 纯净 2-Means 聚类自适应划分黑白方（零硬编码阈值）
-         */
         fun calculateTwoMeansThreshold(means: FloatArray): Float {
             if (means.isEmpty()) return 128.0f
             if (means.size == 1) return if (means[0] >= 120f) means[0] - 1f else means[0] + 1f
@@ -260,7 +320,6 @@ class UltraRobustClassifier(context: Context? = null) {
             val minVal = means.minOrNull() ?: 0.0f
             val maxVal = means.maxOrNull() ?: 255.0f
 
-            // 单色残局保护：当所有棋子亮度极度接近（极差 < 35）时
             if (maxVal - minVal < 35.0f) {
                 val avg = means.average().toFloat()
                 return if (avg >= 120.0f) minVal - 1.0f else maxVal + 1.0f
@@ -290,9 +349,6 @@ class UltraRobustClassifier(context: Context? = null) {
             return (c1 + c2) / 2.0f
         }
 
-        /**
-         * 校验棋盘合法性：借鉴 chess-position-detector 数量上限约束与 Lichess 规则清洗
-         */
         fun sanitizeBoard(board: Array<CharArray>): Array<CharArray> {
             val result = Array(8) { r -> CharArray(8) { c -> board[r][c] } }
 
@@ -325,7 +381,6 @@ class UltraRobustClassifier(context: Context? = null) {
                     pieceCounts[p] = count
                     val maxAllowed = maxLimits[p] ?: 8
                     if (count > maxAllowed) {
-                        // 超限降级：寻找尚未达标的备选子力，若都满额则置为 '.'
                         val isWhite = p.isUpperCase()
                         val candidates = if (isWhite) charArrayOf('R', 'B', 'N') else charArrayOf('r', 'b', 'n')
                         var fallbackPiece = '.'
@@ -406,7 +461,7 @@ class UltraRobustClassifier(context: Context? = null) {
                 }
             }
 
-            // 4. 终极自检：消除任何二次超限
+            // 4. 终极二次自检
             val finalCounts = mutableMapOf<Char, Int>()
             for (r in 0..7) {
                 for (c in 0..7) {
@@ -424,9 +479,6 @@ class UltraRobustClassifier(context: Context? = null) {
             return result
         }
 
-        /**
-         * 单行连续空格压缩（如 . . . p -> 3p）
-         */
         fun compressRow(row: CharArray): String {
             val sb = StringBuilder()
             var empty = 0
@@ -445,9 +497,6 @@ class UltraRobustClassifier(context: Context? = null) {
             return sb.toString()
         }
 
-        /**
-         * 构建标准 FEN 串
-         */
         fun buildFenFromBoard(
             rawBoard: Array<CharArray>,
             isWhitePerspective: Boolean,
@@ -456,7 +505,6 @@ class UltraRobustClassifier(context: Context? = null) {
             val standardBoard = if (isWhitePerspective) {
                 rawBoard
             } else {
-                // 黑方视角翻转 180 度得到标准 rank 8 到 rank 1 矩阵
                 Array(8) { r -> CharArray(8) { c -> rawBoard[7 - r][7 - c] } }
             }
 

@@ -5,11 +5,14 @@ import android.util.Log
 import android.util.LruCache
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.File
@@ -18,12 +21,12 @@ import java.io.OutputStreamWriter
 import java.util.regex.Pattern
 
 /**
- * 极简高可靠 Stockfish UCI 引擎管道桥接（借鉴 Lichess Mobile 状态机与自愈机制）
+ * 响应式 Stockfish UCI 引擎管道桥接（借鉴 Lichess Mobile 官方事件流架构）
  * 核心机制：
- * 1. 直接执行 nativeLibraryDir 下的 libstockfish.so (合规绕过 Android 10+ W^X 限制)
- * 2. 引擎异常/超时自动重启自愈 (Auto-Respawn)
- * 3. 局势结果 LRU 缓存，保证同一静止盘面多次点击建议绝对确定
- * 4. 非阻塞协程轮询超时防挂起 + readyok 严格同步
+ * 1. 专职后台 I/O 读协程持续阻塞读取管道，通过 Channel<String> 异步推流，彻底告别 ready() 轮询
+ * 2. 严密的生命周期管理：进程销毁自然关闭管道、Respawn 清理旧 Channel、go 前排空历史残行
+ * 3. 严格的 UCI 握手与全链路诊断日志
+ * 4. 局势结果 LRU 缓存（仅缓存真实引擎结果，严禁缓存 fallback 兜底）
  */
 object StockfishBridge {
 
@@ -39,6 +42,9 @@ object StockfishBridge {
     private var process: Process? = null
     private var writer: BufferedWriter? = null
     private var reader: BufferedReader? = null
+    private var lineChannel: Channel<String>? = null
+    private var readerJob: Job? = null
+
     @Volatile
     private var isEngineReady: Boolean = false
     private var appContext: Context? = null
@@ -49,15 +55,11 @@ object StockfishBridge {
     // LRU 缓存：缓存最近 32 个局面的分析结果，保证确定性
     private val evalCache = LruCache<String, EngineEvaluation>(32)
 
-    // 正则支持 4~5 位字符（含兵升变 q/r/b/n）
     private val bestMovePattern = Pattern.compile("^bestmove\\s+([a-h][1-8][a-h][1-8][qrbnQRBN]?|\\(none\\))")
     private val scoreCpPattern = Pattern.compile("score\\s+cp\\s+(-?\\d+)")
     private val scoreMatePattern = Pattern.compile("score\\s+mate\\s+(-?\\d+)")
     private val depthPattern = Pattern.compile("depth\\s+(\\d+)")
 
-    /**
-     * 异步初始化引擎：直接从 nativeLibraryDir 调起 libstockfish.so
-     */
     fun init(context: Context) {
         appContext = context.applicationContext
         if (isEngineReady && process != null) return
@@ -70,66 +72,110 @@ object StockfishBridge {
         }
     }
 
-    private fun startEngineProcessLocked() {
-        val context = appContext ?: return
+    private suspend fun startEngineProcessLocked() {
+        val context = appContext ?: run {
+            Log.w(TAG, "startEngineProcessLocked failed: appContext is null")
+            return
+        }
+
         try {
             val nativeLibDir = context.applicationInfo.nativeLibraryDir
             val binaryFile = File(nativeLibDir, "libstockfish.so")
+            Log.i(TAG, "Locating Stockfish binary at: ${binaryFile.absolutePath}, exists=${binaryFile.exists()}, canExec=${binaryFile.canExecute()}")
 
-            if (binaryFile.exists() && binaryFile.canExecute()) {
-                val pb = ProcessBuilder(binaryFile.absolutePath)
-                pb.redirectErrorStream(true)
-                val p = pb.start()
-                process = p
-
-                writer = BufferedWriter(OutputStreamWriter(p.outputStream))
-                reader = BufferedReader(InputStreamReader(p.inputStream))
-
-                // 严格 UCI 握手时序 (ucinewgame -> isready -> readyok)
-                sendCommand("uci")
-                val uciOk = waitForResponse("uciok", timeoutMs = 1500)
-
-                if (uciOk) {
-                    sendCommand("ucinewgame")
-                    sendCommand("isready")
-                    val readyOk = waitForResponse("readyok", timeoutMs = 1500)
-                    isEngineReady = readyOk
-                } else {
-                    isEngineReady = false
-                }
-            } else {
+            if (!binaryFile.exists() || !binaryFile.canExecute()) {
                 Log.w(TAG, "libstockfish.so not found or not executable in $nativeLibDir, fallback will be used")
                 isEngineReady = false
+                return
+            }
+
+            val pb = ProcessBuilder(binaryFile.absolutePath)
+            pb.redirectErrorStream(true)
+            val p = pb.start()
+            process = p
+            Log.i(TAG, "Stockfish process started successfully: $p")
+
+            writer = BufferedWriter(OutputStreamWriter(p.outputStream))
+            val br = BufferedReader(InputStreamReader(p.inputStream))
+            reader = br
+
+            // 创建专属非阻塞事件流通道
+            val channel = Channel<String>(Channel.UNLIMITED)
+            lineChannel = channel
+
+            // 启动后台阻塞读取协程
+            readerJob = scope.launch(Dispatchers.IO) {
+                try {
+                    while (isActive) {
+                        val line = br.readLine() ?: break
+                        channel.send(line)
+                    }
+                } catch (e: Exception) {
+                    Log.d(TAG, "Reader loop exited: ${e.message}")
+                } finally {
+                    channel.close()
+                }
+            }
+
+            // 严格 UCI 握手时序 (uci -> uciok -> ucinewgame -> isready -> readyok)
+            sendCommand("uci")
+            val uciOk = waitForResponse("uciok", timeoutMs = 2000)
+            Log.i(TAG, "UCI handshake response 'uciok': $uciOk")
+
+            if (uciOk) {
+                sendCommand("ucinewgame")
+                sendCommand("isready")
+                val readyOk = waitForResponse("readyok", timeoutMs = 2000)
+                Log.i(TAG, "UCI handshake response 'readyok': $readyOk")
+                isEngineReady = readyOk
+            } else {
+                Log.w(TAG, "UCI handshake timed out without uciok, destroying process")
+                isEngineReady = false
+                destroyProcessLocked()
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to start Stockfish process: ${e.message}", e)
+            Log.e(TAG, "Failed to start Stockfish process: ${e.message}", e)
             destroyProcessLocked()
         }
     }
 
     private fun sendCommand(cmd: String) {
-        writer?.let {
-            it.write(cmd)
-            it.newLine()
-            it.flush()
+        try {
+            writer?.let {
+                it.write(cmd)
+                it.newLine()
+                it.flush()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "sendCommand '$cmd' failed: ${e.message}")
         }
     }
 
-    private fun waitForResponse(expected: String, timeoutMs: Long): Boolean {
-        val start = System.currentTimeMillis()
-        while (System.currentTimeMillis() - start < timeoutMs) {
-            if (reader?.ready() == true) {
-                val line = reader?.readLine() ?: break
-                if (line.contains(expected)) return true
-            } else {
-                Thread.sleep(15)
+    private suspend fun waitForResponse(expected: String, timeoutMs: Long): Boolean {
+        val channel = lineChannel ?: return false
+        val deadline = System.currentTimeMillis() + timeoutMs
+
+        while (System.currentTimeMillis() < deadline) {
+            val remaining = deadline - System.currentTimeMillis()
+            if (remaining <= 0) break
+
+            val line = withTimeoutOrNull(remaining) {
+                try {
+                    channel.receive()
+                } catch (_: Exception) {
+                    null
+                }
+            } ?: break
+
+            if (line.contains(expected)) {
+                return true
             }
         }
         return false
     }
 
     /**
-     * 对 FEN 执行分析并返回推荐走法与评估分（带结果缓存与自动重启自愈）
+     * 对 FEN 执行深度分析并返回推荐走法与评估分（带结果缓存与自动重启自愈）
      */
     suspend fun evaluateFen(fen: String, moveTimeMs: Long = 120): EngineEvaluation = withContext(Dispatchers.IO) {
         // 1. 优先命中 LRU 缓存，保证静止盘面建议确定无跳变
@@ -150,17 +196,19 @@ object StockfishBridge {
                 startEngineProcessLocked()
             }
 
-            if (isEngineReady && process != null) {
+            if (isEngineReady && process != null && lineChannel != null) {
                 try {
-                    // 清空历史残余流
-                    while (reader?.ready() == true) {
-                        reader?.readLine()
+                    val channel = lineChannel!!
+
+                    // 排空历史残余文本行
+                    while (true) {
+                        val poll = channel.tryReceive().getOrNull() ?: break
                     }
 
                     sendCommand("isready")
-                    val readyOk = waitForResponse("readyok", timeoutMs = 500)
+                    val readyOk = waitForResponse("readyok", timeoutMs = 800)
                     if (!readyOk) {
-                        Log.w(TAG, "Stockfish readyok timeout, restarting process")
+                        Log.w(TAG, "Stockfish readyok timeout before evaluate, restarting process")
                         destroyProcessLocked()
                         startEngineProcessLocked()
                     }
@@ -170,24 +218,30 @@ object StockfishBridge {
 
                     var lastEval: EngineEvaluation? = null
                     var bestMoveResult: String? = null
-                    val deadline = System.currentTimeMillis() + moveTimeMs + 600L
+                    val deadline = System.currentTimeMillis() + moveTimeMs + 1000L
 
-                    // 非阻塞轮询读取
+                    // 响应式挂起读取输出
                     while (System.currentTimeMillis() < deadline) {
-                        if (reader?.ready() == true) {
-                            val line = reader?.readLine() ?: break
-                            val parsedInfo = parseInfoLine(line)
-                            if (parsedInfo != null) {
-                                lastEval = parsedInfo
-                            }
+                        val remaining = deadline - System.currentTimeMillis()
+                        if (remaining <= 0) break
 
-                            val bm = parseBestMoveLine(line)
-                            if (bm != null) {
-                                bestMoveResult = bm
-                                break
+                        val line = withTimeoutOrNull(remaining) {
+                            try {
+                                channel.receive()
+                            } catch (_: Exception) {
+                                null
                             }
-                        } else {
-                            delay(15)
+                        } ?: break
+
+                        val parsedInfo = parseInfoLine(line)
+                        if (parsedInfo != null) {
+                            lastEval = parsedInfo
+                        }
+
+                        val bm = parseBestMoveLine(line)
+                        if (bm != null) {
+                            bestMoveResult = bm
+                            break
                         }
                     }
 
@@ -198,11 +252,11 @@ object StockfishBridge {
                             depth = lastEval?.depth ?: 12,
                             isMate = lastEval?.isMate ?: false
                         )
+                        Log.i(TAG, "Stockfish evaluate success: bestMove=${result.bestMove}, depth=${result.depth}, score=${result.evalScore}")
                         evalCache.put(fen, result)
                         return@withContext result
                     }
 
-                    // 超时重置
                     Log.w(TAG, "Stockfish evaluateFen timed out without bestmove, resetting process")
                     destroyProcessLocked()
                 } catch (e: Exception) {
@@ -211,7 +265,8 @@ object StockfishBridge {
                 }
             }
 
-            // 3. 双重兜底：纯 Kotlin 合法走法评估 (注：fallback 结果严禁写入 evalCache，以保证引擎恢复后能输出高质量建议)
+            // 3. 双重兜底：纯 Kotlin 合法走法评估（安全兜底，且 fallback 结果绝对严禁写入 evalCache）
+            Log.w(TAG, "Using fallback heuristic evaluator for FEN: $fen")
             val fallback = evaluateFallback(fen)
             return@withContext fallback
         }
@@ -221,23 +276,26 @@ object StockfishBridge {
         try {
             process?.destroy()
         } catch (_: Exception) {}
+        try {
+            readerJob?.cancel()
+            lineChannel?.close()
+            writer?.close()
+            reader?.close()
+        } catch (_: Exception) {}
+
         process = null
         writer = null
         reader = null
+        lineChannel = null
+        readerJob = null
         isEngineReady = false
     }
 
-    /**
-     * 解析 bestmove 行（含升变）
-     */
     fun parseBestMoveLine(line: String): String? {
         val matcher = bestMovePattern.matcher(line.trim())
         return if (matcher.find()) matcher.group(1) else null
     }
 
-    /**
-     * 解析 info 行中的 depth, cp, mate
-     */
     fun parseInfoLine(line: String): EngineEvaluation? {
         if (!line.startsWith("info ")) return null
 
@@ -265,7 +323,7 @@ object StockfishBridge {
     }
 
     /**
-     * 智能合法走法兜底生成器（确保绝对不移动空格，支持升变后缀）
+     * 智能合法走法兜底生成器（仅作底层二进制不可用时的极端兜底）
      */
     fun evaluateFallback(fen: String): EngineEvaluation {
         val parts = fen.split(" ")
@@ -361,14 +419,8 @@ object StockfishBridge {
                     if (isEngineReady) {
                         sendCommand("quit")
                     }
-                    writer?.close()
-                    reader?.close()
-                    process?.destroy()
                 } catch (_: Exception) {}
-                process = null
-                writer = null
-                reader = null
-                isEngineReady = false
+                destroyProcessLocked()
                 evalCache.evictAll()
             }
         }
