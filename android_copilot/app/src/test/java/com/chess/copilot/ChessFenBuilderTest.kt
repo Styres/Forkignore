@@ -154,7 +154,7 @@ class ChessFenBuilderTest {
         for (rk in ranks) {
             var sum = 0
             for (ch in rk) {
-                if (ch.isdigit()) sum += ch - '0'
+                if (ch.isDigit()) sum += ch - '0'
                 else sum += 1
             }
             assertEquals(8, sum)

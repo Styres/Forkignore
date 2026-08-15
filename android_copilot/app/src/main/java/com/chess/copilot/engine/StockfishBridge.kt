@@ -224,9 +224,7 @@ object StockfishBridge {
             if (isEngineReady && process != null && lineChannel != null) {
                 try {
                     // 排空历史残余文本行
-                    while (true) {
-                        val poll = lineChannel?.tryReceive()?.getOrNull() ?: break
-                    }
+                    while (lineChannel?.tryReceive()?.getOrNull() != null) {}
 
                     sendCommand("isready")
                     val readyOk = waitForResponse("readyok", timeoutMs = 800)
@@ -278,7 +276,7 @@ object StockfishBridge {
 
                     if (bestMoveResult != null && bestMoveResult != "(none)") {
                         val result = EngineEvaluation(
-                            bestMove = bestMoveResult!!,
+                            bestMove = bestMoveResult,
                             evalScore = lastEval?.evalScore ?: 0.0f,
                             depth = lastEval?.depth ?: 12,
                             isMate = lastEval?.isMate ?: false
