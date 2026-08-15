@@ -52,6 +52,10 @@ object StockfishBridge {
     private var isEngineReady: Boolean = false
     private var appContext: Context? = null
 
+    @Volatile
+    var lastDiagnosticInfo: String = "引擎尚未初始化"
+        private set
+
     private val engineMutex = Mutex()
     private val scope = CoroutineScope(Dispatchers.IO)
 
@@ -75,50 +79,110 @@ object StockfishBridge {
         }
     }
 
+    /**
+     * 纯函数：从 APK Zip 压缩包中流式原子提取匹配设备 ABI 的 libstockfish.so 二进制文件
+     * 支持 JVM 单元测试与真机 APK 提取
+     */
+    fun extractBinaryFromZip(zip: java.util.zip.ZipFile, supportedAbis: Array<String>, targetFile: File): Boolean {
+        for (abi in supportedAbis) {
+            val entryName = "lib/$abi/libstockfish.so"
+            val entry = zip.getEntry(entryName)
+            if (entry != null) {
+                val parentDir = targetFile.parentFile
+                if (parentDir != null && !parentDir.exists()) {
+                    parentDir.mkdirs()
+                }
+                val tmpFile = File(parentDir ?: File("."), "${targetFile.name}.tmp")
+                try {
+                    zip.getInputStream(entry).use { input ->
+                        FileOutputStream(tmpFile).use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                    if (tmpFile.exists() && tmpFile.length() == entry.size) {
+                        if (targetFile.exists()) targetFile.delete()
+                        val renamed = tmpFile.renameTo(targetFile)
+                        if (renamed || targetFile.exists()) {
+                            targetFile.setExecutable(true, false)
+                            return true
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "extractBinaryFromZip failed for ABI $abi: ${e.message}")
+                } finally {
+                    if (tmpFile.exists()) tmpFile.delete()
+                }
+            }
+        }
+        return false
+    }
+
     private suspend fun startEngineProcessLocked() {
         val context = appContext ?: run {
+            lastDiagnosticInfo = "启动失败: appContext 为空"
             Log.w(TAG, "startEngineProcessLocked failed: appContext is null")
             return
         }
 
-        try {
-            val nativeLibDir = context.applicationInfo.nativeLibraryDir
-            var binaryFile = File(nativeLibDir, "libstockfish.so")
-            Log.i(TAG, "Locating Stockfish binary at nativeLibraryDir: ${binaryFile.absolutePath}, exists=${binaryFile.exists()}, canExec=${binaryFile.canExecute()}")
+        val diag = StringBuilder()
+        val startTime = System.currentTimeMillis()
 
-            // 双保险方案：若 nativeLibraryDir 无法执行，复制到 filesDir 赋予 +x 权限
-            if (!binaryFile.exists() || !binaryFile.canExecute()) {
-                val fallbackBin = File(context.filesDir, "libstockfish.so")
-                if (binaryFile.exists()) {
+        try {
+            var selectedBinary: File? = null
+            var startupPathDesc = "未知路径"
+
+            // 保障 1: 优先探测系统 nativeLibraryDir 原生目录
+            val nativeLibDir = context.applicationInfo.nativeLibraryDir
+            val nativeFile = File(nativeLibDir, "libstockfish.so")
+            val nativeExists = nativeFile.exists()
+            val nativeCanExec = nativeFile.canExecute()
+            diag.append("路径1 [nativeLibDir]: exists=$nativeExists, canExec=$nativeCanExec\n")
+
+            if (nativeExists && nativeCanExec) {
+                selectedBinary = nativeFile
+                startupPathDesc = "路径1 (nativeLibDir)"
+            }
+
+            // 保障 2: 若路径 1 不可用，从 APK Zip 原子流式提取到 filesDir 并赋 +x 权限
+            if (selectedBinary == null) {
+                val filesDirBin = File(context.filesDir, "libstockfish.so")
+                val apkPath = context.applicationInfo.sourceDir
+                var extracted = false
+
+                if (apkPath != null && File(apkPath).exists()) {
                     try {
-                        if (!fallbackBin.exists() || fallbackBin.length() != binaryFile.length()) {
-                            Log.i(TAG, "Copying libstockfish.so to filesDir: ${fallbackBin.absolutePath}")
-                            FileInputStream(binaryFile).use { input ->
-                                FileOutputStream(fallbackBin).use { output ->
-                                    input.copyTo(output)
-                                }
-                            }
-                        }
-                        fallbackBin.setExecutable(true, false)
-                        Log.i(TAG, "filesDir binary prepared: exists=${fallbackBin.exists()}, canExec=${fallbackBin.canExecute()}")
-                        binaryFile = fallbackBin
+                        val zip = java.util.zip.ZipFile(apkPath)
+                        val abis = Build.SUPPORTED_ABIS ?: arrayOf("arm64-v8a", "armeabi-v7a", "x86_64")
+                        extracted = extractBinaryFromZip(zip, abis, filesDirBin)
+                        zip.close()
                     } catch (e: Exception) {
-                        Log.w(TAG, "Failed to copy libstockfish.so to filesDir: ${e.message}")
+                        diag.append("路径2 [APK解压异常]: ${e.javaClass.simpleName}: ${e.message}\n")
                     }
+                }
+
+                filesDirBin.setExecutable(true, false)
+                val filesExists = filesDirBin.exists()
+                val filesCanExec = filesDirBin.canExecute()
+                diag.append("路径2 [filesDir]: extracted=$extracted, exists=$filesExists, canExec=$filesCanExec\n")
+
+                if (filesExists && filesCanExec) {
+                    selectedBinary = filesDirBin
+                    startupPathDesc = "路径2 (APK Zip -> filesDir)"
                 }
             }
 
-            if (!binaryFile.exists()) {
-                Log.w(TAG, "libstockfish.so binary not found, fallback will be used")
+            if (selectedBinary == null || !selectedBinary.exists()) {
+                lastDiagnosticInfo = "【引擎启动失败】\n$diag\n无可用可执行二进制，跌入纯 Kotlin 兜底"
+                Log.w(TAG, "Stockfish binary unavailable, using fallback\n$diag")
                 isEngineReady = false
                 return
             }
 
-            val pb = ProcessBuilder(binaryFile.absolutePath)
+            val pb = ProcessBuilder(selectedBinary.absolutePath)
             pb.redirectErrorStream(true)
             val p = pb.start()
             process = p
-            Log.i(TAG, "Stockfish process started successfully: $p")
+            diag.append("进程启动: 成功 ($startupPathDesc)\n")
 
             writer = BufferedWriter(OutputStreamWriter(p.outputStream))
             val br = BufferedReader(InputStreamReader(p.inputStream))
@@ -142,24 +206,41 @@ object StockfishBridge {
                 }
             }
 
-            // 严格 UCI 握手时序 (uci -> uciok -> ucinewgame -> isready -> readyok)
+            // 保障 3: 5000ms 宽限期严格 UCI 握手时序 (uci -> uciok -> ucinewgame -> isready -> readyok)
+            val uciStart = System.currentTimeMillis()
             sendCommand("uci")
-            val uciOk = waitForResponse("uciok", timeoutMs = 2000)
-            Log.i(TAG, "UCI handshake response 'uciok': $uciOk")
+            val uciOk = waitForResponse("uciok", timeoutMs = 5000)
+            val uciElapsed = System.currentTimeMillis() - uciStart
+            diag.append("握手 [uciok]: ${if (uciOk) "成功 (${uciElapsed}ms)" else "超时失败 (${uciElapsed}ms)"}\n")
 
             if (uciOk) {
                 sendCommand("ucinewgame")
+                val readyStart = System.currentTimeMillis()
                 sendCommand("isready")
-                val readyOk = waitForResponse("readyok", timeoutMs = 2000)
-                Log.i(TAG, "UCI handshake response 'readyok': $readyOk")
+                val readyOk = waitForResponse("readyok", timeoutMs = 5000)
+                val readyElapsed = System.currentTimeMillis() - readyStart
+                diag.append("握手 [readyok]: ${if (readyOk) "成功 (${readyElapsed}ms)" else "超时失败 (${readyElapsed}ms)"}\n")
+
                 isEngineReady = readyOk
+                if (readyOk) {
+                    val totalTime = System.currentTimeMillis() - startTime
+                    diag.append("总耗时: ${totalTime}ms | 真实 Stockfish 准备就绪")
+                    lastDiagnosticInfo = "【引擎就绪 ($startupPathDesc)】\n$diag"
+                    Log.i(TAG, "Stockfish ready successfully\n$diag")
+                } else {
+                    lastDiagnosticInfo = "【引擎握手失败】\n$diag\nreadyok 超时，销毁进程"
+                    isEngineReady = false
+                    destroyProcessLocked()
+                }
             } else {
-                Log.w(TAG, "UCI handshake timed out without uciok, destroying process")
+                lastDiagnosticInfo = "【引擎握手失败】\n$diag\nuciok 超时，销毁进程"
                 isEngineReady = false
                 destroyProcessLocked()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start Stockfish process: ${e.message}", e)
+            diag.append("异常终止: ${e.javaClass.simpleName}: ${e.message}\n")
+            lastDiagnosticInfo = "【引擎启动异常】\n$diag"
+            Log.e(TAG, "Failed to start Stockfish process\n$diag", e)
             destroyProcessLocked()
         }
     }
@@ -328,10 +409,10 @@ object StockfishBridge {
     fun parseInfoLine(line: String): EngineEvaluation? {
         if (!line.startsWith("info ")) return null
 
-        var depth = 10
+        var depth = -1
         val depthMatcher = depthPattern.matcher(line)
         if (depthMatcher.find()) {
-            depth = depthMatcher.group(1)?.toIntOrNull() ?: 10
+            depth = depthMatcher.group(1)?.toIntOrNull() ?: -1
         }
 
         val mateMatcher = scoreMatePattern.matcher(line)
@@ -352,7 +433,103 @@ object StockfishBridge {
     }
 
     /**
-     * 智能合法走法兜底生成器（严格棋规实现：主教斜走、车直走、后八向、马日字、兵直行斜吃）
+     * 判断目标格子是否处于指定颜色方的攻击射线或攻击范围内
+     */
+    fun isSquareAttacked(board: Array<CharArray>, targetR: Int, targetC: Int, byWhite: Boolean): Boolean {
+        // 1. 马攻击判定 (8 向 L 跃)
+        val kOffsets = arrayOf(
+            Pair(-2, -1), Pair(-2, 1), Pair(-1, -2), Pair(-1, 2),
+            Pair(1, -2), Pair(1, 2), Pair(2, -1), Pair(2, 1)
+        )
+        val kSym = if (byWhite) 'N' else 'n'
+        for ((dr, dc) in kOffsets) {
+            val nr = targetR + dr
+            val nc = targetC + dc
+            if (nr in 0..7 && nc in 0..7 && board[nr][nc] == kSym) return true
+        }
+
+        // 2. 兵斜切攻击判定 (白兵向上 -1 移动反向源在 +1，黑兵向下 +1 移动反向源在 -1)
+        val pSym = if (byWhite) 'P' else 'p'
+        val pDr = if (byWhite) 1 else -1
+        for (pDc in arrayOf(-1, 1)) {
+            val nr = targetR + pDr
+            val nc = targetC + pDc
+            if (nr in 0..7 && nc in 0..7 && board[nr][nc] == pSym) return true
+        }
+
+        // 3. 车/后 正交 4 向射线攻击判定
+        val orthSyms = if (byWhite) charArrayOf('R', 'Q') else charArrayOf('r', 'q')
+        val orthDirs = arrayOf(Pair(-1, 0), Pair(1, 0), Pair(0, -1), Pair(0, 1))
+        for ((dr, dc) in orthDirs) {
+            var step = 1
+            while (true) {
+                val nr = targetR + dr * step
+                val nc = targetC + dc * step
+                if (nr !in 0..7 || nc !in 0..7) break
+                val p = board[nr][nc]
+                if (p != '.') {
+                    if (p in orthSyms) return true
+                    break
+                }
+                step++
+            }
+        }
+
+        // 4. 主教/后 对角 4 向射线攻击判定
+        val diagSyms = if (byWhite) charArrayOf('B', 'Q') else charArrayOf('b', 'q')
+        val diagDirs = arrayOf(Pair(-1, -1), Pair(-1, 1), Pair(1, -1), Pair(1, 1))
+        for ((dr, dc) in diagDirs) {
+            var step = 1
+            while (true) {
+                val nr = targetR + dr * step
+                val nc = targetC + dc * step
+                if (nr !in 0..7 || nc !in 0..7) break
+                val p = board[nr][nc]
+                if (p != '.') {
+                    if (p in diagSyms) return true
+                    break
+                }
+                step++
+            }
+        }
+
+        // 5. 王单步 8 邻格攻击判定
+        val kingSym = if (byWhite) 'K' else 'k'
+        for (dr in -1..1) {
+            for (dc in -1..1) {
+                if (dr == 0 && dc == 0) continue
+                val nr = targetR + dr
+                val nc = targetC + dc
+                if (nr in 0..7 && nc in 0..7 && board[nr][nc] == kingSym) return true
+            }
+        }
+
+        return false
+    }
+
+    /**
+     * 判断指定颜色方的国王是否处于被将军状态
+     */
+    fun isKingInCheck(board: Array<CharArray>, isWhite: Boolean): Boolean {
+        val kingSym = if (isWhite) 'K' else 'k'
+        var kr = -1
+        var kc = -1
+        for (r in 0..7) {
+            for (c in 0..7) {
+                if (board[r][c] == kingSym) {
+                    kr = r
+                    kc = c
+                    break
+                }
+            }
+            if (kr != -1) break
+        }
+        if (kr == -1) return false
+        return isSquareAttacked(board, kr, kc, byWhite = !isWhite)
+    }
+
+    /**
+     * 智能合法走法兜底生成器（严格 FIDE 棋规实现：试走过滤、将军防守、绝对牵制保护、将杀/逼和分支）
      */
     fun evaluateFallback(fen: String): EngineEvaluation {
         val parts = fen.split(" ")
@@ -373,14 +550,16 @@ object StockfishBridge {
             expanded.toString().toCharArray()
         }
 
-        val legalMoves = mutableListOf<String>()
+        // 候选伪走法列表：(fromR, fromC, toR, toC, promoSuffix)
+        data class RawMove(val fromR: Int, val fromC: Int, val toR: Int, val toC: Int, val promo: String = "")
+        val candidateMoves = mutableListOf<RawMove>()
+
         for (r in 0..7) {
             for (c in 0..7) {
                 val piece = board[r][c]
                 val belongsToActive = if (isWhite) piece.isUpperCase() else piece.isLowerCase()
                 if (!belongsToActive) continue
 
-                val fromSquare = "${('a' + c)}${8 - r}"
                 val pUpper = piece.uppercaseChar()
 
                 when (pUpper) {
@@ -389,11 +568,11 @@ object StockfishBridge {
                         val nextR = r + dir
                         if (nextR in 0..7 && board[nextR][c] == '.') {
                             val promoSuffix = if (nextR == 0 || nextR == 7) "q" else ""
-                            legalMoves.add("$fromSquare${('a' + c)}${8 - nextR}$promoSuffix")
+                            candidateMoves.add(RawMove(r, c, nextR, c, promoSuffix))
                             val startRank = if (isWhite) 6 else 1
                             val doubleNextR = r + 2 * dir
                             if (r == startRank && board[doubleNextR][c] == '.') {
-                                legalMoves.add("$fromSquare${('a' + c)}${8 - doubleNextR}")
+                                candidateMoves.add(RawMove(r, c, doubleNextR, c))
                             }
                         }
                         // 斜向吃子
@@ -405,7 +584,7 @@ object StockfishBridge {
                                 else (target != '.' && target.isUpperCase())
                                 if (isEnemy) {
                                     val promoSuffix = if (nextR == 0 || nextR == 7) "q" else ""
-                                    legalMoves.add("$fromSquare${('a' + targetC)}${8 - nextR}$promoSuffix")
+                                    candidateMoves.add(RawMove(r, c, nextR, targetC, promoSuffix))
                                 }
                             }
                         }
@@ -423,13 +602,12 @@ object StockfishBridge {
                                 val isEnemyOrEmpty = if (isWhite) (target == '.' || target.isLowerCase())
                                 else (target == '.' || target.isUpperCase())
                                 if (isEnemyOrEmpty) {
-                                    legalMoves.add("$fromSquare${('a' + nc)}${8 - nr}")
+                                    candidateMoves.add(RawMove(r, c, nr, nc))
                                 }
                             }
                         }
                     }
                     'B' -> {
-                        // 主教：仅沿 4 个斜对角线移动
                         val diagDirs = arrayOf(Pair(-1, -1), Pair(-1, 1), Pair(1, -1), Pair(1, 1))
                         for ((dr, dc) in diagDirs) {
                             var step = 1
@@ -439,11 +617,11 @@ object StockfishBridge {
                                 if (nr !in 0..7 || nc !in 0..7) break
                                 val target = board[nr][nc]
                                 if (target == '.') {
-                                    legalMoves.add("$fromSquare${('a' + nc)}${8 - nr}")
+                                    candidateMoves.add(RawMove(r, c, nr, nc))
                                 } else {
                                     val isEnemy = if (isWhite) target.isLowerCase() else target.isUpperCase()
                                     if (isEnemy) {
-                                        legalMoves.add("$fromSquare${('a' + nc)}${8 - nr}")
+                                        candidateMoves.add(RawMove(r, c, nr, nc))
                                     }
                                     break
                                 }
@@ -452,7 +630,6 @@ object StockfishBridge {
                         }
                     }
                     'R' -> {
-                        // 车：仅沿 4 个正交方向移动
                         val orthDirs = arrayOf(Pair(-1, 0), Pair(1, 0), Pair(0, -1), Pair(0, 1))
                         for ((dr, dc) in orthDirs) {
                             var step = 1
@@ -462,11 +639,11 @@ object StockfishBridge {
                                 if (nr !in 0..7 || nc !in 0..7) break
                                 val target = board[nr][nc]
                                 if (target == '.') {
-                                    legalMoves.add("$fromSquare${('a' + nc)}${8 - nr}")
+                                    candidateMoves.add(RawMove(r, c, nr, nc))
                                 } else {
                                     val isEnemy = if (isWhite) target.isLowerCase() else target.isUpperCase()
                                     if (isEnemy) {
-                                        legalMoves.add("$fromSquare${('a' + nc)}${8 - nr}")
+                                        candidateMoves.add(RawMove(r, c, nr, nc))
                                     }
                                     break
                                 }
@@ -475,7 +652,6 @@ object StockfishBridge {
                         }
                     }
                     'Q' -> {
-                        // 后：8 个方向射线移动
                         val allDirs = arrayOf(
                             Pair(-1, 0), Pair(1, 0), Pair(0, -1), Pair(0, 1),
                             Pair(-1, -1), Pair(-1, 1), Pair(1, -1), Pair(1, 1)
@@ -488,11 +664,11 @@ object StockfishBridge {
                                 if (nr !in 0..7 || nc !in 0..7) break
                                 val target = board[nr][nc]
                                 if (target == '.') {
-                                    legalMoves.add("$fromSquare${('a' + nc)}${8 - nr}")
+                                    candidateMoves.add(RawMove(r, c, nr, nc))
                                 } else {
                                     val isEnemy = if (isWhite) target.isLowerCase() else target.isUpperCase()
                                     if (isEnemy) {
-                                        legalMoves.add("$fromSquare${('a' + nc)}${8 - nr}")
+                                        candidateMoves.add(RawMove(r, c, nr, nc))
                                     }
                                     break
                                 }
@@ -501,7 +677,6 @@ object StockfishBridge {
                         }
                     }
                     'K' -> {
-                        // 王：8 个方向单步移动
                         val kingDirs = arrayOf(
                             Pair(-1, 0), Pair(1, 0), Pair(0, -1), Pair(0, 1),
                             Pair(-1, -1), Pair(-1, 1), Pair(1, -1), Pair(1, 1)
@@ -514,7 +689,7 @@ object StockfishBridge {
                                 val isEnemyOrEmpty = if (isWhite) (target == '.' || target.isLowerCase())
                                 else (target == '.' || target.isUpperCase())
                                 if (isEnemyOrEmpty) {
-                                    legalMoves.add("$fromSquare${('a' + nc)}${8 - nr}")
+                                    candidateMoves.add(RawMove(r, c, nr, nc))
                                 }
                             }
                         }
@@ -523,9 +698,46 @@ object StockfishBridge {
             }
         }
 
+        // 严格试走模拟验证：剔除破坏绝对牵制 (Pin) 或未解除将军 (Check) 的非法走法
+        val legalMoves = mutableListOf<String>()
+        for (m in candidateMoves) {
+            val simulated = Array(8) { rIdx -> board[rIdx].clone() }
+            val movedPiece = simulated[m.fromR][m.fromC]
+            simulated[m.fromR][m.fromC] = '.'
+            simulated[m.toR][m.toC] = if (m.promo.isNotEmpty()) (if (isWhite) 'Q' else 'q') else movedPiece
+
+            if (!isKingInCheck(simulated, isWhite)) {
+                val fromSquare = "${('a' + m.fromC)}${8 - m.fromR}"
+                val toSquare = "${('a' + m.toC)}${8 - m.toR}"
+                legalMoves.add("$fromSquare$toSquare${m.promo}")
+            }
+        }
+
+        // 终局处理：当无合法走法时区分将杀与逼和
+        if (legalMoves.isEmpty()) {
+            val inCheck = isKingInCheck(board, isWhite)
+            return if (inCheck) {
+                // 被将杀 (Checkmate)
+                EngineEvaluation(
+                    bestMove = "(checkmate)",
+                    evalScore = if (isWhite) -100.0f else 100.0f,
+                    depth = 0,
+                    isMate = true
+                )
+            } else {
+                // 逼和 (Stalemate)
+                EngineEvaluation(
+                    bestMove = "(stalemate)",
+                    evalScore = 0.0f,
+                    depth = 0,
+                    isMate = false
+                )
+            }
+        }
+
+        // 择优选取占中或发展轻子的优质合法走法
         val bestMove = legalMoves.firstOrNull { it.endsWith("e4") || it.endsWith("d4") || it.endsWith("e5") || it.endsWith("c5") || it.endsWith("f3") || it.endsWith("f6") }
-            ?: legalMoves.firstOrNull()
-            ?: (if (isWhite) "e2e4" else "e7e5")
+            ?: legalMoves.first()
 
         return EngineEvaluation(
             bestMove = bestMove,

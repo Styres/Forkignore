@@ -86,7 +86,22 @@ class TransparentCanvasOverlay(private val context: Context) {
 
             val step = (rect.right - rect.left) / 8.0f
             val uci = move.bestMove
-            if (uci.length < 4) return
+            if (uci.length < 4 || uci == "(none)" || uci == "(checkmate)" || uci == "(stalemate)") {
+                val statusStr = when {
+                    move.isMate || uci == "(checkmate)" -> "胜负已分 (将杀)"
+                    uci == "(stalemate)" -> "和棋 (逼和)"
+                    else -> "无合法走法"
+                }
+                val scoreText = "局面: $statusStr"
+                val pillW = 520f
+                val pillH = 75f
+                val pillX = rect.left + (rect.width() - pillW) / 2f
+                val pillY = (rect.top - pillH - 25f).coerceAtLeast(50f)
+
+                canvas.drawRoundRect(RectF(pillX, pillY, pillX + pillW, pillY + pillH), 38f, 38f, textBgPaint)
+                canvas.drawText(scoreText, pillX + 30f, pillY + 50f, textPaint)
+                return
+            }
 
             val fromCol = uci[0] - 'a'
             val fromRank = uci[1] - '0'

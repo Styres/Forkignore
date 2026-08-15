@@ -127,12 +127,20 @@ class MainActivity : AppCompatActivity() {
                     sb.append("局面 FEN: ${res.boardFen}\n")
                     sb.append("完整 FEN: ${res.fullFen}\n")
                     sb.append("-----------------------------\n")
-                    sb.append("推荐走法: ${eval.bestMove}\n")
+                    val displayMove = when (eval.bestMove) {
+                        "(checkmate)" -> "无合法走法 (胜负已分/将杀)"
+                        "(stalemate)" -> "无合法走法 (和棋/逼和)"
+                        "(none)" -> "无合法走法"
+                        else -> eval.bestMove
+                    }
+                    sb.append("推荐走法: $displayMove\n")
                     sb.append("局势评估分: ${if (eval.evalScore >= 0) "+" else ""}${String.format("%.2f", eval.evalScore)}\n")
                     sb.append("搜索深度: ${if (eval.depth <= 0) "0 层 [兜底生成器]" else "${eval.depth} 层"}\n")
                     if (eval.isMate) {
                         sb.append("杀棋状态: 胜势已锁定\n")
                     }
+                    sb.append("-----------------------------\n")
+                    sb.append("${StockfishBridge.lastDiagnosticInfo}\n")
 
                     tvResult.text = sb.toString()
                 } else {

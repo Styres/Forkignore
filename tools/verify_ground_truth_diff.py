@@ -40,13 +40,19 @@ POSITIVE_GROUND_TRUTH_DB = {
         "perspective": True, # White
         "board_fen": "rnbqkb1r/1p3ppp/p1pp1n2/3Pp3/4P3/2N2P2/PPP3PP/R1BQKBNR",
         "full_fen": "rnbqkb1r/1p3ppp/p1pp1n2/3Pp3/4P3/2N2P2/PPP3PP/R1BQKBNR w KQkq - 0 1"
+    },
+    "bug_7.jpg": {
+        "perspective": True, # White
+        "board_fen": "r1b1k1nr/pppp1ppp/2n5/5P2/3bq3/8/PPP3PP/RNB1KB1R",
+        "full_fen": "r1b1k1nr/pppp1ppp/2n5/5P2/3bq3/8/PPP3PP/RNB1KB1R w KQkq - 0 1"
     }
 }
 
-# 必须被门禁 100% 拦截的非棋盘 UI 负样本
+# 必须被门禁 100% 拦截的非棋盘 UI 负样本 (实测 MedianSim <= 0.456)
 NEGATIVE_SAMPLES = [
-    "bug_1.jpg", # 多邻国主页路线图
-    "bug_2.jpg", # 多邻国对战大厅列表
+    "bug_1.jpg", # 多邻国主页路线图 (MedianSim=0.383)
+    "bug_2.jpg", # 多邻国对战大厅列表 (MedianSim=0.366)
+    "bug_5.jpg", # 本 App 离线诊断结果 UI (MedianSim=0.456)
 ]
 
 def run_detection_pipeline(img, templates):
