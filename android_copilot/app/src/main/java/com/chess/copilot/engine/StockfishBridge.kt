@@ -198,11 +198,9 @@ object StockfishBridge {
 
             if (isEngineReady && process != null && lineChannel != null) {
                 try {
-                    val channel = lineChannel!!
-
                     // 排空历史残余文本行
                     while (true) {
-                        val poll = channel.tryReceive().getOrNull() ?: break
+                        val poll = lineChannel?.tryReceive()?.getOrNull() ?: break
                     }
 
                     sendCommand("isready")
@@ -211,6 +209,14 @@ object StockfishBridge {
                         Log.w(TAG, "Stockfish readyok timeout before evaluate, restarting process")
                         destroyProcessLocked()
                         startEngineProcessLocked()
+                    }
+
+                    val currentChannel = lineChannel
+                    if (currentChannel == null || !isEngineReady || process == null) {
+                        Log.w(TAG, "Stockfish unavailable after restart, fallback will be used")
+                        destroyProcessLocked()
+                        val fallback = evaluateFallback(fen)
+                        return@withContext fallback
                     }
 
                     sendCommand("position fen $fen")
@@ -227,7 +233,7 @@ object StockfishBridge {
 
                         val line = withTimeoutOrNull(remaining) {
                             try {
-                                channel.receive()
+                                currentChannel.receive()
                             } catch (_: Exception) {
                                 null
                             }

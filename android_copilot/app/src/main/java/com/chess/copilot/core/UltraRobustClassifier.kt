@@ -241,15 +241,19 @@ class UltraRobustClassifier(context: Context? = null) {
         }
         val gradMean = sumCenterMag / 900.0f
 
-        // 3. 4 角中值背景差分探测前景质心
-        val cornerVals = floatArrayOf(
-            gray[0], gray[1], gray[2], gray[48], gray[49], gray[50], // top-left
-            gray[45], gray[46], gray[47], gray[93], gray[94], gray[95], // top-right
-            gray[45 * 48], gray[45 * 48 + 1], gray[46 * 48], gray[46 * 48 + 1], // bottom-left
-            gray[45 * 48 + 46], gray[45 * 48 + 47], gray[46 * 48 + 46], gray[46 * 48 + 47] // bottom-right
-        )
+        // 3. 4 角中值背景差分探测前景质心 (3x3 四角采样，共 36 点统一取中值)
+        val cornerVals = FloatArray(36)
+        var cIdx = 0
+        for (r in 0..2) {
+            for (c in 0..2) {
+                cornerVals[cIdx++] = gray[r * 48 + c]
+                cornerVals[cIdx++] = gray[r * 48 + (45 + c)]
+                cornerVals[cIdx++] = gray[(45 + r) * 48 + c]
+                cornerVals[cIdx++] = gray[(45 + r) * 48 + (45 + c)]
+            }
+        }
         cornerVals.sort()
-        val bgVal = cornerVals[cornerVals.size / 2]
+        val bgVal = cornerVals[18]
 
         var sumFgY = 0.0
         var sumFgX = 0.0

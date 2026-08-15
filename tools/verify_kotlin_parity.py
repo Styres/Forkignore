@@ -8,6 +8,7 @@ import glob
 from tools.test_full_pipeline_v2 import fast_sat_locate_board
 from tools.extract_refined_templates import extract_features_from_cell
 from tools.validate_all_fen import sanitize_board_py, build_fen_py
+from tools.verify_ground_truth_diff import GROUND_TRUTH_DB
 
 def run_parity_verification():
     template_dir = "android_copilot/app/src/main/assets/templates"
@@ -20,11 +21,9 @@ def run_parity_verification():
         templates.append((cls_name, feat['f_body'], feat['f_head']))
         
     print(f"Loaded {len(templates)} templates from {template_dir}")
-    
-    test_images = ["duolingo_1.jpeg", "duolingo_2.jpg", "duolingo_3.jpg"]
     all_passed = True
     
-    for img_name in test_images:
+    for img_name, gt in GROUND_TRUTH_DB.items():
         if not os.path.exists(img_name): continue
         img = cv2.imread(img_name)
         l, t, r, b = fast_sat_locate_board(img)
@@ -76,12 +75,23 @@ def run_parity_verification():
         is_white_persp = bot_w >= bot_b
         
         board_fen, full_fen = build_fen_py(sanitized, is_white_persp)
-        print(f"\n[{img_name}] Parity Result:")
-        print(f"  Perspective: {'White' if is_white_persp else 'Black'}")
-        print(f"  Board FEN:   {board_fen}")
-        print(f"  Full FEN:    {full_fen}")
+        expected_fen = gt["board_fen"]
         
-    print("\n[SUCCESS] Dual-zone feature extraction parity verified!")
+        print(f"\n[{img_name}] Parity Result:")
+        print(f"  Detected FEN: {board_fen}")
+        print(f"  Expected FEN: {expected_fen}")
+        
+        if board_fen != expected_fen:
+            print(f"  [ERROR] Parity mismatch on {img_name}!")
+            all_passed = False
+        else:
+            print(f"  --> [PASS] 100% Match!")
+            
+    if not all_passed:
+        print("\n[FAIL] Parity verification failed!")
+        sys.exit(1)
+    else:
+        print("\n[SUCCESS] Dual-zone feature extraction parity verified with 100% Ground Truth accuracy!")
 
 if __name__ == '__main__':
     run_parity_verification()
