@@ -34,7 +34,6 @@ import com.chess.copilot.core.UltraRobustClassifier
 import com.chess.copilot.engine.StockfishBridge
 import com.chess.copilot.ui.MainActivity
 import com.chess.copilot.ui.TransparentCanvasOverlay
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -42,7 +41,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.FileOutputStream
 
@@ -51,7 +49,7 @@ import java.io.FileOutputStream
  * 符合 Android 14 规范的前台服务
  * 核心机制：
  * 1. 消除 Overlay 自污染：截帧前瞬间隐藏悬浮球与透明图层，捕获纯净屏幕后恢复
- * 2. 按需单帧即时捕获 (On-Demand Single-Shot Capture)，彻底消除首帧残留与跳变
+ * 2. 常驻长连接 VirtualDisplay + 持续消费丢弃过渡帧，彻底消除单次点击注销会话与首帧残留
  * 3. 跨机型通用 pixelStride 像素拷贝
  * 4. 真机落盘诊断功能 (filesDir/debug/)
  */
@@ -71,6 +69,8 @@ class FloatingBubbleService : Service() {
 
     private var mediaProjectionManager: MediaProjectionManager? = null
     private var mediaProjection: MediaProjection? = null
+    private var virtualDisplay: VirtualDisplay? = null
+    private var imageReader: ImageReader? = null
     private var captureThread: HandlerThread? = null
     private var captureHandler: Handler? = null
 
@@ -78,6 +78,8 @@ class FloatingBubbleService : Service() {
     private var screenHeight = 2400
     private var screenDensity = 420
     private var isAnalyzing = false
+    @Volatile
+    private var isCapturingFrame = false
 
     private val serviceJob = Job()
     private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
@@ -101,23 +103,13 @@ class FloatingBubbleService : Service() {
         // 1. Android 14 严格要求：必须先调用 startForeground 指定 mediaProjection 类型
         startForegroundNotification()
 
-        // 2. 提取截屏授权 Token
+        // 2. 提取截屏授权 Token 并初始化常驻 VirtualDisplay 会话
         if (intent != null) {
             val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
             val resultData = IntentCompat.getParcelableExtra(intent, EXTRA_RESULT_DATA, Intent::class.java)
 
-            if (resultCode == Activity.RESULT_OK && resultData != null) {
-                try {
-                    mediaProjection?.stop()
-                    mediaProjection = mediaProjectionManager?.getMediaProjection(resultCode, resultData)
-                    mediaProjection?.registerCallback(object : MediaProjection.Callback() {
-                        override fun onStop() {
-                            mediaProjection = null
-                        }
-                    }, captureHandler)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+            if (resultCode == Activity.RESULT_OK && resultData != null && mediaProjection == null) {
+                setupMediaProjection(resultCode, resultData)
             }
         }
 
@@ -155,6 +147,48 @@ class FloatingBubbleService : Service() {
         screenWidth = metrics.widthPixels
         screenHeight = metrics.heightPixels
         screenDensity = metrics.densityDpi
+    }
+
+    private fun setupMediaProjection(resultCode: Int, data: Intent) {
+        try {
+            cleanupProjection()
+            updateScreenMetrics()
+
+            val proj = mediaProjectionManager?.getMediaProjection(resultCode, data)
+            mediaProjection = proj
+            proj?.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() {
+                    cleanupProjection()
+                }
+            }, captureHandler)
+
+            val reader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+            imageReader = reader
+
+            // 挂载后台长驻监听，持续消费并丢弃过渡帧，确保缓冲区不堆积
+            reader.setOnImageAvailableListener({ ir ->
+                if (!isCapturingFrame) {
+                    try {
+                        val img = ir.acquireLatestImage()
+                        img?.close()
+                    } catch (_: Exception) {}
+                }
+            }, captureHandler)
+
+            virtualDisplay = proj?.createVirtualDisplay(
+                "ChessPersistentDisplay",
+                screenWidth,
+                screenHeight,
+                screenDensity,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                reader.surface,
+                null,
+                captureHandler
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            Toast.makeText(this, "截屏初始化异常: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun createFloatingBubble() {
@@ -225,7 +259,7 @@ class FloatingBubbleService : Service() {
     private fun onBubbleClicked() {
         if (isAnalyzing) return
 
-        if (mediaProjection == null) {
+        if (mediaProjection == null || imageReader == null || virtualDisplay == null) {
             Toast.makeText(this, "截屏授权已失效，请重新开启悬浮助手", Toast.LENGTH_LONG).show()
             val reAuthIntent = Intent(this, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -239,23 +273,23 @@ class FloatingBubbleService : Service() {
         serviceScope.launch {
             var screenBitmap: Bitmap? = null
             try {
-                // 1. 消除 Overlay 自污染：截帧前瞬间隐藏悬浮球与透明图层
+                // 1. 消除 Overlay 自污染：截帧前隐藏悬浮球与透明走法图层
                 transparentOverlay?.hide()
                 bubbleView?.visibility = View.INVISIBLE
-                delay(40) // 等待 40ms 确保窗口管理器合成刷新
+                delay(45) // 等待 45ms 确保屏幕完成无图层合成
 
-                // 2. 按需现场单帧捕获纯净屏幕
-                screenBitmap = captureSingleFreshFrame()
+                // 2. 从常驻 ImageReader 中获取最新纯净鲜活帧
+                screenBitmap = captureCurrentScreenBitmap()
 
-                // 3. 立即恢复悬浮球可见性
+                // 3. 恢复悬浮球显示
                 bubbleView?.visibility = View.VISIBLE
 
                 if (screenBitmap == null) {
-                    Toast.makeText(this@FloatingBubbleService, "正在捕获画面，请稍后重试", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@FloatingBubbleService, "画面截取中，请稍后重试", Toast.LENGTH_SHORT).show()
                     return@launch
                 }
 
-                // 4. 积分图 (SAT) 快速定位棋盘
+                // 4. SAT 棋盘定位
                 val boardRect = withContext(Dispatchers.Default) {
                     ChessLocator.locateBoard(screenBitmap)
                 }
@@ -289,79 +323,50 @@ class FloatingBubbleService : Service() {
     }
 
     /**
-     * 按需单帧即时捕获：现场创建 VirtualDisplay + ImageReader，取到新鲜帧后立即释放
+     * 从常驻 ImageReader 中提取当前最新鲜一帧 Bitmap
      */
-    private suspend fun captureSingleFreshFrame(): Bitmap? = withContext(Dispatchers.IO) {
-        val proj = mediaProjection ?: return@withContext null
-        updateScreenMetrics()
-
-        val reader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
-        val deferredBitmap = CompletableDeferred<Bitmap?>()
-
-        var virtualDisplay: VirtualDisplay? = null
-        var frameCount = 0
-
-        reader.setOnImageAvailableListener({ ir ->
-            try {
-                val image = ir.acquireLatestImage() ?: return@setOnImageAvailableListener
-                frameCount++
-                // 丢弃首帧可能未完全刷新的黑帧，提取最新鲜的一帧
-                if (frameCount < 2) {
-                    image.close()
-                    return@setOnImageAvailableListener
-                }
-
-                if (!deferredBitmap.isCompleted) {
-                    val planes = image.planes
-                    val buffer = planes[0].buffer
-                    val pixelStride = planes[0].pixelStride
-                    val rowStride = planes[0].rowStride
-                    val rowPadding = rowStride - pixelStride * screenWidth
-
-                    val bmp = if (pixelStride == 4 && rowPadding == 0) {
-                        val b = Bitmap.createBitmap(screenWidth, screenHeight, Bitmap.Config.ARGB_8888)
-                        b.copyPixelsFromBuffer(buffer)
-                        b
-                    } else {
-                        val paddedW = screenWidth + rowPadding / pixelStride
-                        val temp = Bitmap.createBitmap(paddedW, screenHeight, Bitmap.Config.ARGB_8888)
-                        temp.copyPixelsFromBuffer(buffer)
-                        val cropped = Bitmap.createBitmap(temp, 0, 0, screenWidth, screenHeight)
-                        temp.recycle()
-                        cropped
-                    }
-                    deferredBitmap.complete(bmp)
-                }
-                image.close()
-            } catch (e: Exception) {
-                if (!deferredBitmap.isCompleted) deferredBitmap.complete(null)
-            }
-        }, captureHandler)
-
+    private suspend fun captureCurrentScreenBitmap(): Bitmap? = withContext(Dispatchers.IO) {
+        val reader = imageReader ?: return@withContext null
+        isCapturingFrame = true
         try {
-            virtualDisplay = proj.createVirtualDisplay(
-                "ChessSingleCapture",
-                screenWidth,
-                screenHeight,
-                screenDensity,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                reader.surface,
-                null,
-                captureHandler
-            )
+            var bmp: Bitmap? = null
+            val start = System.currentTimeMillis()
+            while (System.currentTimeMillis() - start < 250L) {
+                val image = reader.acquireLatestImage()
+                if (image != null) {
+                    try {
+                        val planes = image.planes
+                        val buffer = planes[0].buffer
+                        val pixelStride = planes[0].pixelStride
+                        val rowStride = planes[0].rowStride
+                        val rowPadding = rowStride - pixelStride * screenWidth
 
-            // 超时保护：最多等待 400ms
-            return@withContext withTimeoutOrNull(400L) {
-                deferredBitmap.await()
+                        bmp = if (pixelStride == 4 && rowPadding == 0) {
+                            val b = Bitmap.createBitmap(screenWidth, screenHeight, Bitmap.Config.ARGB_8888)
+                            b.copyPixelsFromBuffer(buffer)
+                            b
+                        } else {
+                            val paddedW = screenWidth + rowPadding / pixelStride
+                            val temp = Bitmap.createBitmap(paddedW, screenHeight, Bitmap.Config.ARGB_8888)
+                            temp.copyPixelsFromBuffer(buffer)
+                            val cropped = Bitmap.createBitmap(temp, 0, 0, screenWidth, screenHeight)
+                            temp.recycle()
+                            cropped
+                        }
+                    } finally {
+                        image.close()
+                    }
+                    break
+                } else {
+                    delay(10)
+                }
             }
+            return@withContext bmp
         } catch (e: Exception) {
             e.printStackTrace()
             return@withContext null
         } finally {
-            try {
-                virtualDisplay?.release()
-                reader.close()
-            } catch (_: Exception) {}
+            isCapturingFrame = false
         }
     }
 
@@ -387,16 +392,30 @@ class FloatingBubbleService : Service() {
         }
     }
 
+    private fun cleanupProjection() {
+        try {
+            virtualDisplay?.release()
+        } catch (_: Exception) {}
+        try {
+            imageReader?.close()
+        } catch (_: Exception) {}
+        try {
+            mediaProjection?.stop()
+        } catch (_: Exception) {}
+        virtualDisplay = null
+        imageReader = null
+        mediaProjection = null
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         serviceScope.cancel()
         bubbleView?.let { windowManager.removeView(it) }
         transparentOverlay?.hide()
+        cleanupProjection()
         try {
-            mediaProjection?.stop()
             captureThread?.quitSafely()
         } catch (_: Exception) {}
-        mediaProjection = null
         captureThread = null
         captureHandler = null
         StockfishBridge.release()
