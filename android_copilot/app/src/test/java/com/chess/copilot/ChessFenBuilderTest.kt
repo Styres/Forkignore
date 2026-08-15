@@ -33,14 +33,14 @@ class ChessFenBuilderTest {
     @Test
     fun testBlackPerspectiveFlipping() {
         val rawScreenBoard = arrayOf(
-            charArrayOf('R', 'N', 'B', 'Q', 'K', 'B', 'N', 'R'),
-            charArrayOf('P', 'P', 'P', 'P', '.', 'P', 'P', 'P'),
+            charArrayOf('R', 'N', 'B', 'K', 'Q', 'B', 'N', 'R'),
+            charArrayOf('P', 'P', 'P', '.', 'P', 'P', 'P', 'P'),
             charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
-            charArrayOf('.', '.', '.', '.', 'P', '.', '.', '.'),
+            charArrayOf('.', '.', '.', 'P', '.', '.', '.', '.'),
             charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
             charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
             charArrayOf('p', 'p', 'p', 'p', 'p', 'p', 'p', 'p'),
-            charArrayOf('r', 'n', 'b', 'q', 'k', 'b', 'n', 'r')
+            charArrayOf('r', 'n', 'b', 'k', 'q', 'b', 'n', 'r')
         )
 
         val result = UltraRobustClassifier.buildFenFromBoard(rawScreenBoard, isWhitePerspective = false)
