@@ -20,14 +20,14 @@ class FallbackRulesTest {
     @Test
     fun testInCheckDefenseOnlyBug7() {
         // bug_7.jpg 真实对局残局：黑后在 e4 直接抽将白王 (e1)
-        // 白方严格只能走合法解将走法 (如 Be2, Ne2, Qe2, Kd1)，绝对禁止走无关兵 f5f6 等送王走法
+        // 该局面白方无后且 b1 马无法到达 e2，合法解将仅有：Be2 垫 e2、Be3 垫 e3、Kd1/Kd2 避将
+        // 绝对禁止走无关兵 f5f6 等送王走法
         val fenBug7 = "r1b1k1nr/pppp1ppp/2n5/5P2/3bq3/8/PPP3PP/RNB1KB1R w KQkq - 0 1"
         val eval = StockfishBridge.evaluateFallback(fenBug7)
 
         val legalDefenseMoves = setOf(
-            "f1e2", // Be2 (主教挡将)
-            "b1e2", // Ne2 (马挡将)
-            "d1e2", // Qe2 (后挡将)
+            "f1e2", // Be2 (主教挡将, 垫 e2)
+            "c1e3", // Be3 (主教挡将, 垫 e3)
             "e1d1", // Kd1 (王避将)
             "e1d2"  // Kd2 (王避将)
         )
