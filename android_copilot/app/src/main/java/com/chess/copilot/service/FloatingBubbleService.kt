@@ -17,6 +17,8 @@ import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.util.DisplayMetrics
 import android.view.Gravity
@@ -32,16 +34,26 @@ import com.chess.copilot.core.UltraRobustClassifier
 import com.chess.copilot.engine.StockfishBridge
 import com.chess.copilot.ui.MainActivity
 import com.chess.copilot.ui.TransparentCanvasOverlay
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
+import java.io.FileOutputStream
 
 /**
  * 屏幕边缘悬浮球服务 (Floating Bubble)
- * 符合 Android 14 规范的前台服务 + MediaProjection 截屏 -> 梯度场识别 -> Stockfish 算招 -> 透明绘制
+ * 符合 Android 14 规范的前台服务
+ * 核心机制：
+ * 1. 消除 Overlay 自污染：截帧前瞬间隐藏悬浮球与透明图层，捕获纯净屏幕后恢复
+ * 2. 按需单帧即时捕获 (On-Demand Single-Shot Capture)，彻底消除首帧残留与跳变
+ * 3. 跨机型通用 pixelStride 像素拷贝
+ * 4. 真机落盘诊断功能 (filesDir/debug/)
  */
 class FloatingBubbleService : Service() {
 
@@ -59,8 +71,8 @@ class FloatingBubbleService : Service() {
 
     private var mediaProjectionManager: MediaProjectionManager? = null
     private var mediaProjection: MediaProjection? = null
-    private var virtualDisplay: VirtualDisplay? = null
-    private var imageReader: ImageReader? = null
+    private var captureThread: HandlerThread? = null
+    private var captureHandler: Handler? = null
 
     private var screenWidth = 1080
     private var screenHeight = 2400
@@ -78,6 +90,9 @@ class FloatingBubbleService : Service() {
         classifier = UltraRobustClassifier(this)
         StockfishBridge.init(this)
 
+        captureThread = HandlerThread("ScreenCaptureThread").apply { start() }
+        captureHandler = Handler(captureThread!!.looper)
+
         updateScreenMetrics()
         createFloatingBubble()
     }
@@ -86,13 +101,23 @@ class FloatingBubbleService : Service() {
         // 1. Android 14 严格要求：必须先调用 startForeground 指定 mediaProjection 类型
         startForegroundNotification()
 
-        // 2. 提取截屏授权 Token 并初始化投影
+        // 2. 提取截屏授权 Token
         if (intent != null) {
             val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
             val resultData = IntentCompat.getParcelableExtra(intent, EXTRA_RESULT_DATA, Intent::class.java)
 
             if (resultCode == Activity.RESULT_OK && resultData != null) {
-                setupMediaProjection(resultCode, resultData)
+                try {
+                    mediaProjection?.stop()
+                    mediaProjection = mediaProjectionManager?.getMediaProjection(resultCode, resultData)
+                    mediaProjection?.registerCallback(object : MediaProjection.Callback() {
+                        override fun onStop() {
+                            mediaProjection = null
+                        }
+                    }, captureHandler)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
             }
         }
 
@@ -130,34 +155,6 @@ class FloatingBubbleService : Service() {
         screenWidth = metrics.widthPixels
         screenHeight = metrics.heightPixels
         screenDensity = metrics.densityDpi
-    }
-
-    private fun setupMediaProjection(resultCode: Int, data: Intent) {
-        try {
-            cleanupProjection()
-            mediaProjection = mediaProjectionManager?.getMediaProjection(resultCode, data)
-            mediaProjection?.registerCallback(object : MediaProjection.Callback() {
-                override fun onStop() {
-                    cleanupProjection()
-                }
-            }, null)
-
-            // 创建 ImageReader 与 VirtualDisplay
-            imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
-            virtualDisplay = mediaProjection?.createVirtualDisplay(
-                "ChessScreenCapture",
-                screenWidth,
-                screenHeight,
-                screenDensity,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                imageReader?.surface,
-                null,
-                null
-            )
-        } catch (e: Exception) {
-            e.printStackTrace()
-            Toast.makeText(this, "截屏初始化异常: ${e.message}", Toast.LENGTH_SHORT).show()
-        }
     }
 
     private fun createFloatingBubble() {
@@ -228,8 +225,7 @@ class FloatingBubbleService : Service() {
     private fun onBubbleClicked() {
         if (isAnalyzing) return
 
-        // 检查截屏授权有效性
-        if (mediaProjection == null || imageReader == null) {
+        if (mediaProjection == null) {
             Toast.makeText(this, "截屏授权已失效，请重新开启悬浮助手", Toast.LENGTH_LONG).show()
             val reAuthIntent = Intent(this, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -243,78 +239,140 @@ class FloatingBubbleService : Service() {
         serviceScope.launch {
             var screenBitmap: Bitmap? = null
             try {
-                // 1. 截取当前屏幕一帧 Bitmap
-                screenBitmap = captureScreenBitmap()
+                // 1. 消除 Overlay 自污染：截帧前瞬间隐藏悬浮球与透明图层
+                transparentOverlay?.hide()
+                bubbleView?.visibility = View.INVISIBLE
+                delay(40) // 等待 40ms 确保窗口管理器合成刷新
+
+                // 2. 按需现场单帧捕获纯净屏幕
+                screenBitmap = captureSingleFreshFrame()
+
+                // 3. 立即恢复悬浮球可见性
+                bubbleView?.visibility = View.VISIBLE
+
                 if (screenBitmap == null) {
                     Toast.makeText(this@FloatingBubbleService, "正在捕获画面，请稍后重试", Toast.LENGTH_SHORT).show()
                     return@launch
                 }
 
-                // 2. 梳状谐振滤波定位棋盘
+                // 4. 积分图 (SAT) 快速定位棋盘
                 val boardRect = withContext(Dispatchers.Default) {
                     ChessLocator.locateBoard(screenBitmap)
                 }
 
-                // 3. 梯度场 NCC + 2-Means 识别棋子矩阵与 FEN
+                // 5. 梯度场 NCC + 2-Means 识别棋子矩阵与 FEN
                 val res = withContext(Dispatchers.Default) {
                     classifier?.classifyBoard(screenBitmap, boardRect)
                 }
 
                 if (res != null) {
-                    // 4. Stockfish 引擎高速算招 (超时安全)
+                    // 6. 异步保存真机落盘诊断图与 FEN
+                    saveDebugArtifactsAsync(screenBitmap, boardRect, res.fullFen)
+
+                    // 7. Stockfish 引擎高速算招 (带缓存与自愈)
                     val eval = StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = 120)
 
-                    // 5. 在全透明 Canvas 上绘制走法箭头与局势胶囊
+                    // 8. 在全透明 Canvas 上绘制走法箭头与局势胶囊
                     transparentOverlay?.showSuggestion(res.boardRect, eval, res.isWhitePerspective)
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
             } finally {
+                bubbleView?.visibility = View.VISIBLE
                 screenBitmap?.recycle()
                 isAnalyzing = false
             }
         }
     }
 
-    private suspend fun captureScreenBitmap(): Bitmap? = withContext(Dispatchers.Default) {
-        val reader = imageReader ?: return@withContext null
-        val image = reader.acquireLatestImage() ?: return@withContext null
+    /**
+     * 按需单帧即时捕获：现场创建 VirtualDisplay + ImageReader，取到新鲜帧后立即释放
+     */
+    private suspend fun captureSingleFreshFrame(): Bitmap? = withContext(Dispatchers.IO) {
+        val proj = mediaProjection ?: return@withContext null
+        updateScreenMetrics()
+
+        val reader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+        val deferredBitmap = CompletableDeferred<Bitmap?>()
+
+        var virtualDisplay: VirtualDisplay? = null
+        var frameCount = 0
+
+        reader.setOnImageAvailableListener({ ir ->
+            try {
+                val image = ir.acquireLatestImage() ?: return@setOnImageAvailableListener
+                frameCount++
+                // 获取第一帧有效图像
+                if (!deferredBitmap.isCompleted) {
+                    val planes = image.planes
+                    val buffer = planes[0].buffer
+                    val pixelStride = planes[0].pixelStride
+                    val rowStride = planes[0].rowStride
+                    val rowPadding = rowStride - pixelStride * screenWidth
+
+                    val bmp = if (pixelStride == 4 && rowPadding == 0) {
+                        val b = Bitmap.createBitmap(screenWidth, screenHeight, Bitmap.Config.ARGB_8888)
+                        b.copyPixelsFromBuffer(buffer)
+                        b
+                    } else {
+                        val paddedW = screenWidth + rowPadding / pixelStride
+                        val temp = Bitmap.createBitmap(paddedW, screenHeight, Bitmap.Config.ARGB_8888)
+                        temp.copyPixelsFromBuffer(buffer)
+                        val cropped = Bitmap.createBitmap(temp, 0, 0, screenWidth, screenHeight)
+                        temp.recycle()
+                        cropped
+                    }
+                    deferredBitmap.complete(bmp)
+                }
+                image.close()
+            } catch (e: Exception) {
+                if (!deferredBitmap.isCompleted) deferredBitmap.complete(null)
+            }
+        }, captureHandler)
 
         try {
-            val planes = image.planes
-            val buffer = planes[0].buffer
-            val pixelStride = planes[0].pixelStride
-            val rowStride = planes[0].rowStride
-            val rowPadding = rowStride - pixelStride * screenWidth
-
-            val bmp = Bitmap.createBitmap(
-                screenWidth + rowPadding / pixelStride,
+            virtualDisplay = proj.createVirtualDisplay(
+                "ChessSingleCapture",
+                screenWidth,
                 screenHeight,
-                Bitmap.Config.ARGB_8888
+                screenDensity,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                reader.surface,
+                null,
+                captureHandler
             )
-            bmp.copyPixelsFromBuffer(buffer)
-            val resultBmp = Bitmap.createBitmap(bmp, 0, 0, screenWidth, screenHeight)
-            if (resultBmp !== bmp) {
-                bmp.recycle()
+
+            // 超时保护：最多等待 400ms
+            return@withContext withTimeoutOrNull(400L) {
+                deferredBitmap.await()
             }
-            return@withContext resultBmp
         } catch (e: Exception) {
             e.printStackTrace()
             return@withContext null
         } finally {
-            image.close()
+            try {
+                virtualDisplay?.release()
+                reader.close()
+            } catch (_: Exception) {}
         }
     }
 
-    private fun cleanupProjection() {
-        try {
-            virtualDisplay?.release()
-            imageReader?.close()
-            mediaProjection?.stop()
-        } catch (_: Exception) {}
-        mediaProjection = null
-        virtualDisplay = null
-        imageReader = null
+    private fun saveDebugArtifactsAsync(bitmap: Bitmap, rect: android.graphics.Rect, fen: String) {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val debugDir = File(filesDir, "debug")
+                if (!debugDir.exists()) debugDir.mkdirs()
+
+                val imgFile = File(debugDir, "last_capture.png")
+                val fos = FileOutputStream(imgFile)
+                bitmap.compress(Bitmap.CompressFormat.PNG, 90, fos)
+                fos.flush()
+                fos.close()
+
+                val txtFile = File(debugDir, "last_diagnostic.txt")
+                txtFile.writeText("BoardRect: $rect\nFEN: $fen\nTime: ${System.currentTimeMillis()}\n")
+            } catch (_: Exception) {}
+        }
     }
 
     override fun onDestroy() {
@@ -322,7 +380,13 @@ class FloatingBubbleService : Service() {
         serviceScope.cancel()
         bubbleView?.let { windowManager.removeView(it) }
         transparentOverlay?.hide()
-        cleanupProjection()
+        try {
+            mediaProjection?.stop()
+            captureThread?.quitSafely()
+        } catch (_: Exception) {}
+        mediaProjection = null
+        captureThread = null
+        captureHandler = null
         StockfishBridge.release()
     }
 

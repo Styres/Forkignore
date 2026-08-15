@@ -12,7 +12,7 @@ import kotlin.math.sqrt
 /**
  * 纯 Kotlin 移植版多模态多邻国 2D 棋子识别器
  * 基于 48x48 核心 ROI 梯度场余弦互相关 (Cosine NCC) 与 2-Means 阵营自适应聚类
- * 零外部 ONNX/Python 模型依赖，极速 (<15ms) 且稳定
+ * 结合 chess-position-detector 数量约束与 Lichess 合规 FEN 清洗
  */
 class UltraRobustClassifier(context: Context? = null) {
 
@@ -85,34 +85,52 @@ class UltraRobustClassifier(context: Context? = null) {
                 val cellH = max(1, y2 - y1)
                 val cellBmp = Bitmap.createBitmap(bitmap, x1, y1, cellW, cellH)
                 val feat = extractFeatureFromBitmap(cellBmp)
+                if (cellBmp !== bitmap) cellBmp.recycle()
                 feat
             }
         }
 
-        // 1. 识别各格子棋子种类与收集有子格
-        data class OccupiedCell(val r: Int, val c: Int, val feat: CellFeature, val pieceClass: String)
+        // 1. 识别各格子棋子种类，记录第一与第二置信度候选
+        data class OccupiedCell(
+            val r: Int,
+            val c: Int,
+            val feat: CellFeature,
+            val primaryClass: String,
+            val secondaryClass: String,
+            val kingSimilarity: Float
+        )
         val occupiedList = mutableListOf<OccupiedCell>()
 
         for (r in 0..7) {
             for (c in 0..7) {
                 val f = cellsFeats[r][c]
-                // 阈值判断：空网格方差与梯度能量极低
+                // 阈值判断：空网格中心方差与边缘梯度极低
                 if (f.centerStd < 6.0f || f.gradMean < 8.0f) {
                     continue
                 }
 
-                // 与所有模板计算余弦相似度，选取最高匹配
                 var bestCls = "P"
                 var bestSim = -1e9f
+                var secondCls = "P"
+                var secondSim = -1e9f
+                var kingSim = -1e9f
 
                 for (t in templates) {
                     val sim = computeCosineSimilarity(f.magNorm, t.magNorm)
+                    if (t.className == "K" && sim > kingSim) {
+                        kingSim = sim
+                    }
                     if (sim > bestSim) {
+                        secondSim = bestSim
+                        secondCls = bestCls
                         bestSim = sim
                         bestCls = t.className
+                    } else if (sim > secondSim && t.className != bestCls) {
+                        secondSim = sim
+                        secondCls = t.className
                     }
                 }
-                occupiedList.add(OccupiedCell(r, c, f, bestCls))
+                occupiedList.add(OccupiedCell(r, c, f, bestCls, secondCls, kingSim))
             }
         }
 
@@ -124,12 +142,12 @@ class UltraRobustClassifier(context: Context? = null) {
 
             for (cell in occupiedList) {
                 val isWhite = cell.feat.centerMean >= splitThreshold
-                val sym = if (isWhite) cell.pieceClass[0].uppercaseChar() else cell.pieceClass[0].lowercaseChar()
+                val sym = if (isWhite) cell.primaryClass[0].uppercaseChar() else cell.primaryClass[0].lowercaseChar()
                 rawBoard[cell.r][cell.c] = sym
             }
         }
 
-        // 3. 约束校验（如 King 数量）
+        // 3. 约束校验（双王守恒、Rank 1/8 禁兵、数量上限重分类）
         val sanitizedBoard = sanitizeBoard(rawBoard)
 
         // 4. 统计顶底黑白子判定视角
@@ -161,6 +179,7 @@ class UltraRobustClassifier(context: Context? = null) {
         val resized = Bitmap.createScaledBitmap(cellBmp, 48, 48, true)
         val pixels = IntArray(48 * 48)
         resized.getPixels(pixels, 0, 48, 0, 0, 48, 48)
+        if (resized !== cellBmp) resized.recycle()
 
         val gray = FloatArray(48 * 48)
         for (i in pixels.indices) {
@@ -272,24 +291,116 @@ class UltraRobustClassifier(context: Context? = null) {
         }
 
         /**
-         * 校验棋盘合法性（例如每方王数量严格为 1）
+         * 校验棋盘合法性：借鉴 chess-position-detector 数量上限约束与 Lichess 规则清洗
          */
         fun sanitizeBoard(board: Array<CharArray>): Array<CharArray> {
             val result = Array(8) { r -> CharArray(8) { c -> board[r][c] } }
-            var whiteKingCount = 0
-            var blackKingCount = 0
+
+            // 1. Rank 1 (row 7) 与 Rank 8 (row 0) 严禁出现兵（Pawn）
+            for (c in 0..7) {
+                if (result[0][c] == 'P' || result[0][c] == 'p') {
+                    result[0][c] = '.'
+                }
+                if (result[7][c] == 'P' || result[7][c] == 'p') {
+                    result[7][c] = '.'
+                }
+            }
+
+            // 2. 统计子力数量并执行上限约束
+            val pieceCounts = mutableMapOf<Char, Int>()
+            val maxLimits = mapOf(
+                'K' to 1, 'k' to 1,
+                'Q' to 1, 'q' to 1,
+                'R' to 2, 'r' to 2,
+                'B' to 2, 'b' to 2,
+                'N' to 2, 'n' to 2,
+                'P' to 8, 'p' to 8
+            )
 
             for (r in 0..7) {
                 for (c in 0..7) {
-                    if (result[r][c] == 'K') {
-                        whiteKingCount++
-                        if (whiteKingCount > 1) result[r][c] = 'P' // 超限王降级为兵
-                    } else if (result[r][c] == 'k') {
-                        blackKingCount++
-                        if (blackKingCount > 1) result[r][c] = 'p'
+                    val p = result[r][c]
+                    if (p == '.') continue
+                    val count = pieceCounts.getOrDefault(p, 0) + 1
+                    pieceCounts[p] = count
+                    val maxAllowed = maxLimits[p] ?: 8
+                    if (count > maxAllowed) {
+                        // 超限降级：多余的王/后降级为车/马/空
+                        result[r][c] = when (p) {
+                            'K' -> 'R'
+                            'k' -> 'r'
+                            'Q' -> 'B'
+                            'q' -> 'b'
+                            else -> '.'
+                        }
                     }
                 }
             }
+
+            // 3. 双王唯一性保证（王=0 时从底线候选回填国王）
+            var whiteKingCount = 0
+            var blackKingCount = 0
+            for (r in 0..7) {
+                for (c in 0..7) {
+                    if (result[r][c] == 'K') whiteKingCount++
+                    if (result[r][c] == 'k') blackKingCount++
+                }
+            }
+
+            // 白王回填
+            if (whiteKingCount == 0) {
+                var placed = false
+                for (r in 7 downTo 6) {
+                    for (c in 3..4) {
+                        if (result[r][c] == '.' || result[r][c].isUpperCase()) {
+                            result[r][c] = 'K'
+                            placed = true
+                            break
+                        }
+                    }
+                    if (placed) break
+                }
+                if (!placed) {
+                    for (r in 7 downTo 0) {
+                        for (c in 0..7) {
+                            if (result[r][c] != 'k') {
+                                result[r][c] = 'K'
+                                placed = true
+                                break
+                            }
+                        }
+                        if (placed) break
+                    }
+                }
+            }
+
+            // 黑王回填
+            if (blackKingCount == 0) {
+                var placed = false
+                for (r in 0..1) {
+                    for (c in 3..4) {
+                        if (result[r][c] == '.' || result[r][c].isLowerCase()) {
+                            result[r][c] = 'k'
+                            placed = true
+                            break
+                        }
+                    }
+                    if (placed) break
+                }
+                if (!placed) {
+                    for (r in 0..7) {
+                        for (c in 0..7) {
+                            if (result[r][c] != 'K') {
+                                result[r][c] = 'k'
+                                placed = true
+                                break
+                            }
+                        }
+                        if (placed) break
+                    }
+                }
+            }
+
             return result
         }
 
