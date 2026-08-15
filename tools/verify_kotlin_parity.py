@@ -21,11 +21,25 @@ def run_parity_verification():
         templates.append((cls_name, feat['f_body'], feat['f_head']))
         
     print(f"Loaded {len(templates)} templates from {template_dir}")
+    if len(templates) == 0:
+        print("[FATAL ERROR] Template bank is EMPTY! Failing parity gating.")
+        sys.exit(1)
+        
     all_passed = True
+    verified_count = 0
     
     for img_name, gt in GROUND_TRUTH_DB.items():
-        if not os.path.exists(img_name): continue
+        if not os.path.exists(img_name):
+            print(f"[FATAL ERROR] Required benchmark image '{img_name}' is MISSING from disk!")
+            all_passed = False
+            continue
+            
         img = cv2.imread(img_name)
+        if img is None:
+            print(f"[FATAL ERROR] Failed to load benchmark image '{img_name}'!")
+            all_passed = False
+            continue
+            
         l, t, r, b = fast_sat_locate_board(img)
         step = (r - l) / 8.0
         
@@ -51,7 +65,7 @@ def run_parity_verification():
                             best_cls = t_cls
                     occupied.append((row, col, f, best_cls))
                     
-        # 2-Means
+        # 2-Means (含单色残局极差保护)
         raw_board = [['.' for _ in range(8)] for _ in range(8)]
         if occupied:
             means = [item[2]['center_mean'] for item in occupied]
@@ -91,12 +105,13 @@ def run_parity_verification():
             all_passed = False
         else:
             print(f"  --> [PASS] 100% Match!")
+            verified_count += 1
             
-    if not all_passed:
-        print("\n[FAIL] Parity verification failed!")
+    if verified_count != len(GROUND_TRUTH_DB) or not all_passed:
+        print(f"\n[FAIL] Parity verification failed! Verified {verified_count}/{len(GROUND_TRUTH_DB)} images.")
         sys.exit(1)
     else:
-        print("\n[SUCCESS] Dual-zone feature extraction parity verified with 100% Ground Truth accuracy!")
+        print(f"\n[SUCCESS] 全部 {verified_count} 款基准图像 Dual-zone parity verified with 100% Ground Truth accuracy!")
 
 if __name__ == '__main__':
     run_parity_verification()
