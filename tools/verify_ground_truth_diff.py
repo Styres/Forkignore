@@ -78,13 +78,18 @@ def run_ground_truth_diff_verification():
         raw_board = [['.' for _ in range(8)] for _ in range(8)]
         if occupied:
             means = [item[2]['center_mean'] for item in occupied]
-            c1, c2 = min(means), max(means)
-            for _ in range(10):
-                g1 = [m for m in means if abs(m - c1) <= abs(m - c2)]
-                g2 = [m for m in means if abs(m - c1) > abs(m - c2)]
-                if g1: c1 = float(np.mean(g1))
-                if g2: c2 = float(np.mean(g2))
-            thresh = (c1 + c2) / 2.0
+            min_val, max_val = min(means), max(means)
+            if max_val - min_val < 35.0:
+                avg = float(np.mean(means))
+                thresh = min_val - 1.0 if avg >= 120.0 else max_val + 1.0
+            else:
+                c1, c2 = min_val, max_val
+                for _ in range(10):
+                    g1 = [m for m in means if abs(m - c1) <= abs(m - c2)]
+                    g2 = [m for m in means if abs(m - c1) > abs(m - c2)]
+                    if g1: c1 = float(np.mean(g1))
+                    if g2: c2 = float(np.mean(g2))
+                thresh = (c1 + c2) / 2.0
             
             for r_idx, c_idx, f, cls_name in occupied:
                 is_white = f['center_mean'] >= thresh

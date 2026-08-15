@@ -21,6 +21,17 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Run Ground Truth & Parity Verification Gates
+        run: |
+          pip install opencv-python-headless numpy
+          python tools/verify_ground_truth_diff.py
+          python tools/verify_kotlin_parity.py
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
