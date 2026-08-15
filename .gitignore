@@ -4,3 +4,9 @@
 __pycache__/
 *.pyc
 .system_generated/
+.gradle/
+build/
+android_copilot/.gradle/
+android_copilot/build/
+android_copilot/app/build/
+scratch/

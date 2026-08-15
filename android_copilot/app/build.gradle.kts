@@ -52,9 +52,6 @@ dependencies {
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
 
-    // 微软官方 ONNX Runtime Android SDK (端侧超高速推理)
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
-
     // 单元测试
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
