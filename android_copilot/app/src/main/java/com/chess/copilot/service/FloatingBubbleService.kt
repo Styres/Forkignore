@@ -314,10 +314,18 @@ class FloatingBubbleService : Service() {
                 when (detailedResp) {
                     is UltraRobustClassifier.ClassificationResponse.Success -> {
                         val res = detailedResp.result
-                        if (sessionLockedPerspective == null || detailedResp.occupiedCount >= 28) {
-                            sessionLockedPerspective = res.isWhitePerspective
-                        }
-                        val lockedStateDesc = if (sessionLockedPerspective != null) "(锁定)" else ""
+                        // 方案 A: 使用纯函数状态机更新会话锁定视角 (新局>=26颗子强制校准为 detectedPerspective, 中残局锁定不漂移)
+                        sessionLockedPerspective = UltraRobustClassifier.resolvePerspectiveLock(
+                            currentLock = sessionLockedPerspective,
+                            detectedPerspective = detailedResp.detectedPerspective,
+                            occupiedCount = detailedResp.occupiedCount,
+                            medianSim = detailedResp.medianSim
+                        )
+
+                        val conflictDesc = if (sessionLockedPerspective != null && detailedResp.detectedPerspective != res.isWhitePerspective) {
+                            ", 探测:${if (detailedResp.detectedPerspective) "白" else "黑"}"
+                        } else ""
+                        val lockedStateDesc = if (sessionLockedPerspective != null) "(锁定$conflictDesc)" else ""
                         val perspectiveName = if (res.isWhitePerspective) "执白$lockedStateDesc" else "执黑$lockedStateDesc"
 
                         saveDebugArtifactsAsync(copyForDebug, boardRect, res.fullFen)
@@ -329,7 +337,8 @@ class FloatingBubbleService : Service() {
                             moveInfo = eval,
                             isWhitePerspective = res.isWhitePerspective,
                             medianSim = detailedResp.medianSim,
-                            occupiedCount = detailedResp.occupiedCount
+                            occupiedCount = detailedResp.occupiedCount,
+                            detectedPerspective = detailedResp.detectedPerspective
                         )
 
                         withContext(Dispatchers.Main) {
@@ -368,48 +377,56 @@ class FloatingBubbleService : Service() {
         }
     }
 
+    /**
+     * 从常驻 ImageReader 中提取当前最新鲜一帧 Bitmap
+     * 优雅排空：保留当前可获取到的最后一帧有效 Image，若无则等待新帧到达，杜绝静态画面全排空导致的空指针回归
+     */
     private suspend fun captureCurrentScreenBitmap(): Bitmap? = withContext(Dispatchers.IO) {
         val reader = imageReader ?: return@withContext null
         isCapturingFrame = true
         try {
+            var latestImage: android.media.Image? = null
             while (true) {
-                val stale = reader.acquireLatestImage() ?: break
-                stale.close()
+                val next = reader.acquireLatestImage() ?: break
+                latestImage?.close()
+                latestImage = next
             }
 
-            var bmp: Bitmap? = null
-            val start = System.currentTimeMillis()
-            while (System.currentTimeMillis() - start < 350L) {
-                val image = reader.acquireLatestImage()
-                if (image != null) {
-                    try {
-                        val planes = image.planes
-                        val buffer = planes[0].buffer
-                        val pixelStride = planes[0].pixelStride
-                        val rowStride = planes[0].rowStride
-                        val rowPadding = rowStride - pixelStride * screenWidth
-
-                        bmp = if (pixelStride == 4 && rowPadding == 0) {
-                            val b = Bitmap.createBitmap(screenWidth, screenHeight, Bitmap.Config.ARGB_8888)
-                            b.copyPixelsFromBuffer(buffer)
-                            b
-                        } else {
-                            val paddedW = screenWidth + rowPadding / pixelStride
-                            val temp = Bitmap.createBitmap(paddedW, screenHeight, Bitmap.Config.ARGB_8888)
-                            temp.copyPixelsFromBuffer(buffer)
-                            val cropped = Bitmap.createBitmap(temp, 0, 0, screenWidth, screenHeight)
-                            temp.recycle()
-                            cropped
-                        }
-                    } finally {
-                        image.close()
+            if (latestImage == null) {
+                val start = System.currentTimeMillis()
+                while (System.currentTimeMillis() - start < 350L) {
+                    val image = reader.acquireLatestImage()
+                    if (image != null) {
+                        latestImage = image
+                        break
                     }
-                    break
-                } else {
                     delay(15)
                 }
             }
-            return@withContext bmp
+
+            val image = latestImage ?: return@withContext null
+            try {
+                val planes = image.planes
+                val buffer = planes[0].buffer
+                val pixelStride = planes[0].pixelStride
+                val rowStride = planes[0].rowStride
+                val rowPadding = rowStride - pixelStride * screenWidth
+
+                return@withContext if (pixelStride == 4 && rowPadding == 0) {
+                    val b = Bitmap.createBitmap(screenWidth, screenHeight, Bitmap.Config.ARGB_8888)
+                    b.copyPixelsFromBuffer(buffer)
+                    b
+                } else {
+                    val paddedW = screenWidth + rowPadding / pixelStride
+                    val temp = Bitmap.createBitmap(paddedW, screenHeight, Bitmap.Config.ARGB_8888)
+                    temp.copyPixelsFromBuffer(buffer)
+                    val cropped = Bitmap.createBitmap(temp, 0, 0, screenWidth, screenHeight)
+                    temp.recycle()
+                    cropped
+                }
+            } finally {
+                image.close()
+            }
         } catch (e: Exception) {
             e.printStackTrace()
             return@withContext null

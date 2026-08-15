@@ -40,6 +40,7 @@ class TransparentCanvasOverlay(private val context: Context) {
         var isWhitePerspective: Boolean = true
         var medianSim: Float = 1.0f
         var occupiedCount: Int = 0
+        var detectedPerspective: Boolean? = null
 
         private val startPaint = Paint().apply {
             color = Color.argb(130, 0, 230, 115) // 半透明青绿
@@ -94,8 +95,11 @@ class TransparentCanvasOverlay(private val context: Context) {
 
             val step = (rect.right - rect.left) / 8.0f
             val uci = move.bestMove
-            val perspectiveStr = if (isWhitePerspective) "执白" else "执黑"
-            val pillW = 580f
+            val conflictStr = if (detectedPerspective != null && detectedPerspective != isWhitePerspective) {
+                "(探测:${if (detectedPerspective == true) "白" else "黑"})"
+            } else ""
+            val perspectiveStr = "${if (isWhitePerspective) "执白" else "执黑"}$conflictStr"
+            val pillW = 600f
             val pillH = 105f
             val pillX = rect.left + (rect.width() - pillW) / 2f
             val pillY = (rect.top - pillH - 25f).coerceAtLeast(50f)
@@ -176,7 +180,8 @@ class TransparentCanvasOverlay(private val context: Context) {
         moveInfo: StockfishBridge.EngineEvaluation,
         isWhitePerspective: Boolean,
         medianSim: Float = 1.0f,
-        occupiedCount: Int = 0
+        occupiedCount: Int = 0,
+        detectedPerspective: Boolean? = null
     ) {
         if (overlayView == null) {
             overlayView = OverlayDrawView(context)
@@ -212,6 +217,7 @@ class TransparentCanvasOverlay(private val context: Context) {
             this.isWhitePerspective = isWhitePerspective
             this.medianSim = medianSim
             this.occupiedCount = occupiedCount
+            this.detectedPerspective = detectedPerspective
             postInvalidate()
         }
 

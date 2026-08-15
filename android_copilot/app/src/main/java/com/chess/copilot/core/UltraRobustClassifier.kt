@@ -602,5 +602,37 @@ class UltraRobustClassifier(context: Context? = null) {
                 occupiedCount = occupiedCount
             )
         }
+
+        /**
+         * 纯函数：会话视角锁定状态机决策
+         * @param currentLock 当前会话锁定的视角 (null 表示尚未锁定)
+         * @param detectedPerspective 当前帧算法检测出的视角
+         * @param occupiedCount 当前棋盘占位棋子数
+         * @param medianSim 当前帧模板匹配相似度中位数
+         * @return 更新后的锁定视角 (null 表示置信度不足暂不锁定)
+         */
+        fun resolvePerspectiveLock(
+            currentLock: Boolean?,
+            detectedPerspective: Boolean,
+            occupiedCount: Int,
+            medianSim: Float
+        ): Boolean? {
+            // 1. 开新局场景：占位棋子 >= 26 颗且置信度高，强制重新校准并锁定为新局视角
+            if (occupiedCount >= 26 && medianSim >= 0.60f) {
+                return detectedPerspective
+            }
+
+            // 2. 初始锁定：当前无锁时，需达到高置信度门槛 (occupied >= 16 或 medianSim >= 0.70f) 才可永久上锁
+            if (currentLock == null) {
+                return if (occupiedCount >= 16 || medianSim >= 0.70f) {
+                    detectedPerspective
+                } else {
+                    null // 低于门槛暂不上锁，本次单帧按 detectedPerspective 消费
+                }
+            }
+
+            // 3. 中残局场景：沿用已有锁定，防止底线出子/受攻导致视角误判翻转
+            return currentLock
+        }
     }
 }

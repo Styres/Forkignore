@@ -189,4 +189,43 @@ class ChessFenBuilderTest {
         assertEquals(6, result.occupiedCount)
         assertEquals("r3k3/8/8/2P2P2/8/8/8/q3K2r", result.boardFen)
     }
+
+    @Test
+    fun testResolvePerspectiveLockStateMachine() {
+        // 1. 开局自动锁定：占位 32 颗子，高置信度 -> 锁定执白 (true)
+        val lock1 = UltraRobustClassifier.resolvePerspectiveLock(
+            currentLock = null,
+            detectedPerspective = true,
+            occupiedCount = 32,
+            medianSim = 0.95f
+        )
+        assertEquals(true, lock1)
+
+        // 2. 残局底线反转防御：已锁定执白 (true)，中残局子力减少到 6 颗，底线受攻导致检测误判为黑 (false) -> 依然锁定执白 (true)
+        val lock2 = UltraRobustClassifier.resolvePerspectiveLock(
+            currentLock = lock1,
+            detectedPerspective = false,
+            occupiedCount = 6,
+            medianSim = 0.88f
+        )
+        assertEquals(true, lock2)
+
+        // 3. 开新对局重新校准：占位恢复到 30 颗 (>=26)，换边执黑 (false) -> 强制重新校准为执黑 (false)
+        val lock3 = UltraRobustClassifier.resolvePerspectiveLock(
+            currentLock = lock2,
+            detectedPerspective = false,
+            occupiedCount = 30,
+            medianSim = 0.96f
+        )
+        assertEquals(false, lock3)
+
+        // 4. 初次低置信度不锁门槛：无锁状态下仅有 8 颗子且 Sim 偏低 (0.58f) -> 暂不上锁 (null)
+        val lock4 = UltraRobustClassifier.resolvePerspectiveLock(
+            currentLock = null,
+            detectedPerspective = true,
+            occupiedCount = 8,
+            medianSim = 0.58f
+        )
+        assertEquals(null, lock4)
+    }
 }
