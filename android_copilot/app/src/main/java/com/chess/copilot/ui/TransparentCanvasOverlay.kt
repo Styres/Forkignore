@@ -182,6 +182,8 @@ class TransparentCanvasOverlay(private val context: Context) {
     }
 
     fun hide() {
+        autoDismissJob?.cancel()
+        autoDismissJob = null
         overlayView?.let {
             if (isShowing) {
                 windowManager.removeView(it)

@@ -294,7 +294,9 @@ class FloatingBubbleService : Service() {
             )
             bmp.copyPixelsFromBuffer(buffer)
             val resultBmp = Bitmap.createBitmap(bmp, 0, 0, screenWidth, screenHeight)
-            bmp.recycle()
+            if (resultBmp !== bmp) {
+                bmp.recycle()
+            }
             return@withContext resultBmp
         } catch (e: Exception) {
             e.printStackTrace()

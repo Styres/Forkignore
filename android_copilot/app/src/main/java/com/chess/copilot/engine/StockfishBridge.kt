@@ -1,13 +1,14 @@
 package com.chess.copilot.engine
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.File
@@ -18,9 +19,11 @@ import java.util.regex.Pattern
 /**
  * 极简高可靠 Stockfish UCI 引擎管道桥接
  * 直接执行系统释放在 nativeLibraryDir 下的 libstockfish.so (完全绕过 Android 10+ W^X 限制)
- * 具备线程互斥锁、超时防挂起以及合法走法 fallback 双重兜底
+ * 具备线程互斥锁、非阻塞协程轮询超时防挂起以及合法走法 fallback 双重兜底
  */
 object StockfishBridge {
+
+    private const val TAG = "StockfishBridge"
 
     data class EngineEvaluation(
         val bestMove: String,     // UCI 走法，如 "e2e4", "e7e8q"
@@ -59,9 +62,11 @@ object StockfishBridge {
 
                     if (binaryFile.exists() && binaryFile.canExecute()) {
                         startEngineProcess(binaryFile)
+                    } else {
+                        Log.w(TAG, "libstockfish.so not found or not executable in $nativeLibDir, fallback will be used")
                     }
                 } catch (e: Exception) {
-                    e.printStackTrace()
+                    Log.w(TAG, "Failed to start Stockfish process: ${e.message}", e)
                     isEngineReady = false
                 }
             }
@@ -112,7 +117,7 @@ object StockfishBridge {
     }
 
     /**
-     * 对 FEN 执行分析并返回推荐走法与评估分（带超时保护）
+     * 对 FEN 执行分析并返回推荐走法与评估分（非阻塞轮询超时保护）
      */
     suspend fun evaluateFen(fen: String, moveTimeMs: Long = 120): EngineEvaluation = withContext(Dispatchers.IO) {
         engineMutex.withLock {
@@ -128,10 +133,11 @@ object StockfishBridge {
 
                     var lastEval: EngineEvaluation? = null
                     var bestMoveResult: String? = null
+                    val deadline = System.currentTimeMillis() + moveTimeMs + 600L
 
-                    // 超时保护：最多等待 moveTimeMs + 600ms
-                    withTimeoutOrNull(moveTimeMs + 600L) {
-                        while (true) {
+                    // 非阻塞轮询读取，通过 delay(15) 提供真实的协程挂起点与超时逃逸
+                    while (System.currentTimeMillis() < deadline) {
+                        if (reader?.ready() == true) {
                             val line = reader?.readLine() ?: break
                             val parsedInfo = parseInfoLine(line)
                             if (parsedInfo != null) {
@@ -143,6 +149,8 @@ object StockfishBridge {
                                 bestMoveResult = bm
                                 break
                             }
+                        } else {
+                            delay(15)
                         }
                     }
 
@@ -154,14 +162,29 @@ object StockfishBridge {
                             isMate = lastEval?.isMate ?: false
                         )
                     }
+
+                    // 若超时未返回 bestmove，说明引擎子进程卡死，重置进程状态以防后续挂起
+                    Log.w(TAG, "Stockfish evaluateFen timed out without bestmove, resetting process")
+                    destroyProcessLocked()
                 } catch (e: Exception) {
-                    e.printStackTrace()
+                    Log.w(TAG, "Stockfish evaluateFen exception: ${e.message}", e)
+                    destroyProcessLocked()
                 }
             }
 
             // 双重兜底：纯 Kotlin 合法走法评估
             return@withContext evaluateFallback(fen)
         }
+    }
+
+    private fun destroyProcessLocked() {
+        try {
+            process?.destroy()
+        } catch (_: Exception) {}
+        process = null
+        writer = null
+        reader = null
+        isEngineReady = false
     }
 
     /**
@@ -202,7 +225,7 @@ object StockfishBridge {
     }
 
     /**
-     * 智能合法走法兜底生成器（确保绝对不移动空格）
+     * 智能合法走法兜底生成器（确保绝对不移动空格，支持升变后缀）
      */
     fun evaluateFallback(fen: String): EngineEvaluation {
         val parts = fen.split(" ")
@@ -240,7 +263,8 @@ object StockfishBridge {
                         val dir = if (isWhite) -1 else 1
                         val nextR = r + dir
                         if (nextR in 0..7 && board[nextR][c] == '.') {
-                            legalMoves.add("$fromSquare${('a' + c)}${8 - nextR}")
+                            val promoSuffix = if (nextR == 0 || nextR == 7) "q" else ""
+                            legalMoves.add("$fromSquare${('a' + c)}${8 - nextR}$promoSuffix")
                             // 初始双步
                             val startRank = if (isWhite) 6 else 1
                             val doubleNextR = r + 2 * dir
@@ -282,8 +306,8 @@ object StockfishBridge {
             }
         }
 
-        // 挑选中心移动或第一条合法走法
-        val bestMove = legalMoves.firstOrNull { it.contains("e4") || it.contains("d4") || it.contains("e5") || it.contains("c5") || it.contains("f3") || it.contains("f6") }
+        // 挑选推进到关键格子的走法（使用 endsWith 避免误判起点）
+        val bestMove = legalMoves.firstOrNull { it.endsWith("e4") || it.endsWith("d4") || it.endsWith("e5") || it.endsWith("c5") || it.endsWith("f3") || it.endsWith("f6") }
             ?: legalMoves.firstOrNull()
             ?: (if (isWhite) "e2e4" else "e7e5")
 
