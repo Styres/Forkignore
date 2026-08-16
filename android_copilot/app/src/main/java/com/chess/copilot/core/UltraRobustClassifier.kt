@@ -47,10 +47,13 @@ class UltraRobustClassifier(context: Context? = null) {
             val gateRejectedCells: List<String> = emptyList()
         ) : ClassificationResponse()
 
-        data class Rejected(
+                data class Rejected(
             val reason: String,
             val medianSim: Float,
-            val occupiedCount: Int
+            val occupiedCount: Int,
+            // 拦截时的逐格取证 (bug_18 与低 Sim 误拦定案用): 屏幕坐标 r{r}c{c}=类别(sim)
+            val lowConfidenceCells: List<String> = emptyList(),
+            val gateRejectedCells: List<String> = emptyList()
         ) : ClassificationResponse()
     }
 
@@ -175,11 +178,19 @@ class UltraRobustClassifier(context: Context? = null) {
         }
 
         // 2. 棋盘语义质量门禁 (Semantic Quality Gating)
+        // 拦截遥测: 低置信占位格按 sim 升序，供定案"真棋盘被误拦"时看单格分布 (此时视角未定，用屏幕坐标)
+        val rejectedLowConf = occupiedList
+            .filter { it.bestSimilarity < 0.60f }
+            .sortedBy { it.bestSimilarity }
+            .map { "r${it.r}c${it.c}=${it.primaryClass}(${String.format("%.2f", it.bestSimilarity)})" }
+
         if (occupiedList.size < 4) {
             return ClassificationResponse.Rejected(
                 reason = "占位棋子数不足 (${occupiedList.size} < 4)",
                 medianSim = 0.0f,
-                occupiedCount = occupiedList.size
+                occupiedCount = occupiedList.size,
+                lowConfidenceCells = rejectedLowConf,
+                gateRejectedCells = gateRejected
             )
         }
 
@@ -195,7 +206,9 @@ class UltraRobustClassifier(context: Context? = null) {
             return ClassificationResponse.Rejected(
                 reason = "相似度过低 (MedianSim=${String.format("%.3f", medianSim)} < 0.520)",
                 medianSim = medianSim,
-                occupiedCount = occupiedList.size
+                occupiedCount = occupiedList.size,
+                lowConfidenceCells = rejectedLowConf,
+                gateRejectedCells = gateRejected
             )
         }
 

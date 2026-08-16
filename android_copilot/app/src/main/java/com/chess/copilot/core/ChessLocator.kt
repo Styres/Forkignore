@@ -17,7 +17,14 @@ import kotlin.math.roundToInt
  */
 object ChessLocator {
 
-    fun locateBoard(bitmap: Bitmap): Rect {
+    /**
+     * 定位结果带置信分数 (bug_18 教训): 定位器原本只返回 argmax 框且静默回退默认框，
+     * 定位失败时分类器在错误区域上产出低 MedianSim，症状表现为"相似度过低"而非"定位失败"。
+     * score 为降采样坐标系下的棋盘模式响应分，实测真棋盘 649~1505；暂只遥测不设硬门禁，待真机失败帧数据标定阈值
+     */
+    data class LocateResult(val rect: Rect, val score: Float)
+
+    fun locateBoard(bitmap: Bitmap): LocateResult {
         val width = bitmap.width
         val height = bitmap.height
 
@@ -217,6 +224,6 @@ object ChessLocator {
         origX = max(0, min(width - origSize, origX))
         origY = max(0, min(height - origSize, origY))
 
-        return Rect(origX, origY, origX + origSize, origY + origSize)
+        return LocateResult(Rect(origX, origY, origX + origSize, origY + origSize), bestScore)
     }
 }

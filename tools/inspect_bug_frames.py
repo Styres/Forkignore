@@ -136,7 +136,8 @@ def main():
         print("[FATAL ERROR] Template bank is EMPTY!")
         sys.exit(1)
 
-    for bf in BUG_FRAMES:
+    frames = sys.argv[1:] if len(sys.argv) > 1 else BUG_FRAMES
+    for bf in frames:
         if not os.path.exists(bf):
             print(f"[ERROR] 取证帧缺失: {bf} (应纳入版本控制)")
             continue

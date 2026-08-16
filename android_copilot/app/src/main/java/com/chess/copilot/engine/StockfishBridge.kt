@@ -217,6 +217,9 @@ object StockfishBridge {
                     Log.d(TAG, "Reader loop exited: ${e.message}")
                 } finally {
                     channel.close()
+                    // bug_16/17 教训: 引擎进程死亡后若不清旗，后续调用会对着已关闭通道空读，
+                    // 表现为"计算超时 收到行数:0"直接跌入兜底而非自愈重启
+                    isEngineReady = false
                 }
             }
 
@@ -349,93 +352,19 @@ object StockfishBridge {
                 return@withContext reCheck
             }
 
-            val evalStartTime = System.currentTimeMillis()
-            val receivedLines = mutableListOf<String>()
-
-            // 2. 引擎自愈机制 (Auto-Respawn)
-            if (!isEngineReady || process == null) {
-                startEngineProcessLocked()
-            }
-
-            if (isEngineReady && process != null && lineChannel != null) {
-                try {
-                    // 排空历史残余文本行
-                    while (lineChannel?.tryReceive()?.getOrNull() != null) {}
-
-                    sendCommand("isready")
-                    val readyOk = waitForResponse("readyok", timeoutMs = 3000)
-                    if (!readyOk) {
-                        Log.w(TAG, "Stockfish readyok timeout before evaluate, restarting process")
-                        destroyProcessLocked()
-                        startEngineProcessLocked()
-                    }
-
-                    val currentChannel = lineChannel
-                    if (currentChannel == null || !isEngineReady || process == null) {
-                        lastDiagnosticInfo = "【Stockfish 重启失败，降级兜底】\n引擎重启后不可用，跌入纯 Kotlin 兜底"
-                        Log.w(TAG, "Stockfish unavailable after restart, fallback will be used")
-                        destroyProcessLocked()
-                        appendFallbackLog(fen)
-                        val fallback = evaluateFallback(fen)
-                        return@withContext fallback
-                    }
-
-                    sendCommand("position fen $fen")
-                    sendCommand("go movetime $moveTimeMs")
-
-                    var lastEval: EngineEvaluation? = null
-                    var bestMoveResult: String? = null
-                    val deadline = System.currentTimeMillis() + moveTimeMs + 4000L
-
-                    // 响应式挂起读取输出
-                    while (System.currentTimeMillis() < deadline) {
-                        val remaining = deadline - System.currentTimeMillis()
-                        if (remaining <= 0) break
-
-                        val line = withTimeoutOrNull(remaining) {
-                            try {
-                                currentChannel.receive()
-                            } catch (_: Exception) {
-                                null
-                            }
-                        } ?: break
-
-                        receivedLines.add(line)
-                        if (receivedLines.size > 20) receivedLines.removeAt(0)
-
-                        val parsedInfo = parseInfoLine(line)
-                        if (parsedInfo != null) {
-                            lastEval = parsedInfo
-                        }
-
-                        val bm = parseBestMoveLine(line)
-                        if (bm != null) {
-                            bestMoveResult = bm
-                            break
-                        }
-                    }
-
-                    if (bestMoveResult != null && bestMoveResult != "(none)") {
-                        val result = EngineEvaluation(
-                            bestMove = bestMoveResult,
-                            evalScore = lastEval?.evalScore ?: 0.0f,
-                            depth = if ((lastEval?.depth ?: -1) > 0) lastEval!!.depth else 0,
-                            isMate = lastEval?.isMate ?: false
-                        )
-                        val totalElapsed = System.currentTimeMillis() - evalStartTime
-                        lastDiagnosticInfo = "【Stockfish 计算成功】\n耗时: ${totalElapsed}ms | 深度: ${result.depth} 层 | 评分: ${result.evalScore} | 走法: ${result.bestMove}\n末尾输出: ${receivedLines.takeLast(2).joinToString(" || ")}"
-                        Log.i(TAG, "Stockfish evaluate success: bestMove=${result.bestMove}, depth=${result.depth}, score=${result.evalScore}")
-                        evalCache.put(fen, result)
-                        return@withContext result
-                    }
-
-                    val totalElapsed = System.currentTimeMillis() - evalStartTime
-                    lastDiagnosticInfo = "【Stockfish 计算超时，降级兜底】\n已耗时: ${totalElapsed}ms | 收到行数: ${receivedLines.size}\n最近行: ${receivedLines.takeLast(2).joinToString(" || ")}"
-                    Log.w(TAG, "Stockfish evaluateFen timed out without bestmove, resetting process\n$lastDiagnosticInfo")
-                    destroyProcessLocked()
-                } catch (e: Exception) {
-                    lastDiagnosticInfo = "【Stockfish 分析异常，降级兜底】\n异常: ${e.javaClass.simpleName}: ${e.message}"
-                    Log.w(TAG, "Stockfish evaluateFen exception: ${e.message}", e)
+            // 2. 引擎自愈机制 (Auto-Respawn): 首次失败后销毁重启并重试同一局面一次
+            // (bug_16/17 教训: 引擎死后单次调用即跌入兜底乱下，重启重试可把临时性死亡收敛为无感恢复)
+            var engineResult: EngineEvaluation? = null
+            for (attempt in 1..2) {
+                if (!isEngineReady || process == null) {
+                    startEngineProcessLocked()
+                }
+                engineResult = evaluateViaEngineLocked(fen, moveTimeMs)
+                if (engineResult != null) {
+                    return@withContext engineResult
+                }
+                if (attempt == 1) {
+                    Log.w(TAG, "Stockfish first attempt failed for FEN: $fen, restarting process and retrying")
                     destroyProcessLocked()
                 }
             }
@@ -445,6 +374,103 @@ object StockfishBridge {
             appendFallbackLog(fen)
             val fallback = evaluateFallback(fen)
             return@withContext fallback
+        }
+    }
+
+    /**
+     * 单次引擎分析尝试 (需持有 engineMutex): 成功返回结果并写缓存，失败销毁进程返回 null 交由调用方决定重试或兜底
+     */
+    private suspend fun evaluateViaEngineLocked(fen: String, moveTimeMs: Long): EngineEvaluation? {
+        if (!isEngineReady || process == null || lineChannel == null) {
+            return null
+        }
+
+        val evalStartTime = System.currentTimeMillis()
+        val receivedLines = mutableListOf<String>()
+
+        try {
+            // 排空历史残余文本行
+            while (lineChannel?.tryReceive()?.getOrNull() != null) {}
+
+            sendCommand("isready")
+            val readyOk = waitForResponse("readyok", timeoutMs = 3000)
+            if (!readyOk) {
+                Log.w(TAG, "Stockfish readyok timeout before evaluate, resetting process")
+                destroyProcessLocked()
+                return null
+            }
+
+            val currentChannel = lineChannel
+            if (currentChannel == null || !isEngineReady || process == null) {
+                destroyProcessLocked()
+                return null
+            }
+
+            sendCommand("position fen $fen")
+            sendCommand("go movetime $moveTimeMs")
+
+            var lastEval: EngineEvaluation? = null
+            var bestMoveResult: String? = null
+            val deadline = System.currentTimeMillis() + moveTimeMs + 4000L
+
+            // 响应式挂起读取输出
+            while (System.currentTimeMillis() < deadline) {
+                val remaining = deadline - System.currentTimeMillis()
+                if (remaining <= 0) break
+
+                val line = withTimeoutOrNull(remaining) {
+                    try {
+                        currentChannel.receive()
+                    } catch (_: Exception) {
+                        null
+                    }
+                } ?: break
+
+                receivedLines.add(line)
+                if (receivedLines.size > 20) receivedLines.removeAt(0)
+
+                // 引擎自报 ERROR (如缺 NNUE 网络) 立即记录，供重试失败后的兜底诊断引用
+                if (line.contains("ERROR")) {
+                    lastEngineError = line
+                }
+
+                val parsedInfo = parseInfoLine(line)
+                if (parsedInfo != null) {
+                    lastEval = parsedInfo
+                }
+
+                val bm = parseBestMoveLine(line)
+                if (bm != null) {
+                    bestMoveResult = bm
+                    break
+                }
+            }
+
+            if (bestMoveResult != null && bestMoveResult != "(none)") {
+                val result = EngineEvaluation(
+                    bestMove = bestMoveResult,
+                    evalScore = lastEval?.evalScore ?: 0.0f,
+                    depth = if ((lastEval?.depth ?: -1) > 0) lastEval!!.depth else 0,
+                    isMate = lastEval?.isMate ?: false
+                )
+                val totalElapsed = System.currentTimeMillis() - evalStartTime
+                lastDiagnosticInfo = "【Stockfish 计算成功】\n耗时: ${totalElapsed}ms | 深度: ${result.depth} 层 | 评分: ${result.evalScore} | 走法: ${result.bestMove}\n末尾输出: ${receivedLines.takeLast(2).joinToString(" || ")}"
+                Log.i(TAG, "Stockfish evaluate success: bestMove=${result.bestMove}, depth=${result.depth}, score=${result.evalScore}")
+                evalCache.put(fen, result)
+                return result
+            }
+
+            val totalElapsed = System.currentTimeMillis() - evalStartTime
+            val engineErr = lastEngineError?.let { "\n引擎报错: $it" } ?: ""
+            lastDiagnosticInfo = "【Stockfish 单次尝试无输出】\n已耗时: ${totalElapsed}ms | 收到行数: ${receivedLines.size}\n最近行: ${receivedLines.takeLast(2).joinToString(" || ")}$engineErr"
+            Log.w(TAG, "Stockfish evaluate attempt produced no bestmove, resetting process\n$lastDiagnosticInfo")
+            destroyProcessLocked()
+            return null
+        } catch (e: Exception) {
+            lastDiagnosticInfo = "【Stockfish 分析异常，降级兜底】\n异常: ${e.javaClass.simpleName}: ${e.message}"
+            Log.w(TAG, "Stockfish evaluateFen exception: ${e.message}", e)
+            destroyProcessLocked()
+            return null
         }
     }
 

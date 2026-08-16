@@ -354,9 +354,10 @@ class FloatingBubbleService : Service() {
                     return@launch
                 }
 
-                val boardRect = withContext(Dispatchers.Default) {
+                val locateResult = withContext(Dispatchers.Default) {
                     ChessLocator.locateBoard(screenBitmap)
                 }
+                val boardRect = locateResult.rect
 
                 val detailedResp = withContext(Dispatchers.Default) {
                     classifier?.classifyBoardDetailed(
@@ -388,7 +389,9 @@ class FloatingBubbleService : Service() {
                         val perspectiveName = if (res.isWhitePerspective) "执白$lockedStateDesc" else "执黑$lockedStateDesc"
                         
                         // 逐格取证落盘 (bug_11~14 定案用): 低置信格与门控截断候选写入 cells_forensics.txt
+                        // LocateScore (bug_18 定案用): 定位器置信分，真棋盘实测 649~1505，待真机失败帧标定硬门禁阈值
                         val cellForensics = buildString {
+                            appendLine("LocateScore: ${String.format("%.1f", locateResult.score)}")
                             appendLine("LowConf: ${detailedResp.lowConfidenceCells.joinToString(" ")}")
                             appendLine("GateRejected: ${detailedResp.gateRejectedCells.joinToString(" ")}")
                         }
@@ -425,11 +428,16 @@ class FloatingBubbleService : Service() {
                     }
                     is UltraRobustClassifier.ClassificationResponse.Rejected -> {
                         transparentOverlay?.hide()
-                        saveDebugArtifactsAsync(copyForDebug, boardRect, "REJECTED_${detailedResp.reason}")
+                        val rejectedForensics = buildString {
+                            appendLine("LocateScore: ${String.format("%.1f", locateResult.score)}")
+                            appendLine("LowConf: ${detailedResp.lowConfidenceCells.joinToString(" ")}")
+                            appendLine("GateRejected: ${detailedResp.gateRejectedCells.joinToString(" ")}")
+                        }
+                        saveDebugArtifactsAsync(copyForDebug, boardRect, "REJECTED_${detailedResp.reason}", rejectedForensics)
                         withContext(Dispatchers.Main) {
                             Toast.makeText(
                                 this@FloatingBubbleService,
-                                "【门禁拦截】原因: ${detailedResp.reason} (Sim=${String.format("%.3f", detailedResp.medianSim)}, 占位=${detailedResp.occupiedCount})",
+                                "【门禁拦截】原因: ${detailedResp.reason} (Sim=${String.format("%.3f", detailedResp.medianSim)}, 占位=${detailedResp.occupiedCount}, 定位分=${String.format("%.0f", locateResult.score)})",
                                 Toast.LENGTH_LONG
                             ).show()
                         }

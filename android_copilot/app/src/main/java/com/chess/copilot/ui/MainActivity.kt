@@ -121,10 +121,11 @@ class MainActivity : AppCompatActivity() {
                     return@launch
                 }
 
-                // 1. 梳状滤波两阶段定位棋盘
-                val boardRect = withContext(Dispatchers.Default) {
+                // 1. 梳状滤波两阶段定位棋盘 (带置信分, bug_18 遥测用)
+                val locateResult = withContext(Dispatchers.Default) {
                     ChessLocator.locateBoard(bitmap)
                 }
+                val boardRect = locateResult.rect
 
                 // 2. 带取证看板的详尽决策管道 (MedianSim / 占位 / 拦截原因)
                 val detailedResp = withContext(Dispatchers.Default) {
@@ -139,7 +140,7 @@ class MainActivity : AppCompatActivity() {
 
                         val sb = StringBuilder()
                         sb.append("【离线诊断结果】\n")
-                        sb.append("棋盘坐标: [L=${boardRect.left}, T=${boardRect.top}, R=${boardRect.right}, B=${boardRect.bottom}]\n")
+                        sb.append("棋盘坐标: [L=${boardRect.left}, T=${boardRect.top}, R=${boardRect.right}, B=${boardRect.bottom}] 定位分=${String.format("%.0f", locateResult.score)}\n")
                         sb.append("视角方向: ${if (res.isWhitePerspective) "执白 (White)" else "执黑 (Black)"}\n")
                         sb.append("取证看板: MedianSim=${String.format("%.3f", detailedResp.medianSim)} | 占位=${detailedResp.occupiedCount}\n")
                         // 逐格取证 (bug_11~14 定案用): 低置信格 = 误分类嫌疑; 门控截断候选 = 漏子嫌疑 (std=中心方差 grad=边缘梯度)
@@ -170,7 +171,18 @@ class MainActivity : AppCompatActivity() {
                         tvResult.text = sb.toString()
                     }
                     is UltraRobustClassifier.ClassificationResponse.Rejected -> {
-                        tvResult.text = "【门禁拦截】\n原因: ${detailedResp.reason}\n取证看板: MedianSim=${String.format("%.3f", detailedResp.medianSim)} | 占位=${detailedResp.occupiedCount}"
+                        val sb = StringBuilder()
+                        sb.append("【门禁拦截】\n")
+                        sb.append("原因: ${detailedResp.reason}\n")
+                        sb.append("取证看板: MedianSim=${String.format("%.3f", detailedResp.medianSim)} | 占位=${detailedResp.occupiedCount} | 定位分=${String.format("%.0f", locateResult.score)}\n")
+                        sb.append("棋盘坐标: [L=${boardRect.left}, T=${boardRect.top}, R=${boardRect.right}, B=${boardRect.bottom}]\n")
+                        if (detailedResp.lowConfidenceCells.isNotEmpty()) {
+                            sb.append("低置信格: ${detailedResp.lowConfidenceCells.joinToString(" ")}\n")
+                        }
+                        if (detailedResp.gateRejectedCells.isNotEmpty()) {
+                            sb.append("门控截断候选: ${detailedResp.gateRejectedCells.joinToString(" ")}\n")
+                        }
+                        tvResult.text = sb.toString()
                     }
                     null -> {
                         tvResult.text = "分类器未初始化"

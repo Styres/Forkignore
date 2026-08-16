@@ -3,7 +3,7 @@ import numpy as np
 import os
 import sys
 
-def fast_sat_locate_board(image):
+def fast_sat_locate_board(image, return_score=False):
     img_h, img_w = image.shape[:2]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
@@ -126,6 +126,8 @@ def fast_sat_locate_board(image):
     
     x = max(0, min(img_w - size, x))
     y = max(0, min(img_h - size, y))
+    if return_score:
+        return x, y, x + size, y + size, float(best_score)
     return x, y, x + size, y + size
 
 if __name__ == '__main__':
