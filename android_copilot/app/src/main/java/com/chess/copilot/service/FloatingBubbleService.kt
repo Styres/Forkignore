@@ -521,7 +521,7 @@ class FloatingBubbleService : Service() {
                 fos.close()
 
                 val txtFile = File(debugDir, "last_diagnostic.txt")
-                txtFile.writeText("BoardRect: $rect\nFEN: $fen\n$cellForensicsTime: ${System.currentTimeMillis()}\n")
+                txtFile.writeText("BoardRect: $rect\nFEN: $fen\n${cellForensics}Time: ${System.currentTimeMillis()}\n")
             } catch (_: Exception) {
             } finally {
                 b.recycle()
