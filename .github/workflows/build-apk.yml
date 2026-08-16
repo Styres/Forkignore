@@ -46,6 +46,17 @@ jobs:
           fi
           chmod +x gradlew
 
+      - name: Verify LFS Assets Materialized (响亮失败门禁)
+        run: |
+          NNUE=android_copilot/app/src/main/assets/nnue/nn-5af11540bbfe.nnue
+          SIZE=$(stat -c%s "$NNUE")
+          echo "NNUE size: $SIZE bytes"
+          if [ "$SIZE" -lt 10000000 ]; then
+            echo "::error::NNUE 文件疑似 LFS 指针未实体化 (${SIZE} bytes)，APK 将携带无效网络！"
+            head -c 200 "$NNUE"
+            exit 1
+          fi
+
       - name: Run Unit Tests & Build Debug APK
         working-directory: android_copilot
         run: |
