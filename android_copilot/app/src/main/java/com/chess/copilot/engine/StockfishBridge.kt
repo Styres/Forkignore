@@ -14,6 +14,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.abs
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.File
@@ -41,7 +42,7 @@ object StockfishBridge {
     private const val NNUE_ASSET_NAME = "nnue/nn-5af11540bbfe.nnue"
 
     data class EngineEvaluation(
-        val bestMove: String,     // UCI 走法，如 "e2e4", "e7e8q"
+        val bestMove: String,     // UCI 走法，如 "e2e4", "e7e8q"; "(invalid)" 为识别层非法局面哨兵
         val evalScore: Float,     // 局面评分，如 +0.58, -1.20
         val depth: Int,           // 搜索深度 (真实引擎 >= 10, 兜底为 0)
         val isMate: Boolean = false
@@ -233,6 +234,11 @@ object StockfishBridge {
             if (uciOk) {
                 // 显式指定评估网络绝对路径 (与 cwd 双保险)
                 nnueFile?.let { sendCommand("setoption name EvalFile value ${it.absolutePath}") }
+                // 确定性参数 (bug_19 教训, 对齐 lichess 官方 UCIProtocol 默认 Threads=1/Hash=16):
+                // 多线程搜索在 movetime 截断下非确定，是"同局面两次点击建议不同"的次要嫌疑源；
+                // 单线程+固定 Hash 使同一 FEN 的搜索结果可复现，建议跳变即可归因为识别层 FEN 抖动
+                sendCommand("setoption name Threads value 1")
+                sendCommand("setoption name Hash value 16")
                 sendCommand("ucinewgame")
                 val readyStart = System.currentTimeMillis()
                 sendCommand("isready")
@@ -352,7 +358,23 @@ object StockfishBridge {
                 return@withContext reCheck
             }
 
-            // 2. 引擎自愈机制 (Auto-Respawn): 首次失败后销毁重启并重试同一局面一次
+            // 2. FEN 合法性预校验 (bug_19/superbug 教训): 识别错误产出的非法局面 (如走子方被将/双王同时被将)
+            // 会让 Stockfish 秒回 bestmove (none)，曾被误判为引擎死亡导致反复销毁重启+兜底乱下。
+            // 此类问题根因在识别层，直接返回哨兵结果，不打扰引擎也不兜底乱下
+            val fenProblem = validateFenSanity(fen)
+            if (fenProblem != null) {
+                lastDiagnosticInfo = "【FEN 非法，未启动引擎】\n原因: $fenProblem\nFEN: $fen\n结论: 识别层产出不可能局面 (走子方被将等)，属于识别/视角错误而非引擎故障"
+                Log.w(TAG, "FEN rejected by sanity check: $fenProblem, fen=$fen")
+                appendFallbackLog("[FEN非法拦截] $fen")
+                return@withContext EngineEvaluation(
+                    bestMove = "(invalid)",
+                    evalScore = 0.0f,
+                    depth = -1,
+                    isMate = false
+                )
+            }
+
+            // 3. 引擎自愈机制 (Auto-Respawn): 首次失败后销毁重启并重试同一局面一次
             // (bug_16/17 教训: 引擎死后单次调用即跌入兜底乱下，重启重试可把临时性死亡收敛为无感恢复)
             var engineResult: EngineEvaluation? = null
             for (attempt in 1..2) {
@@ -369,7 +391,7 @@ object StockfishBridge {
                 }
             }
 
-            // 3. 双重兜底：纯 Kotlin 合法走法评估（安全兜底，且 fallback 结果绝对严禁写入 evalCache）
+            // 4. 双重兜底：纯 Kotlin 合法走法评估（安全兜底，且 fallback 结果绝对严禁写入 evalCache）
             Log.w(TAG, "Using fallback heuristic evaluator for FEN: $fen")
             appendFallbackLog(fen)
             val fallback = evaluateFallback(fen)
@@ -446,7 +468,23 @@ object StockfishBridge {
                 }
             }
 
-            if (bestMoveResult != null && bestMoveResult != "(none)") {
+            // bug_19/superbug 教训: bestmove (none) 是引擎对"无合法着法局面"的合法秒回 (常伴随 info depth 0 score mate 0)，
+            // 绝非引擎死亡。曾有代码把它当失败反复销毁重启进程再跌入兜底乱下。
+            // 引擎已有输出行即证明进程存活: 按终局语义消费结果，保持进程不动
+            if (bestMoveResult == "(none)") {
+                val inCheck = isKingInCheck(parseFenBoard(fen), parseFenIsWhite(fen))
+                val terminal = if (inCheck) {
+                    EngineEvaluation("(checkmate)", if (parseFenIsWhite(fen)) -100.0f else 100.0f, 0, isMate = true)
+                } else {
+                    EngineEvaluation("(stalemate)", 0.0f, 0, isMate = false)
+                }
+                lastDiagnosticInfo = "【Stockfish 确认无合法着法】\n引擎存活并秒回 bestmove (none) | 收到行数: ${receivedLines.size}\n判定: ${if (inCheck) "将杀" else "逼和"} (非引擎故障，未重启进程)"
+                Log.i(TAG, "Stockfish bestmove (none) consumed as terminal state (inCheck=$inCheck), engine kept alive")
+                evalCache.put(fen, terminal)
+                return terminal
+            }
+
+            if (bestMoveResult != null) {
                 val result = EngineEvaluation(
                     bestMove = bestMoveResult,
                     evalScore = lastEval?.evalScore ?: 0.0f,
@@ -490,6 +528,55 @@ object StockfishBridge {
             logFile.writeText(entries.takeLast(30).joinToString("\n\n") + "\n\n")
         } catch (_: Exception) {
         }
+    }
+
+    /**
+     * FEN 结构解析辅助：盘面数组 (row 0 = rank 8)，供终局判定复用
+     */
+    private fun parseFenBoard(fen: String): Array<CharArray> {
+        val rows = fen.split(" ")[0].split("/")
+        return Array(8) { r ->
+            val rowStr = if (r < rows.size) rows[r] else "8"
+            val expanded = StringBuilder()
+            for (ch in rowStr) {
+                if (ch.isDigit()) repeat(ch - '0') { expanded.append('.') } else expanded.append(ch)
+            }
+            while (expanded.length < 8) expanded.append('.')
+            expanded.toString().toCharArray()
+        }
+    }
+
+    private fun parseFenIsWhite(fen: String): Boolean {
+        val parts = fen.split(" ")
+        return parts.size < 2 || parts[1] == "w"
+    }
+
+    /**
+     * FEN 合法性预校验 (bug_19/superbug 定案): 拦截识别层产出的"不可能局面"，避免引擎秒回 (none) 被误判为引擎死亡。
+     * 返回 null 表示通过；否则返回违规描述。校验项：双王唯一、双王不相邻、走子方不得已被将军
+     * (python-chess 实测: 此类局面 Stockfish 输出 info depth 0 score mate 0 + bestmove (none))
+     */
+    fun validateFenSanity(fen: String): String? {
+        val board = parseFenBoard(fen)
+        var wk = 0
+        var bk = 0
+        var wkr = -1; var wkc = -1
+        var bkr = -1; var bkc = -1
+        for (r in 0..7) {
+            for (c in 0..7) {
+                when (board[r][c]) {
+                    'K' -> { wk++; wkr = r; wkc = c }
+                    'k' -> { bk++; bkr = r; bkc = c }
+                    'P', 'p' -> if (r == 0 || r == 7) return "兵出现在底线/顶线 (r${r}c${c})"
+                }
+            }
+        }
+        if (wk != 1 || bk != 1) return "王数量异常 (白王=$wk, 黑王=$bk)"
+        if (maxOf(abs(wkr - bkr), abs(wkc - bkc)) <= 1) return "双王相邻"
+        val isWhite = parseFenIsWhite(fen)
+        // 走子方已被将军 = 不可能局面 (上一手走子方不可能送王)；非走子方被将属正常 (正在被将军)
+        if (isKingInCheck(board, isWhite)) return "走子方已被将军 (不可能局面)"
+        return null
     }
 
     private fun destroyProcessLocked() {

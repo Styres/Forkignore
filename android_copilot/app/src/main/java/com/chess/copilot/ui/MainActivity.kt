@@ -122,14 +122,38 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 // 1. 梳状滤波两阶段定位棋盘 (带置信分, bug_18 遥测用)
-                val locateResult = withContext(Dispatchers.Default) {
+                var locateResult = withContext(Dispatchers.Default) {
                     ChessLocator.locateBoard(bitmap)
                 }
-                val boardRect = locateResult.rect
+                var boardRect = locateResult.rect
 
                 // 2. 带取证看板的详尽决策管道 (MedianSim / 占位 / 拦截原因)
-                val detailedResp = withContext(Dispatchers.Default) {
+                var detailedResp = withContext(Dispatchers.Default) {
                     classifier?.classifyBoardDetailed(bitmap, boardRect)
+                }
+
+                // 2.5 候选救援 (bug_19/superbug 定案): 主框产出"不可能局面"或整体被门禁拦截，都是定位器双峰误选
+                // 假框的实锤特征 (假框因 UI 边缘能量可反超真框 710 vs 670)，自动改用次候选框重识别
+                val needRescue = (detailedResp is UltraRobustClassifier.ClassificationResponse.Success &&
+                    StockfishBridge.validateFenSanity(detailedResp.result.fullFen) != null) ||
+                    detailedResp is UltraRobustClassifier.ClassificationResponse.Rejected
+                if (needRescue) {
+                    val candidates = withContext(Dispatchers.Default) {
+                        ChessLocator.locateTopCandidates(bitmap, 2)
+                    }
+                    if (candidates.size >= 2) {
+                        val rescueRect = candidates[1].rect
+                        val rescueResp = withContext(Dispatchers.Default) {
+                            classifier?.classifyBoardDetailed(bitmap, rescueRect)
+                        }
+                        if (rescueResp is UltraRobustClassifier.ClassificationResponse.Success &&
+                            StockfishBridge.validateFenSanity(rescueResp.result.fullFen) == null
+                        ) {
+                            locateResult = candidates[1]
+                            boardRect = rescueRect
+                            detailedResp = rescueResp
+                        }
+                    }
                 }
 
                 when (detailedResp) {
@@ -157,11 +181,12 @@ class MainActivity : AppCompatActivity() {
                             "(checkmate)" -> "无合法走法 (胜负已分/将杀)"
                             "(stalemate)" -> "无合法走法 (和棋/逼和)"
                             "(none)" -> "无合法走法"
+                            "(invalid)" -> "已拒绝: 识别出不可能局面 (非引擎故障，见下方诊断)"
                             else -> eval.bestMove
                         }
                         sb.append("推荐走法: $displayMove\n")
                         sb.append("局势评估分: ${if (eval.evalScore >= 0) "+" else ""}${String.format("%.2f", eval.evalScore)}\n")
-                        sb.append("搜索深度: ${if (eval.depth <= 0) "0 层 [兜底生成器]" else "${eval.depth} 层"}\n")
+                        sb.append("搜索深度: ${if (eval.depth <= 0) "0 层 ${if (eval.bestMove == "(invalid)") "[FEN预校验拦截]" else "[兜底生成器]"}" else "${eval.depth} 层"}\n")
                         if (eval.isMate) {
                             sb.append("杀棋状态: 胜势已锁定\n")
                         }

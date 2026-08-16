@@ -104,8 +104,9 @@ class TransparentCanvasOverlay(private val context: Context) {
             val pillX = rect.left + (rect.width() - pillW) / 2f
             val pillY = (rect.top - pillH - 25f).coerceAtLeast(50f)
 
-            if (uci.length < 4 || uci == "(none)" || uci == "(checkmate)" || uci == "(stalemate)") {
+            if (uci.length < 4 || uci == "(none)" || uci == "(checkmate)" || uci == "(stalemate)" || uci == "(invalid)") {
                 val statusStr = when {
+                    uci == "(invalid)" -> "识别异常 (局面非法)"
                     move.isMate || uci == "(checkmate)" -> "胜负已分 (将杀)"
                     uci == "(stalemate)" -> "和棋 (逼和)"
                     else -> "无合法走法"

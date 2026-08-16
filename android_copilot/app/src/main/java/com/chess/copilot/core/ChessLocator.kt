@@ -25,6 +25,15 @@ object ChessLocator {
     data class LocateResult(val rect: Rect, val score: Float)
 
     fun locateBoard(bitmap: Bitmap): LocateResult {
+        return locateTopCandidates(bitmap, 1).first()
+    }
+
+    /**
+     * 返回按响应分降序的 top-N 互不重叠候选框 (bug_19/superbug 教训):
+     * 实测同一帧上对话气泡等 UI 边缘可使假框得分反超真框 (710 vs 670)，且 Kotlin/Python
+     * 重采样插值差异可翻转 argmax 结果 —— 单峰 argmax 不可靠，次候选框供"候选救援"兜底
+     */
+    fun locateTopCandidates(bitmap: Bitmap, maxCount: Int): List<LocateResult> {
         val width = bitmap.width
         val height = bitmap.height
 
@@ -168,13 +177,28 @@ object ChessLocator {
             return (corr * 2.0f + edgeScore * 0.4f) * posPrior
         }
 
-        // 5. 阶段一：粗扫 (step=4)
+        // 5. 阶段一：粗扫 (step=4)，同步维护 top-(maxCount+3) 候选榜供救援使用
         val minSize = (0.85f * sW).toInt()
         val maxSize = min(sW, (0.98f * sW).toInt())
         var bestScore = -1e9f
         var bestX = 0
         var bestY = 0
         var bestSize = minSize
+        val topEntries = ArrayList<Pair<Float, IntArray>>() // (score, [x,y,size])
+
+        fun recordCandidate(score: Float, x: Int, y: Int, size: Int) {
+            val minSep = size * 0.15f // 峰间距小于 15% 棋盘宽视为同一峰的抖动副本，只保留域内最高分
+            val idx = topEntries.indexOfFirst { (_, e) ->
+                abs(e[0] - x) < minSep && abs(e[1] - y) < minSep && abs(e[2] - size) < minSep
+            }
+            if (idx >= 0) {
+                if (score > topEntries[idx].first) topEntries[idx] = Pair(score, intArrayOf(x, y, size))
+                return
+            }
+            topEntries.add(Pair(score, intArrayOf(x, y, size)))
+            topEntries.sortByDescending { it.first }
+            while (topEntries.size > maxCount + 3) topEntries.removeAt(topEntries.size - 1)
+        }
 
         for (size in minSize..maxSize step 4) {
             val centerX = (sW - size) / 2
@@ -186,6 +210,7 @@ object ChessLocator {
             for (x in minX..maxX step 4) {
                 for (y in minY..maxY step 4) {
                     val score = evaluateBox(x, y, size)
+                    recordCandidate(score, x, y, size)
                     if (score > bestScore) {
                         bestScore = score
                         bestX = x
@@ -205,6 +230,7 @@ object ChessLocator {
             for (x in max(0, optX - 4)..min(sW - size, optX + 4) step 1) {
                 for (y in max(0, optY - 4)..min(sH - size, optY + 4) step 1) {
                     val score = evaluateBox(x, y, size)
+                    recordCandidate(score, x, y, size)
                     if (score > bestScore) {
                         bestScore = score
                         bestX = x
@@ -217,13 +243,27 @@ object ChessLocator {
 
         // 7. 映射回原图坐标系
         val invScale = 1.0f / scale
-        var origX = (bestX * invScale).roundToInt()
-        var origY = (bestY * invScale).roundToInt()
-        var origSize = (bestSize * invScale).roundToInt()
 
-        origX = max(0, min(width - origSize, origX))
-        origY = max(0, min(height - origSize, origY))
+        val results = ArrayList<LocateResult>()
+        for ((score, e) in topEntries) {
+            if (results.size >= maxCount) break
+            var origX = (e[0] * invScale).roundToInt()
+            var origY = (e[1] * invScale).roundToInt()
+            var origSize = (e[2] * invScale).roundToInt()
+            origX = max(0, min(width - origSize, origX))
+            origY = max(0, min(height - origSize, origY))
+            results.add(LocateResult(Rect(origX, origY, origX + origSize, origY + origSize), score))
+        }
 
-        return LocateResult(Rect(origX, origY, origX + origSize, origY + origSize), bestScore)
+        // 兜底: 候选榜异常为空时退回精修 argmax (保持旧行为不静默崩溃)
+        if (results.isEmpty()) {
+            var origX = (bestX * invScale).roundToInt()
+            var origY = (bestY * invScale).roundToInt()
+            var origSize = (bestSize * invScale).roundToInt()
+            origX = max(0, min(width - origSize, origX))
+            origY = max(0, min(height - origSize, origY))
+            results.add(LocateResult(Rect(origX, origY, origX + origSize, origY + origSize), bestScore))
+        }
+        return results
     }
 }

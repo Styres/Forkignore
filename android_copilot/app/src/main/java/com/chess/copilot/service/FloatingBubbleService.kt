@@ -82,6 +82,10 @@ class FloatingBubbleService : Service() {
     private var isCapturingFrame = false
     @Volatile
     private var sessionLockedPerspective: Boolean? = null
+    // 识别稳定性遥测 (bug_19 教训): 静止盘面两次点击 FEN 不同 = 识别层抖动，是"同局面不同建议"的直接证据
+    private var lastFen: String? = null
+    // 视角锁定冲突计数 (bug_19 教训): 锁定后每帧检测视角持续与锁定矛盾时撤销重锁，防误锁锁死整个会话
+    private var perspectiveConflictStreak = 0
 
     private val serviceJob = Job()
     private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
@@ -354,17 +358,45 @@ class FloatingBubbleService : Service() {
                     return@launch
                 }
 
-                val locateResult = withContext(Dispatchers.Default) {
+                var locateResult = withContext(Dispatchers.Default) {
                     ChessLocator.locateBoard(screenBitmap)
                 }
-                val boardRect = locateResult.rect
+                var boardRect = locateResult.rect
 
-                val detailedResp = withContext(Dispatchers.Default) {
+                var detailedResp = withContext(Dispatchers.Default) {
                     classifier?.classifyBoardDetailed(
                         bitmap = screenBitmap,
                         boardRect = boardRect,
                         overridePerspective = sessionLockedPerspective
                     )
+                }
+
+                // 候选救援 (bug_19/superbug 定案): 主框产出"不可能局面"或整体被门禁拦截，都是定位器双峰误选假框的
+                // 实锤特征 (假框因 UI 边缘能量可反超真框 710 vs 670，单峰 argmax 不可靠)，自动改用次候选框重识别
+                val needRescue = (detailedResp is UltraRobustClassifier.ClassificationResponse.Success &&
+                    StockfishBridge.validateFenSanity(detailedResp.result.fullFen) != null) ||
+                    detailedResp is UltraRobustClassifier.ClassificationResponse.Rejected
+                if (needRescue) {
+                    val candidates = withContext(Dispatchers.Default) {
+                        ChessLocator.locateTopCandidates(screenBitmap, 2)
+                    }
+                    if (candidates.size >= 2) {
+                        val rescueRect = candidates[1].rect
+                        val rescueResp = withContext(Dispatchers.Default) {
+                            classifier?.classifyBoardDetailed(
+                                bitmap = screenBitmap,
+                                boardRect = rescueRect,
+                                overridePerspective = sessionLockedPerspective
+                            )
+                        }
+                        if (rescueResp is UltraRobustClassifier.ClassificationResponse.Success &&
+                            StockfishBridge.validateFenSanity(rescueResp.result.fullFen) == null
+                        ) {
+                            locateResult = candidates[1]
+                            boardRect = rescueRect
+                            detailedResp = rescueResp
+                        }
+                    }
                 }
 
                 val copyForDebug = try {
@@ -382,6 +414,20 @@ class FloatingBubbleService : Service() {
                             medianSim = detailedResp.medianSim
                         )
 
+                        // 视角误锁自愈 (bug_19 教训): 原锁定"永不撤销"，一旦误锁后每帧都产出翻转的错误 FEN。
+                        // 高置信帧连续 2 次检测视角与锁定矛盾即撤销重锁 (正常对局视角不会中途翻转)
+                        if (sessionLockedPerspective != null && sessionLockedPerspective != detailedResp.detectedPerspective &&
+                            detailedResp.medianSim >= 0.70f && detailedResp.occupiedCount >= 16
+                        ) {
+                            perspectiveConflictStreak++
+                            if (perspectiveConflictStreak >= 2) {
+                                sessionLockedPerspective = detailedResp.detectedPerspective
+                                perspectiveConflictStreak = 0
+                            }
+                        } else {
+                            perspectiveConflictStreak = 0
+                        }
+
                         val conflictDesc = if (sessionLockedPerspective != null && detailedResp.detectedPerspective != res.isWhitePerspective) {
                             ", 探测:${if (detailedResp.detectedPerspective) "白" else "黑"}"
                         } else ""
@@ -398,9 +444,31 @@ class FloatingBubbleService : Service() {
                         saveDebugArtifactsAsync(copyForDebug, boardRect, res.fullFen, cellForensics)
                         
                         val eval = StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = 200)
-                        
+
+                        // 识别异常哨兵 (bug_19/superbug 定案): FEN 预校验拦截的不可能局面不是引擎故障更不是兜底场景，
+                        // 隐藏建议箭头避免误导，Toast 直指识别/视角错误 (详情已落盘 engine_fallback_log.txt)
+                        if (eval.bestMove == "(invalid)") {
+                            transparentOverlay?.hide()
+                            withContext(Dispatchers.Main) {
+                                Toast.makeText(
+                                    this@FloatingBubbleService,
+                                    "【识别异常】识别出不可能局面 (如走子方被将)，拒绝给出建议。多为视角误判/画面遮挡，请调整后再试",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                            lastFen = res.fullFen
+                            return@launch
+                        }
+
+                        // 识别抖动警示: 棋盘未动但 FEN 变化 = 分类/视角层抖动，两次建议不同的直接证据
+                        val fenFlickerWarn = if (lastFen != null && lastFen != res.fullFen) " | ⚠识别抖动" else ""
+                        lastFen = res.fullFen
+
                         // 兜底大声告知 (bug_15 教训): 悬浮层出现 [兜] 时现场即给出引擎诊断首行，详情已落盘 engine_fallback_log.txt
-                        val engineWarn = if (eval.depth <= 0) {
+                        // 引擎确认的终局 (将杀/逼和) 虽 depth=0 但不是兜底，不得误报 (bug_19 教训)
+                        val isTrueFallback = eval.depth <= 0 &&
+                            eval.bestMove != "(checkmate)" && eval.bestMove != "(stalemate)"
+                        val engineWarn = if (isTrueFallback) {
                             " | 【引擎兜底】${StockfishBridge.lastDiagnosticInfo.lineSequence().firstOrNull() ?: "原因未知"}"
                         } else ""
                         
@@ -421,8 +489,8 @@ class FloatingBubbleService : Service() {
                         withContext(Dispatchers.Main) {
                             Toast.makeText(
                                 this@FloatingBubbleService,
-                                "【检测成功】视角: $perspectiveName | Sim: ${String.format("%.3f", detailedResp.medianSim)} | 占位: ${detailedResp.occupiedCount}$engineWarn$lowConfWarn",
-                                if (eval.depth <= 0) Toast.LENGTH_LONG else Toast.LENGTH_SHORT
+                                "【检测成功】视角: $perspectiveName | Sim: ${String.format("%.3f", detailedResp.medianSim)} | 占位: ${detailedResp.occupiedCount}$engineWarn$lowConfWarn$fenFlickerWarn",
+                                if (isTrueFallback) Toast.LENGTH_LONG else Toast.LENGTH_SHORT
                             ).show()
                         }
                     }
