@@ -41,7 +41,10 @@ class UltraRobustClassifier(context: Context? = null) {
             val result: DetectionResult,
             val medianSim: Float,
             val occupiedCount: Int,
-            val detectedPerspective: Boolean
+            val detectedPerspective: Boolean,
+            // 逐格取证遥测 (bug_11~14 定案用): 低置信占位格与门控截断候选，供后续标定单格拒绝阈值
+            val lowConfidenceCells: List<String> = emptyList(),
+            val gateRejectedCells: List<String> = emptyList()
         ) : ClassificationResponse()
 
         data class Rejected(
@@ -129,12 +132,17 @@ class UltraRobustClassifier(context: Context? = null) {
             val kingSimilarity: Float
         )
         val occupiedList = mutableListOf<OccupiedCell>()
+        // 门控截断候选: 中心方差不足但边缘梯度已越线的格子，是"真实棋子被误判为空"(bug_13/14 阻隔漏检)的头号嫌疑
+        val gateRejected = mutableListOf<String>()
 
         for (r in 0..7) {
             for (c in 0..7) {
                 val f = cellsFeats[r][c]
                 // 占用门控：空网格中心方差与边缘梯度极低 (gradMean >= 22.0 彻底过滤 2.5D 透视阴影与顶部微重叠)
                 if (f.centerStd < 6.0f || f.gradMean < 22.0f) {
+                    if (f.gradMean >= 22.0f) {
+                        gateRejected.add("r${r}c${c}|std=${String.format("%.1f", f.centerStd)}|grad=${String.format("%.1f", f.gradMean)}")
+                    }
                     continue
                 }
 
@@ -225,6 +233,21 @@ class UltraRobustClassifier(context: Context? = null) {
 
         val detectedPerspective = botWhite >= botBlack
         val effectivePerspective = overridePerspective ?: detectedPerspective
+
+        // 5.5 逐格置信度遥测 (bug_11 教训: b4 单格 Sim 仅 0.50 余量 0.06 仍被全局中位数门禁放行，污染 FEN)
+        val fileChars = "abcdefgh"
+        val lowConfidenceCells = occupiedList
+            .filter { it.bestSimilarity < 0.60f }
+            .sortedBy { it.bestSimilarity }
+            .map { cell ->
+                val name = if (effectivePerspective) {
+                    "${fileChars[cell.c]}${8 - cell.r}"
+                } else {
+                    "${fileChars[7 - cell.c]}${cell.r + 1}"
+                }
+                "$name=${cell.primaryClass}(${String.format("%.2f", cell.bestSimilarity)})"
+            }
+
         val result = buildFenFromBoard(
             rawBoard = sanitizedBoard,
             isWhitePerspective = effectivePerspective,
@@ -237,7 +260,9 @@ class UltraRobustClassifier(context: Context? = null) {
             result = result,
             medianSim = medianSim,
             occupiedCount = occupiedList.size,
-            detectedPerspective = detectedPerspective
+            detectedPerspective = detectedPerspective,
+            lowConfidenceCells = lowConfidenceCells,
+            gateRejectedCells = gateRejected
         )
     }
 

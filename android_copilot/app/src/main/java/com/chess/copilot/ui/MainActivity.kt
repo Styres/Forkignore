@@ -137,6 +137,13 @@ class MainActivity : AppCompatActivity() {
                         sb.append("棋盘坐标: [L=${boardRect.left}, T=${boardRect.top}, R=${boardRect.right}, B=${boardRect.bottom}]\n")
                         sb.append("视角方向: ${if (res.isWhitePerspective) "执白 (White)" else "执黑 (Black)"}\n")
                         sb.append("取证看板: MedianSim=${String.format("%.3f", detailedResp.medianSim)} | 占位=${detailedResp.occupiedCount}\n")
+                        // 逐格取证 (bug_11~14 定案用): 低置信格 = 误分类嫌疑; 门控截断候选 = 漏子嫌疑 (std=中心方差 grad=边缘梯度)
+                        if (detailedResp.lowConfidenceCells.isNotEmpty()) {
+                            sb.append("低置信格: ${detailedResp.lowConfidenceCells.joinToString(" ")}\n")
+                        }
+                        if (detailedResp.gateRejectedCells.isNotEmpty()) {
+                            sb.append("门控截断候选: ${detailedResp.gateRejectedCells.joinToString(" ")}\n")
+                        }
                         sb.append("局面 FEN: ${res.boardFen}\n")
                         sb.append("完整 FEN: ${res.fullFen}\n")
                         sb.append("-----------------------------\n")

@@ -384,14 +384,24 @@ class FloatingBubbleService : Service() {
                         } else ""
                         val lockedStateDesc = if (sessionLockedPerspective != null) "(锁定$conflictDesc)" else ""
                         val perspectiveName = if (res.isWhitePerspective) "执白$lockedStateDesc" else "执黑$lockedStateDesc"
-
-                        saveDebugArtifactsAsync(copyForDebug, boardRect, res.fullFen)
-
+                        
+                        // 逐格取证落盘 (bug_11~14 定案用): 低置信格与门控截断候选写入 cells_forensics.txt
+                        val cellForensics = buildString {
+                            appendLine("LowConf: ${detailedResp.lowConfidenceCells.joinToString(" ")}")
+                            appendLine("GateRejected: ${detailedResp.gateRejectedCells.joinToString(" ")}")
+                        }
+                        saveDebugArtifactsAsync(copyForDebug, boardRect, res.fullFen, cellForensics)
+                        
                         val eval = StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = 200)
-
+                        
                         // 兜底大声告知 (bug_15 教训): 悬浮层出现 [兜] 时现场即给出引擎诊断首行，详情已落盘 engine_fallback_log.txt
                         val engineWarn = if (eval.depth <= 0) {
                             " | 【引擎兜底】${StockfishBridge.lastDiagnosticInfo.lineSequence().firstOrNull() ?: "原因未知"}"
+                        } else ""
+                        
+                        // 低置信格徽标 (bug_11 教训): 单格误分类嫌疑现场可见，全量详情在 cells_forensics.txt
+                        val lowConfWarn = if (detailedResp.lowConfidenceCells.isNotEmpty()) {
+                            " | ⚠疑格:${detailedResp.lowConfidenceCells.take(3).joinToString(",")}"
                         } else ""
 
                         transparentOverlay?.showSuggestion(
@@ -406,7 +416,7 @@ class FloatingBubbleService : Service() {
                         withContext(Dispatchers.Main) {
                             Toast.makeText(
                                 this@FloatingBubbleService,
-                                "【检测成功】视角: $perspectiveName | Sim: ${String.format("%.3f", detailedResp.medianSim)} | 占位: ${detailedResp.occupiedCount}$engineWarn",
+                                "【检测成功】视角: $perspectiveName | Sim: ${String.format("%.3f", detailedResp.medianSim)} | 占位: ${detailedResp.occupiedCount}$engineWarn$lowConfWarn",
                                 if (eval.depth <= 0) Toast.LENGTH_LONG else Toast.LENGTH_SHORT
                             ).show()
                         }
@@ -497,7 +507,7 @@ class FloatingBubbleService : Service() {
         }
     }
 
-    private fun saveDebugArtifactsAsync(bitmap: Bitmap?, rect: android.graphics.Rect, fen: String) {
+    private fun saveDebugArtifactsAsync(bitmap: Bitmap?, rect: android.graphics.Rect, fen: String, cellForensics: String = "") {
         val b = bitmap ?: return
         serviceScope.launch(Dispatchers.IO) {
             try {
@@ -511,7 +521,7 @@ class FloatingBubbleService : Service() {
                 fos.close()
 
                 val txtFile = File(debugDir, "last_diagnostic.txt")
-                txtFile.writeText("BoardRect: $rect\nFEN: $fen\nTime: ${System.currentTimeMillis()}\n")
+                txtFile.writeText("BoardRect: $rect\nFEN: $fen\n$cellForensicsTime: ${System.currentTimeMillis()}\n")
             } catch (_: Exception) {
             } finally {
                 b.recycle()
