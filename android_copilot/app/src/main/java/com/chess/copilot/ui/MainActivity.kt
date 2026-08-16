@@ -73,6 +73,11 @@ class MainActivity : AppCompatActivity() {
             if (stateFile.exists()) {
                 tvResult.text = "【上次投影会话状态】\n${stateFile.readText()}"
             }
+            // 展示上次实机建议的逐格取证 (bug_13/14 定案用): BoardRect/FEN/低置信格/门控截断候选，无需 adb 即可读取截图
+            val diagFile = File(filesDir, "debug/last_diagnostic.txt")
+            if (diagFile.exists()) {
+                tvResult.append("\n【上次实机建议取证】\n${diagFile.readText()}")
+            }
         } catch (_: Exception) {
         }
     }

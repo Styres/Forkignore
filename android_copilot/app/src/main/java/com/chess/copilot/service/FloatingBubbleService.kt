@@ -341,7 +341,9 @@ class FloatingBubbleService : Service() {
             try {
                 transparentOverlay?.hide()
                 bubbleView?.visibility = View.INVISIBLE
-                delay(60)
+                // 150ms 而非 60ms (bug_13/14 嫌疑): VirtualDisplay 从窗口移除到干净帧入缓冲区存在合成延迟，
+                // 等待不足时截到的仍是带建议黑框/箭头的旧帧，第 8 横线被盖住即产生"阻隔子漏检"假象
+                delay(150)
 
                 screenBitmap = captureCurrentScreenBitmap()
 
