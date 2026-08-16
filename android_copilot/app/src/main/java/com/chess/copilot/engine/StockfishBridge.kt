@@ -375,6 +375,7 @@ object StockfishBridge {
                         lastDiagnosticInfo = "【Stockfish 重启失败，降级兜底】\n引擎重启后不可用，跌入纯 Kotlin 兜底"
                         Log.w(TAG, "Stockfish unavailable after restart, fallback will be used")
                         destroyProcessLocked()
+                        appendFallbackLog(fen)
                         val fallback = evaluateFallback(fen)
                         return@withContext fallback
                     }
@@ -441,8 +442,27 @@ object StockfishBridge {
 
             // 3. 双重兜底：纯 Kotlin 合法走法评估（安全兜底，且 fallback 结果绝对严禁写入 evalCache）
             Log.w(TAG, "Using fallback heuristic evaluator for FEN: $fen")
+            appendFallbackLog(fen)
             val fallback = evaluateFallback(fen)
             return@withContext fallback
+        }
+    }
+
+    /**
+     * 兜底事件落盘自取证 (bug_15 教训: 悬浮层只显示 [兜]，原因被后续成功评估覆盖后无从查考)
+     * 追加写入 filesDir/debug/engine_fallback_log.txt，保留最近 30 条
+     */
+    private fun appendFallbackLog(fen: String) {
+        try {
+            val ctx = appContext ?: return
+            val debugDir = File(ctx.filesDir, "debug")
+            if (!debugDir.exists()) debugDir.mkdirs()
+            val logFile = File(debugDir, "engine_fallback_log.txt")
+            val entry = "[${System.currentTimeMillis()}] FEN: $fen\n诊断: ${lastDiagnosticInfo.replace("\n", " | ")}\n\n"
+            val existing = if (logFile.exists()) logFile.readText() else ""
+            val entries = (existing + entry).split("\n\n").filter { it.isNotBlank() }
+            logFile.writeText(entries.takeLast(30).joinToString("\n\n") + "\n\n")
+        } catch (_: Exception) {
         }
     }
 

@@ -389,6 +389,11 @@ class FloatingBubbleService : Service() {
 
                         val eval = StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = 200)
 
+                        // 兜底大声告知 (bug_15 教训): 悬浮层出现 [兜] 时现场即给出引擎诊断首行，详情已落盘 engine_fallback_log.txt
+                        val engineWarn = if (eval.depth <= 0) {
+                            " | 【引擎兜底】${StockfishBridge.lastDiagnosticInfo.lineSequence().firstOrNull() ?: "原因未知"}"
+                        } else ""
+
                         transparentOverlay?.showSuggestion(
                             boardRect = res.boardRect,
                             moveInfo = eval,
@@ -401,8 +406,8 @@ class FloatingBubbleService : Service() {
                         withContext(Dispatchers.Main) {
                             Toast.makeText(
                                 this@FloatingBubbleService,
-                                "【检测成功】视角: $perspectiveName | Sim: ${String.format("%.3f", detailedResp.medianSim)} | 占位: ${detailedResp.occupiedCount}",
-                                Toast.LENGTH_SHORT
+                                "【检测成功】视角: $perspectiveName | Sim: ${String.format("%.3f", detailedResp.medianSim)} | 占位: ${detailedResp.occupiedCount}$engineWarn",
+                                if (eval.depth <= 0) Toast.LENGTH_LONG else Toast.LENGTH_SHORT
                             ).show()
                         }
                     }

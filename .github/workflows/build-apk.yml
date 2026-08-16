@@ -35,6 +35,9 @@ jobs:
           python tools/verify_ground_truth_diff.py
           python tools/verify_kotlin_parity.py
 
+      - name: Bug Frame Cell-Level Forensics (诊断输出, 供误分类/漏子证据采集)
+        run: python tools/inspect_bug_frames.py
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
