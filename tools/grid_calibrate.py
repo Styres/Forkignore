@@ -91,8 +91,13 @@ def coarse_candidates(image, top_n=3):
         prior = 1.0 if 0.60 <= bottom_ratio <= 0.99 else 0.35
         return (corr * 2.0 + edge * 0.4) * prior
 
-    min_size = int(0.60 * s_w)  # 覆盖横屏/裁剪图 (棋盘可仅占屏宽 60%)
+    min_size = int(0.60 * s_w)  # 覆盖横屏/裁剪图 (棋盘可仅占屏宽度 60%)
     max_size = s_w
+    # 粗扫向量化: 原实现三重循环逐框调用 score_box (单帧 ~7 万次纯 Python
+    # 调用, 占整个定位 99% 耗时); 积分表已建好, 每档 size 的边缘能量与
+    # 8x8 角点均值都能用滑窗视图一次算完所有 (x, y), 语义与逐框版一致:
+    # 边缘=7 内部分割线 3 行/列带均值和, 棋盘格相关=角点 8x8 与棋盘纹相关
+    y_min = max(0, int(s_h * 0.15))
     found = []  # [(score, x, y, size)]
 
     def push(score, x, y, size):
@@ -106,12 +111,70 @@ def coarse_candidates(image, top_n=3):
             found.sort(reverse=True, key=lambda t: t[0])
             del found[20:]
 
-    # 阶段一: 粗扫 step=4 (x 自由搜索, 不再强制居中; size 步长 8 控制耗时, 阶段二精修补偿)
+    def coarse_scan_size(size: int) -> None:
+        # 严格对照逐框版 score_box: 线位置取 int(y + i*step) (随窗口 y 截断,
+        # 不同 y 行偏移不同, 不可预四舍五入), y 上界不含 s_h-size
+        step = size / 8.0
+        n_y = max(0, s_h - size - y_min)  # y ∈ [y_min, s_h-size)
+        n_x = s_w - size + 1
+        if n_y <= 0:
+            return
+        yidx = np.arange(n_y) + y_min
+        xidx = np.arange(n_x)
+        # 纯整数数组二维索引 sat[row_idx[:, None], col_idx] → 稳定 (n_y, n_x),
+        # 避免 (数组, 切片) 混用时轴序随数组位置变化的陷阱
+        col_x = xidx[None, :]           # (1, n_x): SAT 列坐标 x
+        col_xw = col_x + size           # x + size
+        row_y = yidx[:, None]           # (n_y, 1): SAT 行坐标 y
+        row_yw = row_y + size           # y + size
+        edge = np.zeros((n_y, n_x), dtype=np.float64)
+        for i in range(1, 8):
+            # ly = int(y + i*step) 逐 y 截断: 行带高 3 宽 size, 均值只随 (x,y) 变
+            ly = (yidx + i * step).astype(int)[:, None]
+            edge += ((sat_mag[ly + 2, col_xw] - sat_mag[ly - 1, col_xw]
+                      - sat_mag[ly + 2, col_x] + sat_mag[ly - 1, col_x])
+                     / (3.0 * size))
+            # lx = int(x + i*step) 逐 x 截断: 列带宽 3 高 size;
+            # 右缘 x+lx+2 可能越界 → 按原版 min(s_w, x2) 裁剪语义逐 x 宽度
+            lx = (xidx + i * step).astype(int)[None, :]
+            lx2 = np.minimum(s_w, lx + 2)  # SAT 列索引钳位
+            cw_band = lx2 - (lx - 1)
+            edge += ((sat_mag[row_yw, lx2] - sat_mag[row_y, lx2]
+                      - sat_mag[row_yw, lx - 1] + sat_mag[row_y, lx - 1])
+                     / (cw_band * size))
+        cw = max(1, int(step * 0.18))
+        inv_cw2 = 1.0 / (cw * cw)
+        gm = np.zeros((n_y, n_x, 64), dtype=np.float64)
+        # 积分图四角公式: patch 均值 = (S[y+cw,x+cw]-S[y,x+cw]-S[y+cw,x]+S[y,x])/cw^2;
+        # 角点坐标 cy1 = int(y + r*step) 逐 y 截断, 用逐行偏移数组索引积分图
+        for r in range(8):
+            cy1 = (yidx + r * step).astype(int)[:, None]
+            cy2b = (yidx + (r + 1) * step).astype(int)[:, None] - cw
+            for c in range(8):
+                cx1 = int(c * step)   # x 为整数, int(x + c*step) = x + int(c*step) (截断)
+                cx2r = int((c + 1) * step) - cw
+                # 四个角点 patch: (cy1,cx1) (cy1,cx2r) (cy2b,cx1) (cy2b,cx2r);
+                # ro 为 (n_y,1), col_x+标量 为 (1,n_x) → 纯数组索引广播得 (n_y,n_x)
+                for ro, coloff in ((cy1, cx1), (cy1, cx2r), (cy2b, cx1),
+                                   (cy2b, cx2r)):
+                    gm[:, :, r * 8 + c] += (
+                        sat_gray[ro + cw, col_x + coloff + cw]
+                        - sat_gray[ro, col_x + coloff + cw]
+                        - sat_gray[ro + cw, col_x + coloff]
+                        + sat_gray[ro, col_x + coloff]) * inv_cw2
+        gm *= 0.25
+        corr = np.abs(np.einsum('xyk,k->xy', gm - gm.mean(axis=2, keepdims=True),
+                                pattern.ravel()))
+        bottom = (yidx + size) / s_h
+        prior = np.where((bottom >= 0.60) & (bottom <= 0.99), 1.0, 0.35)[:, None]
+        sc = (corr * 2.0 + edge * 0.4) * prior
+        for row in range(n_y):
+            x = int(np.argmax(sc[row]))
+            push(float(sc[row, x]), x, y_min + row, size)
+    
+    # 阶段一: 粗扫 size 步长 8 (x/y 全枚举由向量化承担, 不再需要 step=4 降采样)
     for size in range(min_size, max_size + 1, 8):
-        for x in range(0, s_w - size + 1, 4):
-            y_min = int(s_h * 0.15)
-            for y in range(max(0, y_min), max(1, s_h - size), 4):
-                push(score_box(x, y, size), x, y, size)
+        coarse_scan_size(size)
     found.sort(reverse=True, key=lambda t: t[0])
     found = found[:6]
 
