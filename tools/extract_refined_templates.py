@@ -24,13 +24,15 @@ def extract_features_from_cell(cell_img):
     grad_mean = float(np.mean(mag_full[9:39, 9:39]))
     
     # 2. 4 角中值背景差分探测前景质心 (3x3 四角采样，共 36 点统一取中值)
+    # 限制在 [2:46, 2:46] 内部区域探测，防止外圈 2px 边界线/邻格边缘侵入拉偏质心
     corner_pixels = np.concatenate([
         gray[0:3, 0:3].flatten(), gray[0:3, 45:48].flatten(),
         gray[45:48, 0:3].flatten(), gray[45:48, 45:48].flatten()
     ])
     bg_val = float(np.median(corner_pixels))
     diff = np.abs(gray.astype(np.float32) - bg_val)
-    mask = diff > 15.0
+    mask = np.zeros_like(diff, dtype=bool)
+    mask[2:46, 2:46] = diff[2:46, 2:46] > 15.0
     
     if np.any(mask):
         y_idxs, x_idxs = np.where(mask)

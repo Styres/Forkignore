@@ -604,7 +604,7 @@ def locate_board(image, top_n=3):
         # 相关性, 对绝对相位敏感, 可判别精标定无法区分的同构双解
         coarse = r['detail']['coarse']
         return (-_CONF_RANK[r['confidence']], round(r['residual'] * 2) / 2,
-                -scores.get(coarse, 0.0), -full)
+                -full, -scores.get(coarse, 0.0))
 
     results.sort(key=_key)
     best = results[0]

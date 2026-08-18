@@ -364,12 +364,13 @@ class UltraRobustClassifier(context: Context? = null) {
         cornerVals.sort()
         val bgVal = cornerVals[18]
 
+        // 限制在 [2..45] 内部区域探测，防止外圈 2px 边界线/邻格边缘侵入拉偏质心
         var sumFgY = 0.0
         var sumFgX = 0.0
         var fgCount = 0
-        for (y in 0..47) {
+        for (y in 2..45) {
             val yOff = y * 48
-            for (x in 0..47) {
+            for (x in 2..45) {
                 if (abs(gray[yOff + x] - bgVal) > 15.0f) {
                     sumFgY += y
                     sumFgX += x

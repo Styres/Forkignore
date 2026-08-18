@@ -435,13 +435,16 @@ class FloatingBubbleService : Service() {
                         val perspectiveName = if (res.isWhitePerspective) "执白$lockedStateDesc" else "执黑$lockedStateDesc"
                         
                         // 逐格取证落盘 (bug_11~14 定案用): 低置信格与门控截断候选写入 cells_forensics.txt
-                        // LocateScore (bug_18 定案用): 定位器置信分，真棋盘实测 649~1505，待真机失败帧标定硬门禁阈值
+                        // LocateScore/Confidence/Residual (阶段二精标定定案用): 定位器置信分与残差遥测落盘
                         val cellForensics = buildString {
                             appendLine("LocateScore: ${String.format("%.1f", locateResult.score)}")
+                            appendLine("Confidence: ${locateResult.confidence}")
+                            appendLine("Residual: ${String.format("%.2f", locateResult.residual)}")
+                            appendLine("IsCropped: ${locateResult.isCropped}")
                             appendLine("LowConf: ${detailedResp.lowConfidenceCells.joinToString(" ")}")
                             appendLine("GateRejected: ${detailedResp.gateRejectedCells.joinToString(" ")}")
                         }
-                        saveDebugArtifactsAsync(copyForDebug, boardRect, res.fullFen, cellForensics)
+                        saveDebugArtifactsAsync(copyForDebug, boardRect, locateResult, res.fullFen, cellForensics)
                         
                         val eval = StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = 200)
 
@@ -498,10 +501,13 @@ class FloatingBubbleService : Service() {
                         transparentOverlay?.hide()
                         val rejectedForensics = buildString {
                             appendLine("LocateScore: ${String.format("%.1f", locateResult.score)}")
+                            appendLine("Confidence: ${locateResult.confidence}")
+                            appendLine("Residual: ${String.format("%.2f", locateResult.residual)}")
+                            appendLine("IsCropped: ${locateResult.isCropped}")
                             appendLine("LowConf: ${detailedResp.lowConfidenceCells.joinToString(" ")}")
                             appendLine("GateRejected: ${detailedResp.gateRejectedCells.joinToString(" ")}")
                         }
-                        saveDebugArtifactsAsync(copyForDebug, boardRect, "REJECTED_${detailedResp.reason}", rejectedForensics)
+                        saveDebugArtifactsAsync(copyForDebug, boardRect, locateResult, "REJECTED_${detailedResp.reason}", rejectedForensics)
                         withContext(Dispatchers.Main) {
                             Toast.makeText(
                                 this@FloatingBubbleService,
@@ -585,7 +591,13 @@ class FloatingBubbleService : Service() {
         }
     }
 
-    private fun saveDebugArtifactsAsync(bitmap: Bitmap?, rect: android.graphics.Rect, fen: String, cellForensics: String = "") {
+    private fun saveDebugArtifactsAsync(
+        bitmap: Bitmap?,
+        rect: android.graphics.Rect,
+        locateResult: ChessLocator.LocateResult,
+        fen: String,
+        cellForensics: String = ""
+    ) {
         val b = bitmap ?: return
         serviceScope.launch(Dispatchers.IO) {
             try {
@@ -599,7 +611,15 @@ class FloatingBubbleService : Service() {
                 fos.close()
 
                 val txtFile = File(debugDir, "last_diagnostic.txt")
-                txtFile.writeText("BoardRect: $rect\nFEN: $fen\n${cellForensics}Time: ${System.currentTimeMillis()}\n")
+                txtFile.writeText(
+                    "BoardRect: $rect\n" +
+                    "LocateScore: ${String.format("%.1f", locateResult.score)}\n" +
+                    "Confidence: ${locateResult.confidence}\n" +
+                    "Residual: ${String.format("%.2f", locateResult.residual)}\n" +
+                    "IsCropped: ${locateResult.isCropped}\n" +
+                    "FEN: $fen\n" +
+                    "${cellForensics}Time: ${System.currentTimeMillis()}\n"
+                )
             } catch (_: Exception) {
             } finally {
                 b.recycle()

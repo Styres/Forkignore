@@ -12,13 +12,13 @@ import kotlin.math.roundToInt
  * 自研高精度 2D 棋盘自适应定位器 (Fast Integral-SAT + GridLine Direct Calibration Locator)
  *
  * 架构设计 (重构方案: 格线直测定位重构):
- * 1. 粗搜索阶段 (Coarse Locator): 放宽 maxSize 上界至 sW (400px)，提取 top-N 候选近似框
+ * 1. 粗搜索阶段 (Coarse Locator): 放宽 maxSize 上界至 sW (400px)，x 自由搜索 (不加居中偏置)，提取 top-N 候选近似框
  * 2. 精标定阶段 (Fine Grid Calibrate - 方案 A):
  *    - 横向: 6行带跨带中值剖面 + 梳状波长高斯先验 + 2遍等差拟合 (x_i = x0 + i*step) + 满宽 <=2px 吸附
- *    - 纵向: 上下框行均值剖面强边 + 低方差双重门禁主锚 (方约束配对 + 内部横线交叉检验)
- *    - 纵向退化: 内部 7 条横分割线行剖面等差拟合 + 相位多档试探 + 外边界强边一致性校验
+ *    - 纵向: 上下框行均值剖面强边 + 双侧低方差双重门禁主锚 (方约束配对 + 贴近粗框平局裁决 + 内部横线交叉检验)
+ *    - 纵向退化: 内部 7 条横分割线行剖面等差拟合 + 3点平滑75分位峰检 + 相位多档试探 + 外边界强边一致性校验与边缘吸附
  *    - 横纵交替: 纵向收敛后以精标定窗口重跑横向精修，彻底剥离带外立绘/按钮杂波
- * 3. 候选选优与置信度契约: RefineResult(rect, confidence, residual)，支持 top-N 独立精标定与候选救援
+ * 3. 候选选优与置信度契约: RefineResult(rect, confidence, residual, isCropped)，支持 top-N 独立精标定与候选救援
  */
 object ChessLocator {
 
@@ -33,17 +33,19 @@ object ChessLocator {
     private const val BAR_GRAD_MIN = 3.0f
 
     /**
-     * 定位结果带置信等级与拟合残差:
-     * @param rect 棋盘在原图坐标系下的矩形区域
+     * 定位结果带置信等级、拟合残差与裁剪越界识别:
+     * @param rect 棋盘在原图坐标系下的矩形区域 (可能含越界负坐标)
      * @param score 粗定位响应分 (用于同置信度下的细分排序)
-     * @param confidence 精标定置信等级: "high" (双轴均过门禁), "medium" (单轴精标定/退化通过), "low" (退化失败保持粗框)
+     * @param confidence 精标定置信等级: "high" (双轴均过门禁且未越界), "medium" (单轴精标定/退化通过/裁剪识别), "low" (退化失败保持粗框)
      * @param residual 拟合残差 (像素)
+     * @param isCropped 是否为负边距裁剪帧 (rect 越出图像边界)
      */
     data class LocateResult(
         val rect: Rect,
         val score: Float,
         val confidence: String = "high",
-        val residual: Float = 0f
+        val residual: Float = 0f,
+        val isCropped: Boolean = false
     )
 
     fun locateBoard(bitmap: Bitmap): LocateResult {
@@ -197,7 +199,7 @@ object ChessLocator {
             return (corr * 2.0f + edgeScore * 0.4f) * posPrior
         }
 
-        // 5. 阶段一：粗扫 (step=4)，尺寸上界放宽至 sW (400px)，横向允许自由搜索
+        // 5. 阶段一：粗扫 (step=4)，尺寸上界放宽至 sW (400px)，横向自由搜索 (全区间 [0, sW-size]，不预设居中)
         val minSize = (0.60f * sW).toInt()
         val maxSize = sW
         val topEntries = ArrayList<Pair<Float, IntArray>>() // (score, [x,y,size])
@@ -217,13 +219,11 @@ object ChessLocator {
         }
 
         for (size in minSize..maxSize step 4) {
-            val centerX = (sW - size) / 2
-            val minX = max(0, centerX - 12)
-            val maxX = min(sW - size, centerX + 12)
             val minY = (sH * 0.15f).toInt()
             val maxY = sH - size
 
-            for (x in minX..maxX step 4) {
+            // 彻底放开 x 搜索范围，支持带边距与任意偏置布局
+            for (x in 0..(sW - size) step 4) {
                 for (y in minY..maxY step 4) {
                     val score = evaluateBox(x, y, size)
                     recordCandidate(score, x, y, size)
@@ -273,20 +273,22 @@ object ChessLocator {
                 origSize = width
             }
 
-            origX = max(0, min(width - origSize, origX))
-            origY = max(0, min(height - origSize, origY))
+            // 裁剪识别契约: 不强制 clamp 破坏越界真值，而是识别并做标志与置信度降级
+            val isCropped = origX < 0 || origY < 0 || (origX + origSize) > width || (origY + origSize) > height
+            val finalConf = if (isCropped && calibrated.confidence == "high") "medium" else calibrated.confidence
 
             refinedResults.add(
                 LocateResult(
                     rect = Rect(origX, origY, origX + origSize, origY + origSize),
                     score = score,
-                    confidence = calibrated.confidence,
-                    residual = calibrated.residual
+                    confidence = finalConf,
+                    residual = calibrated.residual,
+                    isCropped = isCropped
                 )
             )
         }
 
-        // 8. 综合排序: 置信度等级 > 残差低 > 响应分高 > 满宽优先
+        // 8. 综合排序: 置信度等级 > 残差低 > 满宽优先 > 响应分高
         fun confRank(c: String): Int = when (c) {
             "high" -> 2
             "medium" -> 1
@@ -298,11 +300,11 @@ object ChessLocator {
             if (rankDiff != 0) return@sortWith rankDiff
             val resDiff = (a.residual * 2f).roundToInt() - (b.residual * 2f).roundToInt()
             if (resDiff != 0) return@sortWith resDiff
-            val scoreDiff = b.score.compareTo(a.score)
-            if (scoreDiff != 0) return@sortWith scoreDiff
-            val fullA = if (a.rect.width() == width) 1 else 0
-            val fullB = if (b.rect.width() == width) 1 else 0
-            fullB - fullA
+            val fullA = if (abs(a.rect.width() - width) <= 2) 1 else 0
+            val fullB = if (abs(b.rect.width() - width) <= 2) 1 else 0
+            val fullDiff = fullB - fullA
+            if (fullDiff != 0) return@sortWith fullDiff
+            b.score.compareTo(a.score)
         }
 
         return refinedResults.take(maxCount)
@@ -528,7 +530,7 @@ object ChessLocator {
     }
 
     /**
-     * 纵向上下框主锚检测: 行均值剖面强边 + 低方差双重门禁 + 内部横线交叉检验
+     * 纵向上下框主锚检测: 行均值剖面强边 + 双侧低方差双重门禁 + 贴近粗框平局裁决
      */
     private fun findVerticalBarAnchors(
         gray: FloatArray, sW: Int, sH: Int,
@@ -573,15 +575,23 @@ object ChessLocator {
             for (y in lo until hi) {
                 if (g[y] < BAR_GRAD_MIN) continue
                 if (!(g[y] >= g[y - 1] && g[y] >= g[min(sH - 1, y + 1)])) continue
-                val bStart = if (isTop) max(0, y - 4) else y + 1
-                val bEnd = if (isTop) y else min(sH, y + 5)
-                var stdSum = 0f
-                var count = 0
-                for (sy in bStart until bEnd) {
-                    stdSum += rowStd[sy]
-                    count++
+
+                // 边界双侧均查 (对齐 Python 基准): 任一侧行数 >= 3 且平均 std < 16.0 即可
+                val bandA = if (isTop) max(0, y - 4) until y else max(0, y - 3) until min(sH, y + 1)
+                val bandB = (y + 1) until min(sH, y + 5)
+
+                fun bandStdOk(range: IntRange): Boolean {
+                    if (range.last - range.first + 1 < 3) return false
+                    var stdSum = 0f
+                    var count = 0
+                    for (sy in range) {
+                        stdSum += rowStd[sy]
+                        count++
+                    }
+                    return count >= 3 && (stdSum / count) < BAR_STD_GATE
                 }
-                if (count >= 2 && (stdSum / count) < BAR_STD_GATE) {
+
+                if (bandStdOk(bandA) || bandStdOk(bandB)) {
                     cands.add(y)
                 }
             }
@@ -591,22 +601,72 @@ object ChessLocator {
         val tops = findCandidates(tLo, tHi, true)
         val bots = findCandidates(bLo, bHi, false)
 
-        var bestMatch: Triple<Int, Int, Float>? = null
+        // 收集所有满足方约束的配对并按 (dev, 贴近粗框距离) 选优 (对齐 Python 平局裁决)
+        val ties = ArrayList<Triple<Int, Int, Float>>()
         for (t in tops) {
             for (b in bots) {
                 val dev = abs((b - t).toFloat() - expectedSize)
                 if (dev <= SQUARE_GATE) {
-                    if (bestMatch == null || dev < bestMatch.third) {
-                        bestMatch = Triple(t, b, dev)
-                    }
+                    ties.add(Triple(t, b, dev))
                 }
             }
         }
-        return bestMatch
+
+        if (ties.isEmpty()) return null
+        return ties.minWithOrNull { a, b ->
+            val devDiff = a.third.compareTo(b.third)
+            if (abs(a.third - b.third) > 1e-4) return@minWithOrNull devDiff
+            val distA = abs(a.first - y0c) + abs(a.second - (y0c + sizec))
+            val distB = abs(b.first - y0c) + abs(b.second - (y0c + sizec))
+            distA.compareTo(distB)
+        }
     }
 
     /**
-     * 内部横分割线行剖面拟合
+     * 1D 剖面峰检 (3 点平滑 + 75 分位自适应阈值 + 间距抑制，完全对齐 Python _detect_peaks)
+     */
+    private fun detectPeaks1D(prof: FloatArray, minSep: Float, thrFloor: Float = 1.5f, pct: Float = 0.75f): List<Float> {
+        if (prof.size < 3) return emptyList()
+        val n = prof.size - 1
+        val rawDiff = FloatArray(n) { i -> abs(prof[i + 1] - prof[i]) }
+
+        // 3 点卷积平滑 np.convolve(g, [1,1,1]/3, mode='same')
+        val gSmooth = FloatArray(n)
+        for (i in 0 until n) {
+            val vPrev = if (i > 0) rawDiff[i - 1] else 0f
+            val vCurr = rawDiff[i]
+            val vNext = if (i < n - 1) rawDiff[i + 1] else 0f
+            val count = (if (i > 0) 1 else 0) + 1 + (if (i < n - 1) 1 else 0)
+            gSmooth[i] = (vPrev + vCurr + vNext) / count.toFloat()
+        }
+
+        // 75 分位数阈值
+        val sortedG = gSmooth.clone().apply { sort() }
+        val pIdx = (sortedG.size * pct).toInt().coerceIn(0, sortedG.size - 1)
+        val thr = max(thrFloor, sortedG[pIdx])
+
+        // 局部极大值筛选
+        val cand = ArrayList<Pair<Float, Int>>() // (amp, idx)
+        for (i in 1 until n - 1) {
+            if (gSmooth[i] >= thr && gSmooth[i] >= gSmooth[i - 1] && gSmooth[i] > gSmooth[i + 1]) {
+                cand.add(Pair(gSmooth[i], i))
+            }
+        }
+        cand.sortByDescending { it.first }
+
+        // 最小间距非极大值抑制
+        val keep = ArrayList<Int>()
+        for ((_, idx) in cand) {
+            if (keep.none { abs(it - idx) < minSep }) {
+                keep.add(idx)
+            }
+        }
+        keep.sort()
+        return keep.map { it.toFloat() }
+    }
+
+    /**
+     * 内部横分割线行剖面拟合 (对齐 Python _fit_horizontal_lines)
      */
     private fun fitHorizontalLines(
         gray: FloatArray, sW: Int, sH: Int,
@@ -619,8 +679,10 @@ object ChessLocator {
             val x1 = max(0, (x0c + (c + 0.22f) * sEst).toInt())
             val x2 = min(sW, (x0c + (c + 0.78f) * sEst).toInt())
             val width = max(1, x2 - x1)
-            val yLo = max(0, (y0c - 0.4f * sizec).toInt())
-            val yHi = min(sH, (y0c + sizec + 0.4f * sizec).toInt())
+            if (width < 4) continue
+
+            val yLo = max(0, (y0c - 0.5f * sizec).toInt())
+            val yHi = min(sH, (y0c + sizec + 0.5f * sizec).toInt())
 
             val prof = FloatArray(yHi - yLo)
             for (y in yLo until yHi) {
@@ -630,18 +692,14 @@ object ChessLocator {
                 prof[y - yLo] = sum / width
             }
 
-            // 峰检
-            val g = FloatArray(prof.size)
-            for (i in 1 until prof.size) g[i] = abs(prof[i] - prof[i - 1])
-            val minSep = (0.5f * sEst).toInt()
-            for (i in 1 until prof.size - 1) {
-                if (g[i] >= 1.5f && g[i] >= g[i - 1] && g[i] > g[i + 1]) {
-                    rawPeaks.add((i + yLo).toFloat())
-                }
+            // 采用 3 点平滑 + 75 分位自适应峰检
+            val peaks = detectPeaks1D(prof, minSep = 0.5f * sEst, thrFloor = 1.5f, pct = 0.75f)
+            for (p in peaks) {
+                rawPeaks.add(p + yLo)
             }
         }
 
-        // 聚类
+        // 跨列带聚类 (对齐 Python _cluster_lines)
         rawPeaks.sort()
         val clustered = ArrayList<Float>()
         if (rawPeaks.isNotEmpty()) {
@@ -667,21 +725,22 @@ object ChessLocator {
     }
 
     /**
-     * 外边界强边能量检测
+     * 外边界强边能量检测 (返回 (topEdge, bottomEdge, yTopEdge, yBottomEdge))
      */
     private fun outerEdgeScore(
         gray: FloatArray, sW: Int, sH: Int,
         x0: Float, size: Float, yFit: Float
-    ): Pair<Float, Float> {
+    ): FloatArray { // [te, be, yt, yb]
         val xa = max(0, x0.toInt())
         val xb = min(sW, (x0 + size).toInt())
         val spanX = max(1, xb - xa)
 
-        fun localMax(yTarget: Float): Float {
+        fun localMax(yTarget: Float): Pair<Float, Int> {
             val yc = yTarget.roundToInt()
             val lo = max(0, yc - 5)
             val hi = min(sH - 1, yc + 6)
             var maxG = 0f
+            var bestY = yc
             for (y in lo until hi) {
                 var sum = 0f
                 val rowOff = y * sW
@@ -690,12 +749,17 @@ object ChessLocator {
                     sum += abs(gray[nextOff + x] - gray[rowOff + x])
                 }
                 val avg = sum / spanX
-                if (avg > maxG) maxG = avg
+                if (avg > maxG) {
+                    maxG = avg
+                    bestY = y
+                }
             }
-            return maxG
+            return Pair(maxG, bestY)
         }
 
-        return Pair(localMax(yFit), localMax(yFit + size))
+        val (te, yt) = localMax(yFit)
+        val (be, yb) = localMax(yFit + size)
+        return floatArrayOf(te, be, yt.toFloat(), yb.toFloat())
     }
 
     /**
@@ -727,7 +791,7 @@ object ChessLocator {
             }
         }
 
-        // 3. 纵向退化路径: 多档相位试探
+        // 3. 纵向退化路径: 多档相位试探与实测强边吸附
         if (vPath == "coarse") {
             val sEst = sizeV / 8.0f
             var bestResid = 99f
@@ -737,11 +801,15 @@ object ChessLocator {
                 val yTry = (y0c + k * sEst).roundToInt()
                 val hfit = fitHorizontalLines(gray, sW, sH, x0c, yTry, sizeV.roundToInt())
                 if (hfit.isOk && abs(hfit.step - sEst) <= WAVE_GATE_V * sEst) {
-                    val (te, be) = outerEdgeScore(gray, sW, sH, x0, sizeV, hfit.p0)
+                    val edges = outerEdgeScore(gray, sW, sH, x0, sizeV, hfit.p0)
+                    val te = edges[0]
+                    val be = edges[1]
+                    val yt = edges[2]
                     if (te >= BAR_GRAD_MIN && be >= BAR_GRAD_MIN) {
                         if (hfit.residual < bestResid) {
                             bestResid = hfit.residual
-                            bestY0 = hfit.p0
+                            // 吸附到实测强边位置 yt (对齐 Python chosen = (float(yt), hfit['residual']))
+                            bestY0 = yt
                         }
                     }
                 }

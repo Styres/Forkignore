@@ -57,16 +57,22 @@ NEGATIVE_SAMPLES = [
 
 def run_detection_pipeline(img, templates):
     l, t, r, b = fast_sat_locate_board(img)
+    if r <= l or b <= t:
+        return None
     step = (r - l) / 8.0
     
     occupied = []
     for row in range(8):
         for col in range(8):
-            cx1 = int(round(l + col * step))
-            cy1 = int(round(t + row * step))
-            cx2 = int(round(l + (col + 1) * step))
-            cy2 = int(round(t + (row + 1) * step))
+            cx1 = max(0, min(img.shape[1], int(round(l + col * step))))
+            cy1 = max(0, min(img.shape[0], int(round(t + row * step))))
+            cx2 = max(0, min(img.shape[1], int(round(l + (col + 1) * step))))
+            cy2 = max(0, min(img.shape[0], int(round(t + (row + 1) * step))))
+            if cx2 <= cx1 or cy2 <= cy1:
+                continue
             cell = img[cy1:cy2, cx1:cx2]
+            if cell.size == 0 or cell.shape[0] < 4 or cell.shape[1] < 4:
+                continue
             f = extract_features_from_cell(cell)
             
             if f['center_std'] >= 6.0 and f['grad_mean'] >= 22.0:
