@@ -363,6 +363,23 @@ class FloatingBubbleService : Service() {
                 }
                 var boardRect = locateResult.rect
 
+                // 裁剪帧识别契约 (负边距/越界): 只提示不硬匹配——rect 越界直接进分类裁图会抛异常崩溃，
+                // 且画面不完整本就无法可靠识别; 现场 Toast 提示 + 遥测落盘后直接返回
+                if (locateResult.isCropped) {
+                    val croppedCopy = try {
+                        screenBitmap.copy(screenBitmap.config ?: Bitmap.Config.ARGB_8888, false)
+                    } catch (_: Exception) { null }
+                    saveDebugArtifactsAsync(croppedCopy, boardRect, locateResult, "CROPPED_FRAME_NO_FEN")
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(
+                            this@FloatingBubbleService,
+                            "【裁剪帧】棋盘画面不完整 (超出屏幕边界)，无法可靠识别，请完整显示棋盘后重试",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    return@launch
+                }
+
                 var detailedResp = withContext(Dispatchers.Default) {
                     classifier?.classifyBoardDetailed(
                         bitmap = screenBitmap,

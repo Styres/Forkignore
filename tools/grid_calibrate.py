@@ -392,33 +392,6 @@ def _outer_edge_score(gray, x0, size, y_fit):
     return te, be, yt, yb
 
 
-def _checker_verify(gray, x0, size, y_edge, side, depth_frac=0.3, thr=6.0):
-    """棋盘内侧棋盘格交替验证 (框锚第三重门禁)。
-
-    边界内侧前半格深内, 偶数列带与奇数列带的均值灰度差应显著 (棋盘格交替);
-    边界外侧是 UI/背景无此特征。用于拦截"差一格"的伪框锚 (退化拟合双解歧义)。
-    """
-    H, W = gray.shape[:2]
-    d = max(2, int(size / 8.0 * depth_frac))
-    if side == 'top':
-        ys = slice(int(max(0, min(H, y_edge + 1))), int(max(1, min(H, y_edge + 1 + d))))
-    else:
-        ys = slice(int(max(0, min(H, y_edge - d))), int(max(0, min(H, y_edge))))
-    if ys.stop - ys.start < 2:
-        return False
-    xa = int(max(0, min(W, x0)))
-    xb = int(max(xa + 8, min(W, x0 + size)))
-    sub = gray[ys, xa:xb].astype(np.float64)
-    step = max(1, (xb - xa) // 8)
-    ev = [sub[:, c * step:min((c + 1) * step, sub.shape[1])].mean()
-          for c in range(0, 8, 2) if c * step < sub.shape[1]]
-    od = [sub[:, c * step:min((c + 1) * step, sub.shape[1])].mean()
-          for c in range(1, 8, 2) if c * step < sub.shape[1]]
-    if not ev or not od:
-        return False
-    return abs(float(np.mean(ev)) - float(np.mean(od))) >= thr
-
-
 def _vertical_bar_anchors(gray, box, expected_size, x_extent=None):
     """上下框主锚: 行均值剖面强边 + 板内侧低 std 判据, 方约束配对选优。
 

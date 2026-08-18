@@ -107,13 +107,21 @@ class UltraRobustClassifier(context: Context? = null) {
         boardRect: Rect,
         overridePerspective: Boolean? = null
     ): ClassificationResponse {
-        val step = (boardRect.right - boardRect.left) / 8.0f
+        // 防御性钳位 (与定位器 isCropped 提示契约双保险): 裁剪帧/救援候选的 rect 可能越出图像边界，
+        // 直接 createBitmap 会抛 IllegalArgumentException; 与整幅求交后若框体缩小即判不完整并拦截 (只提示不硬匹配)
+        val safeRect = Rect(boardRect)
+        val fullyInside = safeRect.intersect(0, 0, bitmap.width, bitmap.height) &&
+            safeRect.width() == boardRect.width() && safeRect.height() == boardRect.height()
+        if (!fullyInside || safeRect.width() < 8) {
+            return ClassificationResponse.Rejected(reason = "CROPPED_RECT", medianSim = 0f, occupiedCount = 0)
+        }
+        val step = (safeRect.right - safeRect.left) / 8.0f
         val cellsFeats = Array(8) { r ->
             Array(8) { c ->
-                val x1 = (boardRect.left + c * step).toInt()
-                val y1 = (boardRect.top + r * step).toInt()
-                val x2 = (boardRect.left + (c + 1) * step).toInt()
-                val y2 = (boardRect.top + (r + 1) * step).toInt()
+                val x1 = (safeRect.left + c * step).toInt()
+                val y1 = (safeRect.top + r * step).toInt()
+                val x2 = (safeRect.left + (c + 1) * step).toInt()
+                val y2 = (safeRect.top + (r + 1) * step).toInt()
 
                 val cellW = max(1, x2 - x1)
                 val cellH = max(1, y2 - y1)
@@ -264,7 +272,7 @@ class UltraRobustClassifier(context: Context? = null) {
         val result = buildFenFromBoard(
             rawBoard = sanitizedBoard,
             isWhitePerspective = effectivePerspective,
-            boardRect = boardRect,
+            boardRect = safeRect,
             medianSim = medianSim,
             occupiedCount = occupiedList.size
         )

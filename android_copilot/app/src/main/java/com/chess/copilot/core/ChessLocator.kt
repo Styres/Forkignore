@@ -218,20 +218,24 @@ object ChessLocator {
             while (topEntries.size > maxCount + 4) topEntries.removeAt(topEntries.size - 1)
         }
 
-        for (size in minSize..maxSize step 4) {
+        // size 步长 8 对齐 Python 基准 (间隙由精修 ±5 窗覆盖);
+        // x/y 保留 step=4 降采样是 Kotlin 逐框 evaluateBox 的性能适配
+        // (Python 基准靠 numpy 向量化做全枚举), 真机耗时差异待阶段四遥测确认
+        for (size in minSize..maxSize step 8) {
             val minY = (sH * 0.15f).toInt()
             val maxY = sH - size
 
             // 彻底放开 x 搜索范围，支持带边距与任意偏置布局
             for (x in 0..(sW - size) step 4) {
-                for (y in minY..maxY step 4) {
+                // y 上界不含 sH-size (对齐 Python 基准 n_y = s_h-size-y_min 的半开区间)
+                for (y in minY until maxY step 4) {
                     val score = evaluateBox(x, y, size)
                     recordCandidate(score, x, y, size)
                 }
             }
         }
 
-        // 6. 粗候选精修 (在各候选附近 ±4 像素做 step=1 搜索)
+        // 6. 粗候选精修 (在各候选附近 ±5 像素做 step=1 搜索, size 窗 ±5 对齐 Python 基准)
         val initialCandidates = ArrayList<Pair<Float, IntArray>>()
         for (cand in topEntries.take(maxCount + 2)) {
             val (cScore, box) = cand
@@ -239,7 +243,7 @@ object ChessLocator {
             var bestX = box[0]
             var bestY = box[1]
             var bestSize = box[2]
-            for (size in max(minSize, box[2] - 4)..min(maxSize, box[2] + 4) step 1) {
+            for (size in max(minSize, box[2] - 5)..min(maxSize, box[2] + 5) step 1) {
                 for (x in max(0, box[0] - 4)..min(sW - size, box[0] + 4) step 1) {
                     for (y in max(0, box[1] - 4)..min(sH - size, box[1] + 4) step 1) {
                         val sc = evaluateBox(x, y, size)
@@ -461,15 +465,18 @@ object ChessLocator {
             return sc
         }
 
-        // 尺寸与相位扫描
+        // 尺寸与相位扫描 (尺寸步长 0.25px 对齐 Python 基准 np.arange(s_lo, s_hi+0.25, 0.25);
+        // 计数器驱动避免浮点累加漂移)
         val sLo = max(8f, sizec * 0.88f)
         val sHi = min(sW.toFloat(), sizec * 1.14f)
         var bestSc = -1f
         var bestSize = sizec.toFloat()
         var bestX0 = x0c.toFloat()
 
-        var s = sLo
-        while (s <= sHi + 0.5f) {
+        var kS = 0
+        while (true) {
+            val s = sLo + kS * 0.25f
+            if (s >= sHi + 0.25f) break
             val xcLo = max(-s * 0.05f, x0c - 0.25f * sizec)
             val xcHi = min(sW - s + s * 0.05f, x0c + 0.25f * sizec)
             var x = xcLo
@@ -482,7 +489,7 @@ object ChessLocator {
                 }
                 x += 1.0f
             }
-            s += 1.0f
+            kS++
         }
 
         // 谐振最优相位附近峰检与两遍等差拟合
@@ -737,16 +744,24 @@ object ChessLocator {
 
         fun localMax(yTarget: Float): Pair<Float, Int> {
             val yc = yTarget.roundToInt()
-            val lo = max(0, yc - 5)
+            // Sobel gy (ksize=3) 仅在内部行 [1, sH-2] 有效，搜索窗限制在内
+            val lo = max(1, yc - 5)
             val hi = min(sH - 1, yc + 6)
             var maxG = 0f
             var bestY = yc
             for (y in lo until hi) {
+                // Sobel gy 3x3: |(y+1 行 [1,2,1] 卷积) - (y-1 行 [1,2,1] 卷积)|，
+                // 对齐 Python _outer_edge_score 的 cv2.Sobel(gray, 0, 1) 量纲
+                // (边界列按反射延拓, 等价 BORDER_DEFAULT)
                 var sum = 0f
-                val rowOff = y * sW
+                val prevOff = (y - 1) * sW
                 val nextOff = (y + 1) * sW
                 for (x in xa until xb) {
-                    sum += abs(gray[nextOff + x] - gray[rowOff + x])
+                    val xl = if (x > 0) x - 1 else 1
+                    val xr = if (x < sW - 1) x + 1 else sW - 2
+                    val up = gray[prevOff + xl] + 2f * gray[prevOff + x] + gray[prevOff + xr]
+                    val dn = gray[nextOff + xl] + 2f * gray[nextOff + x] + gray[nextOff + xr]
+                    sum += abs(dn - up)
                 }
                 val avg = sum / spanX
                 if (avg > maxG) {
