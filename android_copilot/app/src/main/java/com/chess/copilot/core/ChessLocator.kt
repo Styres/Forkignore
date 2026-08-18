@@ -13,7 +13,9 @@ import kotlin.math.roundToInt
  *
  * 架构设计 (重构方案: 格线直测定位重构):
  * 1. 粗搜索阶段 (Coarse Locator): 放宽 maxSize 上界至 sW (400px)，x 自由搜索 (不加居中偏置)，提取 top-N 候选近似框
- * 2. 精标定阶段 (Fine Grid Calibrate - 方案 A):
+ * 2. 精标定阶段 (Fine Grid Calibrate):
+ *    契约: 粗扫在 400 空间提速, 精标定在原图全分辨率空间运行 (与 Python 对偶
+ *    原型 grid_calibrate.py 同空间), 保证 RESIDUAL_GATE/SNAP_PX 等 px 级门禁语义一致。
  *    - 横向: 6行带跨带中值剖面 + 梳状波长高斯先验 + 2遍等差拟合 (x_i = x0 + i*step) + 满宽 <=2px 吸附
  *    - 纵向: 上下框行均值剖面强边 + 双侧低方差双重门禁主锚 (方约束配对 + 贴近粗框平局裁决 + 内部横线交叉检验)
  *    - 纵向退化: 内部 7 条横分割线行剖面等差拟合 + 3点平滑75分位峰检 + 相位多档试探 + 外边界强边一致性校验与边缘吸附
@@ -259,20 +261,38 @@ object ChessLocator {
             initialCandidates.add(Pair(bestScore, intArrayOf(bestX, bestY, bestSize)))
         }
 
-        // 7. 精标定: 对 top-N 候选逐个独立进行格线剖面等差精修 (方案 A: 400 宽浮点精修)
+        // 7. 精标定: 对 top-N 候选逐个独立进行格线剖面等差精修。
+        // 关键契约: refine 必须在原图全分辨率空间运行 (Python 对偶原型即全分辨率),
+        // 粗扫留在 400 空间只为提速。曾在 400 空间跑 refine 导致所有 px 级门禁
+        // (RESIDUAL_GATE/SNAP_PX/离群容差) 相对原图放宽 ~3.15 倍 + 峰位量化 3px,
+        // 气泡遮挡帧上幻影框低残差通过门禁反超真框 (Screenshot_20260818_225702 事故,
+        // 真机错框 L=-56,T=284,size=1266, Python 400 空间模拟同型幻影复现钉死根因)。
+        val fullGray = FloatArray(width * height)
+        val fullPixels = IntArray(width * height)
+        bitmap.getPixels(fullPixels, 0, width, 0, 0, width, height)
+        for (i in fullPixels.indices) {
+            val p = fullPixels[i]
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val b = p and 0xFF
+            fullGray[i] = 0.299f * r + 0.587f * g + 0.114f * b
+        }
+
         val invScale = 1.0f / scale
         val refinedResults = ArrayList<LocateResult>()
 
         for ((score, coarseBox) in initialCandidates) {
-            val calibrated = refineByGridLines(gray, sW, sH, coarseBox[0], coarseBox[1], coarseBox[2])
-
-            // 映射回原图坐标系 (使用浮点亚像素精度并做满宽吸附)
-            var origX = (calibrated.x0 * invScale).roundToInt()
-            var origY = (calibrated.y0 * invScale).roundToInt()
-            var origSize = (calibrated.size * invScale).roundToInt()
+            // 粗候选映射回原图坐标后做全分辨率精修 (结果已在原图空间, 无需二次换算)
+            val ox = (coarseBox[0] * invScale).roundToInt()
+            val oy = (coarseBox[1] * invScale).roundToInt()
+            val oSize = (coarseBox[2] * invScale).roundToInt()
+            val calibrated = refineByGridLines(fullGray, width, height, ox, oy, oSize)
 
             // 满宽吸附: 与屏宽偏差 <= 2px 时对齐为 0 和 width
-            if (abs(calibrated.x0) <= SNAP_PX && abs(calibrated.size - sW) <= SNAP_PX) {
+            var origX = calibrated.x0.roundToInt()
+            var origSize = calibrated.size.roundToInt()
+            val origY = calibrated.y0.roundToInt()
+            if (abs(calibrated.x0) <= SNAP_PX && abs(calibrated.size - width) <= SNAP_PX) {
                 origX = 0
                 origSize = width
             }
