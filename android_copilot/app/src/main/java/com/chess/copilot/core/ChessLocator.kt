@@ -3,35 +3,55 @@ package com.chess.copilot.core
 import android.graphics.Bitmap
 import android.graphics.Rect
 import kotlin.math.abs
+import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * 自研高精度 2D 棋盘自适应定位器 (Fast Integral-SAT Checkerboard Locator)
- * 核心机制：
- * 1. 积分图 (Summed-Area Table) 实现 O(1) 任意网格线与角落区域能量计算
- * 2. 8x8 格子 4 角采样（18% 边角）完全规避中心棋子遮挡
- * 3. 融合多邻国垂直布局合理性先验 (70%~98%)，彻底抑制顶部卡通立绘与底部按钮干扰
- * 4. 粗扫 (step=4) + 精修 (step=1) 两阶段毫秒级像素对齐
+ * 自研高精度 2D 棋盘自适应定位器 (Fast Integral-SAT + GridLine Direct Calibration Locator)
+ *
+ * 架构设计 (重构方案: 格线直测定位重构):
+ * 1. 粗搜索阶段 (Coarse Locator): 放宽 maxSize 上界至 sW (400px)，提取 top-N 候选近似框
+ * 2. 精标定阶段 (Fine Grid Calibrate - 方案 A):
+ *    - 横向: 6行带跨带中值剖面 + 梳状波长高斯先验 + 2遍等差拟合 (x_i = x0 + i*step) + 满宽 <=2px 吸附
+ *    - 纵向: 上下框行均值剖面强边 + 低方差双重门禁主锚 (方约束配对 + 内部横线交叉检验)
+ *    - 纵向退化: 内部 7 条横分割线行剖面等差拟合 + 相位多档试探 + 外边界强边一致性校验
+ *    - 横纵交替: 纵向收敛后以精标定窗口重跑横向精修，彻底剥离带外立绘/按钮杂波
+ * 3. 候选选优与置信度契约: RefineResult(rect, confidence, residual)，支持 top-N 独立精标定与候选救援
  */
 object ChessLocator {
 
+    private const val RESIDUAL_GATE = 2.5f
+    private const val MIN_LINES = 5
+    private const val SQUARE_GATE = 4.0f
+    private const val SNAP_PX = 2.0f
+    private const val OUTLIER_FRAC = 0.25f
+    private const val WAVE_GATE = 0.015f
+    private const val WAVE_GATE_V = 0.025f
+    private const val BAR_STD_GATE = 16.0f
+    private const val BAR_GRAD_MIN = 3.0f
+
     /**
-     * 定位结果带置信分数 (bug_18 教训): 定位器原本只返回 argmax 框且静默回退默认框，
-     * 定位失败时分类器在错误区域上产出低 MedianSim，症状表现为"相似度过低"而非"定位失败"。
-     * score 为降采样坐标系下的棋盘模式响应分，实测真棋盘 649~1505；暂只遥测不设硬门禁，待真机失败帧数据标定阈值
+     * 定位结果带置信等级与拟合残差:
+     * @param rect 棋盘在原图坐标系下的矩形区域
+     * @param score 粗定位响应分 (用于同置信度下的细分排序)
+     * @param confidence 精标定置信等级: "high" (双轴均过门禁), "medium" (单轴精标定/退化通过), "low" (退化失败保持粗框)
+     * @param residual 拟合残差 (像素)
      */
-    data class LocateResult(val rect: Rect, val score: Float)
+    data class LocateResult(
+        val rect: Rect,
+        val score: Float,
+        val confidence: String = "high",
+        val residual: Float = 0f
+    )
 
     fun locateBoard(bitmap: Bitmap): LocateResult {
         return locateTopCandidates(bitmap, 1).first()
     }
 
     /**
-     * 返回按响应分降序的 top-N 互不重叠候选框 (bug_19/superbug 教训):
-     * 实测同一帧上对话气泡等 UI 边缘可使假框得分反超真框 (710 vs 670)，且 Kotlin/Python
-     * 重采样插值差异可翻转 argmax 结果 —— 单峰 argmax 不可靠，次候选框供"候选救援"兜底
+     * 返回按综合置信度与响应分降序的 top-N 候选框 (支持候选救援链路)
      */
     fun locateTopCandidates(bitmap: Bitmap, maxCount: Int): List<LocateResult> {
         val width = bitmap.width
@@ -170,24 +190,20 @@ object ChessLocator {
             }
             val corr = abs(corrSum)
 
-            // (3) 多邻国垂直合理性先验 (底部比例一般在 70%~98%)
+            // (3) 多邻国垂直合理性先验 (底部比例在 60%~99% 之间)
             val bottomRatio = (y + size).toFloat() / sH.toFloat()
-            val posPrior = if (bottomRatio in 0.70f..0.98f) 1.0f else 0.35f
+            val posPrior = if (bottomRatio in 0.60f..0.99f) 1.0f else 0.35f
 
             return (corr * 2.0f + edgeScore * 0.4f) * posPrior
         }
 
-        // 5. 阶段一：粗扫 (step=4)，同步维护 top-(maxCount+3) 候选榜供救援使用
-        val minSize = (0.85f * sW).toInt()
-        val maxSize = min(sW, (0.98f * sW).toInt())
-        var bestScore = -1e9f
-        var bestX = 0
-        var bestY = 0
-        var bestSize = minSize
+        // 5. 阶段一：粗扫 (step=4)，尺寸上界放宽至 sW (400px)，横向允许自由搜索
+        val minSize = (0.60f * sW).toInt()
+        val maxSize = sW
         val topEntries = ArrayList<Pair<Float, IntArray>>() // (score, [x,y,size])
 
         fun recordCandidate(score: Float, x: Int, y: Int, size: Int) {
-            val minSep = size * 0.15f // 峰间距小于 15% 棋盘宽视为同一峰的抖动副本，只保留域内最高分
+            val minSep = size * 0.12f // 峰间距去重
             val idx = topEntries.indexOfFirst { (_, e) ->
                 abs(e[0] - x) < minSep && abs(e[1] - y) < minSep && abs(e[2] - size) < minSep
             }
@@ -197,73 +213,566 @@ object ChessLocator {
             }
             topEntries.add(Pair(score, intArrayOf(x, y, size)))
             topEntries.sortByDescending { it.first }
-            while (topEntries.size > maxCount + 3) topEntries.removeAt(topEntries.size - 1)
+            while (topEntries.size > maxCount + 4) topEntries.removeAt(topEntries.size - 1)
         }
 
         for (size in minSize..maxSize step 4) {
             val centerX = (sW - size) / 2
-            val minX = max(0, centerX - 8)
-            val maxX = min(sW - size, centerX + 8)
-            val minY = (sH * 0.20f).toInt()
+            val minX = max(0, centerX - 12)
+            val maxX = min(sW - size, centerX + 12)
+            val minY = (sH * 0.15f).toInt()
             val maxY = sH - size
 
             for (x in minX..maxX step 4) {
                 for (y in minY..maxY step 4) {
                     val score = evaluateBox(x, y, size)
                     recordCandidate(score, x, y, size)
-                    if (score > bestScore) {
-                        bestScore = score
-                        bestX = x
-                        bestY = y
-                        bestSize = size
-                    }
                 }
             }
         }
 
-        // 6. 阶段二：精修 (在最佳点周围 ±4 像素做 step=1 搜索)
-        val optX = bestX
-        val optY = bestY
-        val optSize = bestSize
-
-        for (size in max(minSize, optSize - 4)..min(maxSize, optSize + 4) step 1) {
-            for (x in max(0, optX - 4)..min(sW - size, optX + 4) step 1) {
-                for (y in max(0, optY - 4)..min(sH - size, optY + 4) step 1) {
-                    val score = evaluateBox(x, y, size)
-                    recordCandidate(score, x, y, size)
-                    if (score > bestScore) {
-                        bestScore = score
-                        bestX = x
-                        bestY = y
-                        bestSize = size
+        // 6. 粗候选精修 (在各候选附近 ±4 像素做 step=1 搜索)
+        val initialCandidates = ArrayList<Pair<Float, IntArray>>()
+        for (cand in topEntries.take(maxCount + 2)) {
+            val (cScore, box) = cand
+            var bestScore = cScore
+            var bestX = box[0]
+            var bestY = box[1]
+            var bestSize = box[2]
+            for (size in max(minSize, box[2] - 4)..min(maxSize, box[2] + 4) step 1) {
+                for (x in max(0, box[0] - 4)..min(sW - size, box[0] + 4) step 1) {
+                    for (y in max(0, box[1] - 4)..min(sH - size, box[1] + 4) step 1) {
+                        val sc = evaluateBox(x, y, size)
+                        if (sc > bestScore) {
+                            bestScore = sc
+                            bestX = x
+                            bestY = y
+                            bestSize = size
+                        }
                     }
                 }
             }
+            initialCandidates.add(Pair(bestScore, intArrayOf(bestX, bestY, bestSize)))
         }
 
-        // 7. 映射回原图坐标系
+        // 7. 精标定: 对 top-N 候选逐个独立进行格线剖面等差精修 (方案 A: 400 宽浮点精修)
         val invScale = 1.0f / scale
+        val refinedResults = ArrayList<LocateResult>()
 
-        val results = ArrayList<LocateResult>()
-        for ((score, e) in topEntries) {
-            if (results.size >= maxCount) break
-            var origX = (e[0] * invScale).roundToInt()
-            var origY = (e[1] * invScale).roundToInt()
-            var origSize = (e[2] * invScale).roundToInt()
+        for ((score, coarseBox) in initialCandidates) {
+            val calibrated = refineByGridLines(gray, sW, sH, coarseBox[0], coarseBox[1], coarseBox[2])
+
+            // 映射回原图坐标系 (使用浮点亚像素精度并做满宽吸附)
+            var origX = (calibrated.x0 * invScale).roundToInt()
+            var origY = (calibrated.y0 * invScale).roundToInt()
+            var origSize = (calibrated.size * invScale).roundToInt()
+
+            // 满宽吸附: 与屏宽偏差 <= 2px 时对齐为 0 和 width
+            if (abs(calibrated.x0) <= SNAP_PX && abs(calibrated.size - sW) <= SNAP_PX) {
+                origX = 0
+                origSize = width
+            }
+
             origX = max(0, min(width - origSize, origX))
             origY = max(0, min(height - origSize, origY))
-            results.add(LocateResult(Rect(origX, origY, origX + origSize, origY + origSize), score))
+
+            refinedResults.add(
+                LocateResult(
+                    rect = Rect(origX, origY, origX + origSize, origY + origSize),
+                    score = score,
+                    confidence = calibrated.confidence,
+                    residual = calibrated.residual
+                )
+            )
         }
 
-        // 兜底: 候选榜异常为空时退回精修 argmax (保持旧行为不静默崩溃)
-        if (results.isEmpty()) {
-            var origX = (bestX * invScale).roundToInt()
-            var origY = (bestY * invScale).roundToInt()
-            var origSize = (bestSize * invScale).roundToInt()
-            origX = max(0, min(width - origSize, origX))
-            origY = max(0, min(height - origSize, origY))
-            results.add(LocateResult(Rect(origX, origY, origX + origSize, origY + origSize), bestScore))
+        // 8. 综合排序: 置信度等级 > 残差低 > 响应分高 > 满宽优先
+        fun confRank(c: String): Int = when (c) {
+            "high" -> 2
+            "medium" -> 1
+            else -> 0
         }
-        return results
+
+        refinedResults.sortWith { a, b ->
+            val rankDiff = confRank(b.confidence) - confRank(a.confidence)
+            if (rankDiff != 0) return@sortWith rankDiff
+            val resDiff = (a.residual * 2f).roundToInt() - (b.residual * 2f).roundToInt()
+            if (resDiff != 0) return@sortWith resDiff
+            val scoreDiff = b.score.compareTo(a.score)
+            if (scoreDiff != 0) return@sortWith scoreDiff
+            val fullA = if (a.rect.width() == width) 1 else 0
+            val fullB = if (b.rect.width() == width) 1 else 0
+            fullB - fullA
+        }
+
+        return refinedResults.take(maxCount)
+    }
+
+    // =========================================================================
+    // 阶段二: 格线直测精标定核心算子 (Kotlin 直译对偶实现)
+    // =========================================================================
+
+    private data class CalibratedBox(
+        val x0: Float,
+        val y0: Float,
+        val size: Float,
+        val confidence: String,
+        val residual: Float
+    )
+
+    private data class FitResult(
+        val p0: Float,
+        val step: Float,
+        val residual: Float,
+        val lineCount: Int,
+        val isOk: Boolean
+    )
+
+    /**
+     * 多遍等差拟合: 索引分配 -> 最小二乘拟合 -> 剔除离群峰 -> 重拟合
+     */
+    private fun fitArithmetic(points: List<Pair<Int, Float>>): Triple<Float, Float, Float> {
+        var sumX = 0.0
+        var sumY = 0.0
+        var sumXX = 0.0
+        var sumXY = 0.0
+        val n = points.size.toDouble()
+
+        for ((idx, pos) in points) {
+            val x = idx.toDouble()
+            val y = pos.toDouble()
+            sumX += x
+            sumY += y
+            sumXX += x * x
+            sumXY += x * y
+        }
+
+        val denom = n * sumXX - sumX * sumX
+        val step = if (abs(denom) > 1e-6) ((n * sumXY - sumX * sumY) / denom).toFloat() else 0f
+        val p0 = ((sumY - step.toDouble() * sumX) / n).toFloat()
+
+        var totalResid = 0.0
+        for ((idx, pos) in points) {
+            totalResid += abs(pos - (p0 + idx * step))
+        }
+        val avgResid = (totalResid / n).toFloat()
+
+        return Triple(p0, step, avgResid)
+    }
+
+    private fun twoPassFit(lines: List<Float>, x0Est: Float, stepEst: Float): FitResult {
+        fun assign(p0: Float, step: Float): List<Pair<Int, Float>> {
+            val res = ArrayList<Pair<Int, Float>>()
+            for (p in lines) {
+                val idx = ((p - p0) / step).roundToInt()
+                if (idx in 1..7 && abs(p - (p0 + idx * step)) <= OUTLIER_FRAC * step + 2.0f) {
+                    res.add(Pair(idx, p))
+                }
+            }
+            return res
+        }
+
+        val cand1 = assign(x0Est, stepEst)
+        if (cand1.size < MIN_LINES) {
+            return FitResult(x0Est, stepEst, 99f, cand1.size, false)
+        }
+        val (p0_1, step_1, _) = fitArithmetic(cand1)
+
+        val cand2 = assign(p0_1, step_1)
+        if (cand2.size < MIN_LINES) {
+            return FitResult(x0Est, stepEst, 99f, cand2.size, false)
+        }
+        var (p0_2, step_2, resid_2) = fitArithmetic(cand2)
+        var finalCand = cand2
+
+        // 第三遍: 残差超门禁时剔除残差最大点
+        if (resid_2 > RESIDUAL_GATE && cand2.size > MIN_LINES) {
+            var worstIdx = 0
+            var worstResid = -1f
+            for (i in cand2.indices) {
+                val r = abs(cand2[i].second - (p0_2 + cand2[i].first * step_2))
+                if (r > worstResid) {
+                    worstResid = r
+                    worstIdx = i
+                }
+            }
+            val cand3 = cand2.filterIndexed { index, _ -> index != worstIdx }
+            val (p0_3, step_3, resid_3) = fitArithmetic(cand3)
+            if (resid_3 < resid_2) {
+                p0_2 = p0_3
+                step_2 = step_3
+                resid_2 = resid_3
+                finalCand = cand3
+            }
+        }
+
+        val isOk = resid_2 <= RESIDUAL_GATE
+        return FitResult(p0_2, step_2, resid_2, finalCand.size, isOk)
+    }
+
+    /**
+     * 横向梳状谐振定标: 6行带跨带中值剖面 + 2遍等差拟合 + 满宽吸附
+     */
+    private fun refineHorizontal(
+        gray: FloatArray, sW: Int, sH: Int,
+        x0c: Int, y0c: Int, sizec: Int
+    ): Pair<Boolean, FloatArray> { // Pair(ok, [x0, size, residual])
+        val y1 = max(0, (y0c - 0.05f * sizec).toInt())
+        val y2 = min(sH, (y0c + sizec + 0.05f * sizec).toInt())
+        val bandH = max(1, (y2 - y1) / 8)
+
+        // 提取 6 个中央行带的垂直梯度 Sobel gx 均值剖面
+        val bandProfiles = Array(6) { FloatArray(sW) }
+        for (b in 0 until 6) {
+            val byStart = y1 + (b + 1) * bandH
+            val byEnd = min(y2, byStart + bandH)
+            val count = max(1, byEnd - byStart)
+            for (y in byStart until byEnd) {
+                val rowOff = y * sW
+                for (x in 1 until sW - 1) {
+                    val gx = abs(gray[rowOff + x + 1] - gray[rowOff + x - 1])
+                    bandProfiles[b][x] += gx
+                }
+            }
+            for (x in 0 until sW) {
+                bandProfiles[b][x] /= count.toFloat()
+            }
+        }
+
+        fun lineEnergy(xi: Int): Float {
+            if (xi < 1 || xi >= sW - 1) return 0f
+            val vals = FloatArray(6) { b ->
+                max(bandProfiles[b][xi - 1], max(bandProfiles[b][xi], bandProfiles[b][xi + 1]))
+            }
+            vals.sort()
+            return (vals[2] + vals[3]) * 0.5f // 6 带中值
+        }
+
+        fun combScore(size: Float, x0: Float): Float {
+            var sc = 0f
+            val step = size / 8.0f
+            for (i in 1..7) {
+                sc += lineEnergy((x0 + i * step).roundToInt())
+            }
+            val dev = (size - sizec) / (0.06f * sizec)
+            sc *= exp(-0.5f * dev * dev)
+            return sc
+        }
+
+        // 尺寸与相位扫描
+        val sLo = max(8f, sizec * 0.88f)
+        val sHi = min(sW.toFloat(), sizec * 1.14f)
+        var bestSc = -1f
+        var bestSize = sizec.toFloat()
+        var bestX0 = x0c.toFloat()
+
+        var s = sLo
+        while (s <= sHi + 0.5f) {
+            val xcLo = max(-s * 0.05f, x0c - 0.25f * sizec)
+            val xcHi = min(sW - s + s * 0.05f, x0c + 0.25f * sizec)
+            var x = xcLo
+            while (x <= xcHi + 0.9f) {
+                val sc = combScore(s, x)
+                if (sc > bestSc) {
+                    bestSc = sc
+                    bestSize = s
+                    bestX0 = x
+                }
+                x += 1.0f
+            }
+            s += 1.0f
+        }
+
+        // 谐振最优相位附近峰检与两遍等差拟合
+        val medProf = FloatArray(sW)
+        val tmpVals = FloatArray(6)
+        for (x in 0 until sW) {
+            for (b in 0 until 6) tmpVals[b] = bandProfiles[b][x]
+            tmpVals.sort()
+            medProf[x] = (tmpVals[2] + tmpVals[3]) * 0.5f
+        }
+
+        val rawPeaks = ArrayList<Float>()
+        val stepR = bestSize / 8.0f
+        for (i in 1..7) {
+            val xc = (bestX0 + i * stepR).roundToInt()
+            val lo = max(1, xc - 2)
+            val hi = min(sW - 2, xc + 2)
+            var maxV = -1f
+            var maxP = xc
+            for (p in lo..hi) {
+                if (medProf[p] > maxV) {
+                    maxV = medProf[p]
+                    maxP = p
+                }
+            }
+            rawPeaks.add(maxP.toFloat())
+        }
+
+        var fit = twoPassFit(rawPeaks, bestX0, stepR)
+        if (fit.isOk && abs(fit.step - stepR) > WAVE_GATE * stepR) {
+            fit = FitResult(bestX0, stepR, 99f, fit.lineCount, false)
+        }
+
+        var outX0 = if (fit.isOk) fit.p0 else bestX0
+        var outSize = if (fit.isOk) fit.step * 8.0f else bestSize
+        val residual = if (fit.isOk) fit.residual else 99f
+
+        // 满宽吸附
+        if (abs(outX0) <= SNAP_PX && abs(outSize - sW) <= SNAP_PX) {
+            outX0 = 0f
+            outSize = sW.toFloat()
+        }
+
+        return Pair(fit.isOk, floatArrayOf(outX0, outSize, residual, bestSize))
+    }
+
+    /**
+     * 纵向上下框主锚检测: 行均值剖面强边 + 低方差双重门禁 + 内部横线交叉检验
+     */
+    private fun findVerticalBarAnchors(
+        gray: FloatArray, sW: Int, sH: Int,
+        x0c: Int, y0c: Int, sizec: Int,
+        expectedSize: Float, x0: Float, size: Float
+    ): Triple<Int, Int, Float>? {
+        val xa = max(0, (x0 - 0.02f * sW).toInt())
+        val xb = min(sW, (x0 + size + 0.02f * sW).toInt())
+        val spanX = max(1, xb - xa)
+
+        val prof = FloatArray(sH)
+        val rowStd = FloatArray(sH)
+
+        for (y in 0 until sH) {
+            var sum = 0.0
+            var sumSq = 0.0
+            val rowOff = y * sW
+            for (x in xa until xb) {
+                val v = gray[rowOff + x].toDouble()
+                sum += v
+                sumSq += v * v
+            }
+            val mean = sum / spanX
+            prof[y] = mean.toFloat()
+            val variance = max(0.0, (sumSq / spanX) - mean * mean)
+            rowStd[y] = kotlin.math.sqrt(variance).toFloat()
+        }
+
+        val g = FloatArray(sH)
+        for (y in 1 until sH) {
+            g[y] = abs(prof[y] - prof[y - 1])
+        }
+
+        val spanY = (0.18f * sW).toInt()
+        val tLo = max(0, y0c - spanY)
+        val tHi = min(sH - 1, y0c + (0.05f * sW).toInt())
+        val bLo = max(0, y0c + sizec - (0.05f * sW).toInt())
+        val bHi = min(sH - 2, y0c + sizec + spanY)
+
+        fun findCandidates(lo: Int, hi: Int, isTop: Boolean): List<Int> {
+            val cands = ArrayList<Int>()
+            for (y in lo until hi) {
+                if (g[y] < BAR_GRAD_MIN) continue
+                if (!(g[y] >= g[y - 1] && g[y] >= g[min(sH - 1, y + 1)])) continue
+                val bStart = if (isTop) max(0, y - 4) else y + 1
+                val bEnd = if (isTop) y else min(sH, y + 5)
+                var stdSum = 0f
+                var count = 0
+                for (sy in bStart until bEnd) {
+                    stdSum += rowStd[sy]
+                    count++
+                }
+                if (count >= 2 && (stdSum / count) < BAR_STD_GATE) {
+                    cands.add(y)
+                }
+            }
+            return cands
+        }
+
+        val tops = findCandidates(tLo, tHi, true)
+        val bots = findCandidates(bLo, bHi, false)
+
+        var bestMatch: Triple<Int, Int, Float>? = null
+        for (t in tops) {
+            for (b in bots) {
+                val dev = abs((b - t).toFloat() - expectedSize)
+                if (dev <= SQUARE_GATE) {
+                    if (bestMatch == null || dev < bestMatch.third) {
+                        bestMatch = Triple(t, b, dev)
+                    }
+                }
+            }
+        }
+        return bestMatch
+    }
+
+    /**
+     * 内部横分割线行剖面拟合
+     */
+    private fun fitHorizontalLines(
+        gray: FloatArray, sW: Int, sH: Int,
+        x0c: Int, y0c: Int, sizec: Int
+    ): FitResult {
+        val sEst = sizec / 8.0f
+        val rawPeaks = ArrayList<Float>()
+
+        for (c in 0 until 8) {
+            val x1 = max(0, (x0c + (c + 0.22f) * sEst).toInt())
+            val x2 = min(sW, (x0c + (c + 0.78f) * sEst).toInt())
+            val width = max(1, x2 - x1)
+            val yLo = max(0, (y0c - 0.4f * sizec).toInt())
+            val yHi = min(sH, (y0c + sizec + 0.4f * sizec).toInt())
+
+            val prof = FloatArray(yHi - yLo)
+            for (y in yLo until yHi) {
+                var sum = 0f
+                val rowOff = y * sW
+                for (x in x1 until x2) sum += gray[rowOff + x]
+                prof[y - yLo] = sum / width
+            }
+
+            // 峰检
+            val g = FloatArray(prof.size)
+            for (i in 1 until prof.size) g[i] = abs(prof[i] - prof[i - 1])
+            val minSep = (0.5f * sEst).toInt()
+            for (i in 1 until prof.size - 1) {
+                if (g[i] >= 1.5f && g[i] >= g[i - 1] && g[i] > g[i + 1]) {
+                    rawPeaks.add((i + yLo).toFloat())
+                }
+            }
+        }
+
+        // 聚类
+        rawPeaks.sort()
+        val clustered = ArrayList<Float>()
+        if (rawPeaks.isNotEmpty()) {
+            var curGroup = ArrayList<Float>()
+            curGroup.add(rawPeaks[0])
+            val tol = 0.25f * sEst
+            for (i in 1 until rawPeaks.size) {
+                val p = rawPeaks[i]
+                if (p - curGroup.last() < tol) {
+                    curGroup.add(p)
+                } else {
+                    curGroup.sort()
+                    clustered.add(curGroup[curGroup.size / 2])
+                    curGroup = ArrayList()
+                    curGroup.add(p)
+                }
+            }
+            curGroup.sort()
+            clustered.add(curGroup[curGroup.size / 2])
+        }
+
+        return twoPassFit(clustered, y0c.toFloat(), sEst)
+    }
+
+    /**
+     * 外边界强边能量检测
+     */
+    private fun outerEdgeScore(
+        gray: FloatArray, sW: Int, sH: Int,
+        x0: Float, size: Float, yFit: Float
+    ): Pair<Float, Float> {
+        val xa = max(0, x0.toInt())
+        val xb = min(sW, (x0 + size).toInt())
+        val spanX = max(1, xb - xa)
+
+        fun localMax(yTarget: Float): Float {
+            val yc = yTarget.roundToInt()
+            val lo = max(0, yc - 5)
+            val hi = min(sH - 1, yc + 6)
+            var maxG = 0f
+            for (y in lo until hi) {
+                var sum = 0f
+                val rowOff = y * sW
+                val nextOff = (y + 1) * sW
+                for (x in xa until xb) {
+                    sum += abs(gray[nextOff + x] - gray[rowOff + x])
+                }
+                val avg = sum / spanX
+                if (avg > maxG) maxG = avg
+            }
+            return maxG
+        }
+
+        return Pair(localMax(yFit), localMax(yFit + size))
+    }
+
+    /**
+     * 格线精标定主入口 (400 宽空间)
+     */
+    private fun refineByGridLines(
+        gray: FloatArray, sW: Int, sH: Int,
+        x0c: Int, y0c: Int, sizec: Int
+    ): CalibratedBox {
+        // 1. 横向精修
+        val (hOk, hParams) = refineHorizontal(gray, sW, sH, x0c, y0c, sizec)
+        var x0 = hParams[0]
+        var size = hParams[1]
+        val hResid = hParams[2]
+        val sizeV = if (hOk) size else hParams[3]
+
+        // 2. 纵向精修: 上下框主锚
+        var y0 = y0c.toFloat()
+        var vPath = "coarse"
+        var vResid = 99f
+
+        val bars = findVerticalBarAnchors(gray, sW, sH, x0c, y0c, sizec, size, x0, size)
+        if (bars != null) {
+            val cross = fitHorizontalLines(gray, sW, sH, x0c, bars.first, size.roundToInt())
+            if (cross.isOk) {
+                y0 = bars.first.toFloat()
+                vPath = "bars"
+                vResid = bars.third
+            }
+        }
+
+        // 3. 纵向退化路径: 多档相位试探
+        if (vPath == "coarse") {
+            val sEst = sizeV / 8.0f
+            var bestResid = 99f
+            var bestY0 = y0c.toFloat()
+
+            for (k in floatArrayOf(0f, -0.5f, 0.5f, -1.0f, 1.0f, -1.5f, 1.5f, -2.0f, 2.0f)) {
+                val yTry = (y0c + k * sEst).roundToInt()
+                val hfit = fitHorizontalLines(gray, sW, sH, x0c, yTry, sizeV.roundToInt())
+                if (hfit.isOk && abs(hfit.step - sEst) <= WAVE_GATE_V * sEst) {
+                    val (te, be) = outerEdgeScore(gray, sW, sH, x0, sizeV, hfit.p0)
+                    if (te >= BAR_GRAD_MIN && be >= BAR_GRAD_MIN) {
+                        if (hfit.residual < bestResid) {
+                            bestResid = hfit.residual
+                            bestY0 = hfit.p0
+                        }
+                    }
+                }
+            }
+
+            if (bestResid <= RESIDUAL_GATE) {
+                y0 = bestY0
+                vPath = "gridlines"
+                vResid = bestResid
+            }
+        }
+
+        // 4. 横纵交替二次精修: 纵向收敛后重跑横向
+        if (vPath != "coarse") {
+            val (hOk2, hParams2) = refineHorizontal(gray, sW, sH, x0.roundToInt(), y0.roundToInt(), size.roundToInt())
+            if (hOk2) {
+                x0 = hParams2[0]
+                size = hParams2[1]
+            }
+        }
+
+        // 5. 综合置信度评定
+        val confidence = when {
+            hOk && vPath == "bars" -> "high"
+            hOk && vPath == "gridlines" -> "medium"
+            hOk || vPath != "coarse" -> "medium"
+            else -> "low"
+        }
+        val residual = max(if (hOk) hResid else 0f, if (vPath != "coarse") vResid else 99f)
+
+        return CalibratedBox(x0, y0, size, confidence, residual)
     }
 }
+

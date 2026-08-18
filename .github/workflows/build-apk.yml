@@ -32,6 +32,7 @@ jobs:
       - name: Run Ground Truth & Parity Verification Gates
         run: |
           pip install opencv-python-headless numpy
+          python tools/validate_grid_calibration.py
           python tools/verify_ground_truth_diff.py
           python tools/verify_kotlin_parity.py
 
