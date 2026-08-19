@@ -12,15 +12,15 @@
 import numpy as np
 import cv2
 
-RESIDUAL_GATE = 2.5      # px, 拟合残差门禁
-MIN_LINES = 5            # 参与拟合的最少内部分割线数 (共 7 条)
-SQUARE_GATE = 4.0        # px, 上下框间距与 size 的方约束门禁
-SNAP_PX = 2.0            # px, 满宽吸附阈值
-OUTLIER_FRAC = 0.25      # 偏离等差网格超过 0.25*step 的峰判为棋子轮廓伪峰
-WAVE_GATE = 0.015        # 横向拟合波长与谐振波长最大相对偏差 (防假峰集锁错波长)
-WAVE_GATE_V = 0.025      # 纵向退化拟合波长门禁 (可见线少, 容差放宽)
-BAR_STD_GATE = 16.0      # 框边界均匀带判据: 条带侧 4 行的平均行 std 上限
-BAR_GRAD_MIN = 3.0       # 行均值剖面梯度最低幅值 (全宽强边)
+RELATIVE_RESIDUAL_GATE_RATIO = 0.05  # 5% 格宽拟合残差门禁 (全分辨率尺度自适应)
+RELATIVE_SQUARE_GATE_RATIO = 0.015    # 1.5% 棋盘尺寸方约束门禁 (最低 4.0px)
+RELATIVE_SNAP_RATIO = 0.005           # 0.5% 屏幕宽度满宽吸附门禁 (最低 2.0px)
+MIN_LINES = 5                         # 参与拟合的最少内部分割线数 (共 7 条)
+OUTLIER_FRAC = 0.25                   # 偏离等差网格超过 0.25*step 的峰判为棋子轮廓伪峰
+WAVE_GATE = 0.015                     # 横向拟合波长与谐振波长最大相对偏差 (防假峰集锁错波长)
+WAVE_GATE_V = 0.025                   # 纵向退化拟合波长门禁 (可见线少, 容差放宽)
+BAR_STD_GATE = 16.0                   # 框边界均匀带判据: 条带侧 4 行的平均行 std 上限
+BAR_GRAD_MIN = 3.0                    # 行均值剖面梯度最低幅值 (全宽强边)
 
 
 def load_image(path):
@@ -270,14 +270,15 @@ def _two_pass_fit(lines, x0_est, step_est):
                 'ok': False, 'ok_soft': False}
     p0, step, resid = _fit_arithmetic(cand2)
     # 第三遍: 残差超门禁时踢除残差最大点 (孤立伪线), 保留 >=MIN_LINES 才生效
-    if resid > RESIDUAL_GATE and len(cand2) > MIN_LINES:
+    gate = step_est * RELATIVE_RESIDUAL_GATE_RATIO
+    if resid > gate and len(cand2) > MIN_LINES:
         worst = max(cand2, key=lambda t: abs(t[1] - (p0 + t[0] * step)))
         cand3 = [t for t in cand2 if t != worst]
         p0b, stepb, residb = _fit_arithmetic(cand3)
         if residb < resid:
             p0, step, resid, cand2 = p0b, stepb, residb, cand3
-    ok = resid <= RESIDUAL_GATE
-    ok_soft = (not ok) and resid <= 4.0 and abs(step - step_est) <= 0.01 * step_est
+    ok = resid <= gate
+    ok_soft = (not ok) and resid <= step_est * 0.08 and abs(step - step_est) <= 0.01 * step_est
     return {'p0': p0, 'step': step, 'residual': resid, 'n_lines': len(cand2),
             'ok': ok, 'ok_soft': ok_soft}
 
@@ -357,8 +358,9 @@ def refine_horizontal(gray, box):
         if fit.get('residual') is None:
             fit = {'p0': x0_r, 'step': size_r / 8.0, 'residual': None,
                    'n_lines': fit['n_lines'], 'ok': False}
-    # 满宽吸附: 拟合结果与满宽先验偏差 <=SNAP_PX 时对齐归零 (满宽是拟合的自然特例)
-    if abs(x0) <= SNAP_PX and abs(size - W) <= SNAP_PX:
+    # 满宽吸附: 拟合结果与满宽先验偏差 <= snap_px 时对齐归零 (满宽是拟合的自然特例)
+    snap_px = max(2.0, W * RELATIVE_SNAP_RATIO)
+    if abs(x0) <= snap_px and abs(size - W) <= snap_px:
         x0, size = 0.0, float(W)
     # size_comb: 谐振最优尺寸 (拟合未通过时的次优证据), 供纵向退化路径使用
     return {'ok': True, 'x0': x0, 'size': size, 'size_comb': float(size_r),
@@ -435,14 +437,15 @@ def _vertical_bar_anchors(gray, box, expected_size, x_extent=None):
     tops = cands(t_lo, t_hi, 'top')
     bots = cands(b_lo, b_hi, 'bottom')
     best = None
+    square_gate = max(4.0, expected_size * RELATIVE_SQUARE_GATE_RATIO)
     for t in tops:
         for b in bots:
             dev = abs((b - t) - expected_size)
-            if dev <= SQUARE_GATE and (best is None or dev < best[2]):
+            if dev <= square_gate and (best is None or dev < best[2]):
                 best = (t, b, dev)
     # 多候选时优先取最贴近粗框边缘的配对 (粗框本身就是近似, 防止远端 UI 横边冒充框锚)
     ties = [(t, b, abs((b - t) - expected_size)) for t in tops for b in bots
-            if abs((b - t) - expected_size) <= SQUARE_GATE]
+            if abs((b - t) - expected_size) <= square_gate]
     if ties:
         best = min(ties, key=lambda e: (e[2], abs(e[0] - y0c) + abs(e[1] - (y0c + sizec))))
     return best
@@ -571,8 +574,9 @@ def locate_board(image, top_n=3):
     scores = {c: s for c, s in scored}
     results = [refine_grid(image, c) for c in cands]
 
+    snap_px = max(2.0, W * RELATIVE_SNAP_RATIO)
     def _key(r):
-        full = 1 if abs(r['rect'][2] - W) <= SNAP_PX else 0
+        full = 1 if abs(r['rect'][2] - W) <= snap_px else 0
         # 残差接近 (差一格双解歧义) 时回落粗定位分数: 粗扫含 8x8 棋盘格
         # 相关性, 对绝对相位敏感, 可判别精标定无法区分的同构双解
         coarse = r['detail']['coarse']

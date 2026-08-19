@@ -24,10 +24,10 @@ import kotlin.math.roundToInt
  */
 object ChessLocator {
 
-    private const val RESIDUAL_GATE = 2.5f
+    private const val RELATIVE_RESIDUAL_GATE_RATIO = 0.05f // 5% 单格宽度相对拟合残差门禁 (全分辨率尺度自适应)
+    private const val RELATIVE_SQUARE_GATE_RATIO = 0.015f   // 1.5% 棋盘尺寸方约束门禁 (最低 4.0px)
+    private const val RELATIVE_SNAP_RATIO = 0.005f          // 0.5% 屏幕宽度满宽吸附门禁 (最低 2.0px)
     private const val MIN_LINES = 5
-    private const val SQUARE_GATE = 4.0f
-    private const val SNAP_PX = 2.0f
     private const val OUTLIER_FRAC = 0.25f
     private const val WAVE_GATE = 0.015f
     private const val WAVE_GATE_V = 0.025f
@@ -299,11 +299,12 @@ object ChessLocator {
             val oSize = (coarseBox[2] * invScale).roundToInt()
             val calibrated = refineByGridLines(fullGray, width, height, ox, oy, oSize)
 
-            // 满宽吸附: 与屏宽偏差 <= 2px 时对齐为 0 和 width
+            // 满宽吸附: 与屏宽偏差 <= 0.5% (最低 2px) 时对齐为 0 和 width
             var origX = calibrated.x0.roundToInt()
             var origSize = calibrated.size.roundToInt()
             val origY = calibrated.y0.roundToInt()
-            if (abs(calibrated.x0) <= SNAP_PX && abs(calibrated.size - width) <= SNAP_PX) {
+            val snapPx = max(2.0f, width * RELATIVE_SNAP_RATIO)
+            if (abs(calibrated.x0) <= snapPx && abs(calibrated.size - width) <= snapPx) {
                 origX = 0
                 origSize = width
             }
@@ -357,7 +358,7 @@ object ChessLocator {
         val residual: Float
     )
 
-    private data class FitResult(
+    internal data class FitResult(
         val p0: Float,
         val step: Float,
         val residual: Float,
@@ -397,7 +398,7 @@ object ChessLocator {
         return Triple(p0, step, avgResid)
     }
 
-    private fun twoPassFit(lines: List<Float>, x0Est: Float, stepEst: Float): FitResult {
+    internal fun twoPassFit(lines: List<Float>, x0Est: Float, stepEst: Float): FitResult {
         fun assign(p0: Float, step: Float): List<Pair<Int, Float>> {
             val res = ArrayList<Pair<Int, Float>>()
             for (p in lines) {
@@ -408,6 +409,8 @@ object ChessLocator {
             }
             return res
         }
+
+        val maxAllowedResid = stepEst * RELATIVE_RESIDUAL_GATE_RATIO
 
         val cand1 = assign(x0Est, stepEst)
         if (cand1.size < MIN_LINES) {
@@ -422,8 +425,8 @@ object ChessLocator {
         var (p0_2, step_2, resid_2) = fitArithmetic(cand2)
         var finalCand = cand2
 
-        // 第三遍: 残差超门禁时剔除残差最大点
-        if (resid_2 > RESIDUAL_GATE && cand2.size > MIN_LINES) {
+        // 第三遍: 残差超门禁时剔除残差最大点 (孤立伪线)
+        if (resid_2 > maxAllowedResid && cand2.size > MIN_LINES) {
             var worstIdx = 0
             var worstResid = -1f
             for (i in cand2.indices) {
@@ -443,7 +446,7 @@ object ChessLocator {
             }
         }
 
-        val isOk = resid_2 <= RESIDUAL_GATE
+        val isOk = resid_2 <= maxAllowedResid
         return FitResult(p0_2, step_2, resid_2, finalCand.size, isOk)
     }
 
@@ -558,8 +561,9 @@ object ChessLocator {
         var outSize = if (fit.isOk) fit.step * 8.0f else bestSize
         val residual = if (fit.isOk) fit.residual else 99f
 
-        // 满宽吸附
-        if (abs(outX0) <= SNAP_PX && abs(outSize - sW) <= SNAP_PX) {
+        // 满宽吸附: 偏差 <= 0.5% (最低 2px)
+        val snapPx = max(2.0f, sW * RELATIVE_SNAP_RATIO)
+        if (abs(outX0) <= snapPx && abs(outSize - sW) <= snapPx) {
             outX0 = 0f
             outSize = sW.toFloat()
         }
@@ -640,11 +644,12 @@ object ChessLocator {
         val bots = findCandidates(bLo, bHi, false)
 
         // 收集所有满足方约束的配对并按 (dev, 贴近粗框距离) 选优 (对齐 Python 平局裁决)
+        val squareGate = max(4.0f, expectedSize * RELATIVE_SQUARE_GATE_RATIO)
         val ties = ArrayList<Triple<Int, Int, Float>>()
         for (t in tops) {
             for (b in bots) {
                 val dev = abs((b - t).toFloat() - expectedSize)
-                if (dev <= SQUARE_GATE) {
+                if (dev <= squareGate) {
                     ties.add(Triple(t, b, dev))
                 }
             }
@@ -861,7 +866,8 @@ object ChessLocator {
                 }
             }
 
-            if (bestResid <= RESIDUAL_GATE) {
+            val maxAllowedResid = sEst * RELATIVE_RESIDUAL_GATE_RATIO
+            if (bestResid <= maxAllowedResid) {
                 y0 = bestY0
                 vPath = "gridlines"
                 vResid = bestResid

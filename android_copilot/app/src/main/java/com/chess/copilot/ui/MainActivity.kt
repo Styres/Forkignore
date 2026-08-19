@@ -151,10 +151,11 @@ class MainActivity : AppCompatActivity() {
                         val rescueResp = withContext(Dispatchers.Default) {
                             classifier?.classifyBoardDetailed(bitmap, rescueRect)
                         }
-                        // 【修改】强制约束
+                        // 【修改】强制约束：次候选残差必须满足相对格宽比例 (<= 5%)
+                        val rescueMaxResid = (rescueRect.width() / 8.0f) * 0.05f
                         if (rescueResp is UltraRobustClassifier.ClassificationResponse.Success &&
                             StockfishBridge.validateFenSanity(rescueResp.result.fullFen) == null &&
-                            candidates[1].residual <= 3.5f && 
+                            candidates[1].residual <= rescueMaxResid && 
                             candidates[1].confidence != "low" 
                         ) {
                             locateResult = candidates[1]

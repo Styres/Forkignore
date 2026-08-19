@@ -403,10 +403,11 @@ class FloatingBubbleService : Service() {
                                 overridePerspective = sessionLockedPerspective
                             )
                         }
-                        // 【修改】绝对硬性约束：次候选的残差必须足够低，且不能是退化定位，避免救援错上加错
+                        // 【修改】绝对硬性约束：次候选的残差必须足够低 (相对单格 <= 5%)，且不能是退化定位，避免救援错上加错
+                        val rescueMaxResid = (rescueRect.width() / 8.0f) * 0.05f
                         if (rescueResp is UltraRobustClassifier.ClassificationResponse.Success &&
                             StockfishBridge.validateFenSanity(rescueResp.result.fullFen) == null &&
-                            candidates[1].residual <= 3.5f && 
+                            candidates[1].residual <= rescueMaxResid && 
                             candidates[1].confidence != "low" 
                         ) {
                             locateResult = candidates[1]
