@@ -12,3 +12,4 @@ android_copilot/app/build/
 android_copilot/local.properties
 *.local.properties
 scratch/
+reference/
