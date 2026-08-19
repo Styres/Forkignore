@@ -324,22 +324,34 @@ object ChessLocator {
             )
         }
 
-        // 8. 综合排序: 置信度等级 > 残差低 > 满宽优先 > 响应分高
+        // 8. 综合排序: 置信度等级 > 综合共识得分 (全局粗评分 + 全行交替度奖励 + 满宽优先 - 残差惩罚)
         fun confRank(c: String): Int = when (c) {
             "high" -> 2
             "medium" -> 1
             else -> 0
         }
 
+        fun consensusScore(res: LocateResult): Float {
+            val altRes = computeRingAlternationDetailed(
+                fullGray,
+                width,
+                height,
+                res.rect.left.toFloat(),
+                res.rect.top.toFloat(),
+                res.rect.width().toFloat()
+            )
+            val fullSnapBonus = if (abs(res.rect.width() - width) <= 2) 50f else 0f
+            val altBonus = if (altRes.allRowsPass) 300f else (altRes.totalScore * 100f)
+            return res.score + altBonus + fullSnapBonus - (res.residual * 5f)
+        }
+
         refinedResults.sortWith { a, b ->
             val rankDiff = confRank(b.confidence) - confRank(a.confidence)
             if (rankDiff != 0) return@sortWith rankDiff
+            val scoreDiff = consensusScore(b).compareTo(consensusScore(a))
+            if (scoreDiff != 0) return@sortWith scoreDiff
             val resDiff = (a.residual * 2f).roundToInt() - (b.residual * 2f).roundToInt()
             if (resDiff != 0) return@sortWith resDiff
-            val fullA = if (abs(a.rect.width() - width) <= 2) 1 else 0
-            val fullB = if (abs(b.rect.width() - width) <= 2) 1 else 0
-            val fullDiff = fullB - fullA
-            if (fullDiff != 0) return@sortWith fullDiff
             b.score.compareTo(a.score)
         }
 
@@ -835,18 +847,18 @@ object ChessLocator {
         val bars = findVerticalBarAnchors(gray, sW, sH, x0c, y0c, sizec, size, x0, size)
         if (bars != null) {
             val barsY0 = bars.first.toFloat()
-            val altScore = computeRingAlternationScore(gray, sW, sH, x0, barsY0, size)
+            val altRes = computeRingAlternationDetailed(gray, sW, sH, x0, barsY0, size)
             val devOk = bars.third <= max(4.0f, size * RELATIVE_SQUARE_GATE_RATIO)
             
-            // 多证据主路径：物理外框几何闭环 (devOk) + 64 格环形采样交替度 >= 0.85 (真棋盘标志)
-            if (devOk && altScore >= 0.85f) {
+            // 多证据主路径：物理外框几何闭环 (devOk) + 64 格环形采样交替度全行通过 (真棋盘标志)
+            if (devOk && altRes.allRowsPass) {
                 y0 = barsY0
                 vPath = "bars"
                 vResid = bars.third
             } else {
                 val cross = fitHorizontalLines(gray, sW, sH, x0c, bars.first, size.roundToInt())
                 val sEst = size / 8.0f
-                if (cross.isOk || (devOk && cross.residual <= sEst * 0.10f && altScore >= 0.75f)) {
+                if (cross.isOk || (devOk && cross.residual <= sEst * 0.10f && altRes.totalScore >= 0.75f)) {
                     y0 = barsY0
                     vPath = "bars"
                     vResid = min(bars.third, cross.residual)
@@ -854,7 +866,7 @@ object ChessLocator {
             }
         }
 
-        // 3. 纵向退化路径: 多档严格邻域相位试探 (严格限制在 <= 0.5 格邻域，杜绝上下跨格越狱) + 环形交替度门禁
+        // 3. 纵向退化路径: 多档严格邻域相位试探 (严格限制在 <= 0.5 格邻域，杜绝上下跨格越狱) + 全行交替度门禁
         if (vPath == "coarse") {
             val sEst = sizeV / 8.0f
             var bestResid = 99f
@@ -869,9 +881,9 @@ object ChessLocator {
                     val be = edges[1]
                     val yt = edges[2]
                     if (te >= BAR_GRAD_MIN && be >= BAR_GRAD_MIN) {
-                        val candAlt = computeRingAlternationScore(gray, sW, sH, x0, yt, sizeV)
-                        // 必须满足 8x8 黑白格交替性 >= 0.80，彻底杜绝跳入 UI 纯色/非棋盘区域
-                        if (candAlt >= 0.80f) {
+                        val candAlt = computeRingAlternationDetailed(gray, sW, sH, x0, yt, sizeV)
+                        // 必须满足 8x8 黑白格全行通过 (allRowsPass)，彻底杜绝跳入 UI 纯色/非棋盘区域
+                        if (candAlt.allRowsPass || (candAlt.totalScore >= 0.90f && candAlt.minRowScore >= 0.75f)) {
                             // 距离惩罚项：优先选靠近粗定位中心的微调，防止远端伪谐振
                             val effectiveResid = hfit.residual + abs(k) * (sEst * 0.02f)
                             if (effectiveResid < bestResid) {
@@ -912,6 +924,12 @@ object ChessLocator {
         return CalibratedBox(x0, y0, size, confidence, residual)
     }
 
+    data class AlternationResult(
+        val totalScore: Float,
+        val minRowScore: Float,
+        val allRowsPass: Boolean
+    )
+
     // 8 sample directions at 0, 45, 90, 135, 180, 225, 270, 315 degrees
     private val RING_ANGLES = floatArrayOf(
         0f,
@@ -925,21 +943,24 @@ object ChessLocator {
     )
 
     /**
-     * 纯函数：环形采样 8x8 棋盘黑白格交替度计算 (对齐 duolingo-pgn-export / DuoChess 算法)
+     * 纯函数：环形采样 8x8 棋盘黑白格交替度与单行完整性计算 (对齐 2-Means 双模态聚类中点)
      * 针对 64 个格子，在格子中心以 0.42 * cell_size 半径采样 8 个方向的环形点 (避开中心棋子)，
-     * 取 8 点中位数作为该格底色亮度，并评估 64 格与国际象棋 (row + col) % 2 交替模式的一致率。
-     * 真实棋盘得分接近 1.0 (通常 >= 0.90)；偏离 1~2 格的伪框由于落在纯色/非交替背景，得分崩塌至 0.5~0.6。
+     * 使用 2-Means 双模态聚类计算中点阈值 (支持深色/浅色所有模式)，并验证 8 个横行是否全部具备交替方格。
+     * - 真实棋盘 (浅色/深色)：totalScore >= 0.98, minRowScore >= 0.875, allRowsPass = true
+     * - 偏移 1~2 格的伪框：minRowScore <= 0.625 (溢出到非棋盘区域的行直接破防), allRowsPass = false
      */
-    fun computeRingAlternationScore(
+    fun computeRingAlternationDetailed(
         gray: FloatArray,
         width: Int,
         height: Int,
         x0: Float,
         y0: Float,
         size: Float
-    ): Float {
+    ): AlternationResult {
         val cs = size / 8.0f
-        if (cs < 2f || width <= 0 || height <= 0) return 0f
+        if (cs < 2f || width <= 0 || height <= 0) {
+            return AlternationResult(0f, 0f, false)
+        }
         val rad = cs * 0.42f
         val cellColors = FloatArray(64)
         val ringSamples = FloatArray(8)
@@ -961,21 +982,56 @@ object ChessLocator {
             }
         }
 
-        // 计算 64 格亮度的中位数作为黑白格二值化阈值
+        // 2-Means 双模态聚类中点阈值 (前 32 暗格与后 32 亮格中心求中点，完全消除深浅模式量化简并)
         val sortedCols = cellColors.clone().apply { sort() }
-        val thr = (sortedCols[31] + sortedCols[32]) * 0.5f
+        var sumDark = 0f
+        var sumLight = 0f
+        for (i in 0 until 32) sumDark += sortedCols[i]
+        for (i in 32 until 64) sumLight += sortedCols[i]
+        val cDark = sumDark / 32f
+        val cLight = sumLight / 32f
+        val thr = (cDark + cLight) * 0.5f
 
+        // 计算奇偶模式对齐度
         var p0 = 0
         var p1 = 0
-        for (r in 0 until 8) {
-            for (c in 0 until 8) {
-                val isLight = cellColors[r * 8 + c] > thr
-                val even = (r + c) % 2 == 0
-                if (isLight == even) p0++
-                if (isLight != even) p1++
-            }
+        val isLight = BooleanArray(64)
+        for (i in 0 until 64) {
+            val r = i / 8
+            val c = i % 8
+            val light = cellColors[i] > thr
+            isLight[i] = light
+            val even = (r + c) % 2 == 0
+            if (light == even) p0++ else p1++
         }
-        return max(p0, p1) / 64.0f
+        val targetEven = p0 >= p1
+
+        var minRowScore = 1.0f
+        for (r in 0 until 8) {
+            var rowMatches = 0
+            for (c in 0 until 8) {
+                val light = isLight[r * 8 + c]
+                val expected = if (targetEven) (r + c) % 2 == 0 else (r + c) % 2 != 0
+                if (light == expected) rowMatches++
+            }
+            val rowScore = rowMatches / 8.0f
+            if (rowScore < minRowScore) minRowScore = rowScore
+        }
+
+        val totalScore = max(p0, p1) / 64.0f
+        val allRowsPass = minRowScore >= 0.75f && totalScore >= 0.85f
+        return AlternationResult(totalScore, minRowScore, allRowsPass)
+    }
+
+    fun computeRingAlternationScore(
+        gray: FloatArray,
+        width: Int,
+        height: Int,
+        x0: Float,
+        y0: Float,
+        size: Float
+    ): Float {
+        return computeRingAlternationDetailed(gray, width, height, x0, y0, size).totalScore
     }
 
     /**

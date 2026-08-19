@@ -2,6 +2,7 @@ package com.chess.copilot
 
 import com.chess.copilot.core.ChessLocator
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.cos
@@ -76,9 +77,10 @@ class ChessLocatorAlternationTest {
         val trueScore = ChessLocator.computeRingAlternationScore(fullGray, w, h, 0f, boardY.toFloat(), boardSize.toFloat())
         assertEquals(1.0f, trueScore, 0.001f)
 
-        // 2. 偏移 2 格的位置 (y=200 + 200 = 400)，底部 2 格落在白背景上，交替度暴跌
-        val shiftedScore = ChessLocator.computeRingAlternationScore(fullGray, w, h, 0f, (boardY + 200).toFloat(), boardSize.toFloat())
-        assertTrue("Shifted box alternation score must be <= 0.70, but was $shiftedScore", shiftedScore <= 0.70f)
+        // 2. 偏移 2 格的位置 (y=200 + 200 = 400)，底部 2 格落在白背景上，allRowsPass 必须为 false 且 minRowScore <= 0.65
+        val shiftedRes = ChessLocator.computeRingAlternationDetailed(fullGray, w, h, 0f, (boardY + 200).toFloat(), boardSize.toFloat())
+        assertFalse("Shifted box must fail allRowsPass", shiftedRes.allRowsPass)
+        assertTrue("Shifted box minRowScore must be <= 0.65, but was ${shiftedRes.minRowScore}", shiftedRes.minRowScore <= 0.65f)
     }
 
     @Test
