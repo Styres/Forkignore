@@ -26,7 +26,12 @@ import com.chess.copilot.service.FloatingBubbleService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import android.graphics.Rect
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.regex.Pattern
 
 /**
  * 主控制台与诊断界面
@@ -69,19 +74,38 @@ class MainActivity : AppCompatActivity() {
             pickImageLauncher.launch("image/*")
         }
 
-        // 展示上一次投影会话的落盘状态 (FloatingBubbleService 自取证)，辅助定位授权失效问题
+        // 展示上一次投影会话与诊断落盘状态 (自取证)，标明历史记录并格式化时间
         try {
+            val sb = StringBuilder()
             val stateFile = File(filesDir, "debug/projection_state.txt")
-            if (stateFile.exists()) {
-                tvResult.text = "【上次投影会话状态】\n${stateFile.readText()}"
+            if (stateFile.exists() && stateFile.length() > 0) {
+                sb.append("【历史记录 - 上次投影会话状态】\n${formatHistoricalLog(stateFile.readText())}\n\n")
             }
-            // 展示上次实机建议的逐格取证 (bug_13/14 定案用): BoardRect/FEN/低置信格/门控截断候选，无需 adb 即可读取截图
+            // 展示上次实机/离线诊断的逐格取证 (bug_13/14 定案用)
             val diagFile = File(filesDir, "debug/last_diagnostic.txt")
-            if (diagFile.exists()) {
-                tvResult.append("\n【上次实机建议取证】\n${diagFile.readText()}")
+            if (diagFile.exists() && diagFile.length() > 0) {
+                sb.append("【历史记录 - 最近诊断取证】\n${formatHistoricalLog(diagFile.readText())}")
+            }
+            if (sb.isNotEmpty()) {
+                tvResult.text = sb.toString().trimEnd()
             }
         } catch (_: Exception) {
         }
+    }
+
+    private fun formatHistoricalLog(rawText: String): String {
+        val timePattern = Pattern.compile("Time:\\s*(\\d{10,13})")
+        val matcher = timePattern.matcher(rawText)
+        val sb = StringBuffer()
+        while (matcher.find()) {
+            val millis = matcher.group(1)?.toLongOrNull()
+            if (millis != null) {
+                val formatted = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(millis))
+                matcher.appendReplacement(sb, "记录时间: $formatted")
+            }
+        }
+        matcher.appendTail(sb)
+        return sb.toString()
     }
 
     private fun checkOverlayPermissionAndRequestCapture() {
@@ -174,7 +198,7 @@ class MainActivity : AppCompatActivity() {
                         val clip = ClipData.newPlainText("FEN", res.fullFen)
                         clipboard.setPrimaryClip(clip)
                         
-                        // 3. Stockfish 计算最佳走法
+                        // 3. Stockfish 计算最佳走法（返回封装有该次计算专属诊断信息的 EngineEvaluation）
                         val eval = StockfishBridge.evaluateFen(res.fullFen)
 
                         val sb = StringBuilder()
@@ -220,10 +244,13 @@ class MainActivity : AppCompatActivity() {
                             sb.append("杀棋状态: 胜势已锁定\n")
                         }
                         sb.append("-----------------------------\n")
-                        sb.append("${StockfishBridge.lastDiagnosticInfo}\n")
+                        sb.append("${eval.diagnosticInfo}\n")
 
                         tvResult.text = sb.toString()
                         Toast.makeText(this@MainActivity, "FEN 已复制到剪贴板", Toast.LENGTH_SHORT).show()
+
+                        // 同步持久化诊断日志，供下次启动展示最近一次诊断
+                        saveOfflineDiagnosticArtifact(boardRect, locateResult, res.fullFen, detailedResp, eval)
                     }
                     is UltraRobustClassifier.ClassificationResponse.Rejected -> {
                         val sb = StringBuilder()
@@ -248,6 +275,35 @@ class MainActivity : AppCompatActivity() {
                 tvResult.text = "诊断报错: ${e.message}"
             }
         }
+    }
+
+    private fun saveOfflineDiagnosticArtifact(
+        boardRect: Rect,
+        locateResult: ChessLocator.LocateResult,
+        fen: String,
+        detailedResp: UltraRobustClassifier.ClassificationResponse.Success,
+        eval: StockfishBridge.EngineEvaluation
+    ) {
+        try {
+            val debugDir = File(filesDir, "debug")
+            if (!debugDir.exists()) debugDir.mkdirs()
+            val txtFile = File(debugDir, "last_diagnostic.txt")
+            val timeStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+            val lowConf = if (detailedResp.lowConfidenceCells.isNotEmpty()) "LowConf: ${detailedResp.lowConfidenceCells.joinToString(" ")}\n" else ""
+            val gate = if (detailedResp.gateRejectedCells.isNotEmpty()) "GateRejected: ${detailedResp.gateRejectedCells.joinToString(" ")}\n" else ""
+            txtFile.writeText(
+                "来源: [离线单步诊断]\n" +
+                "BoardRect: $boardRect\n" +
+                "LocateScore: ${String.format("%.1f", locateResult.score)}\n" +
+                "Confidence: ${locateResult.confidence}\n" +
+                "Residual: ${String.format("%.2f", locateResult.residual)}\n" +
+                "IsCropped: ${locateResult.isCropped}\n" +
+                "FEN: $fen\n" +
+                "Move: ${eval.bestMove} (Score: ${eval.evalScore}, Depth: ${eval.depth})\n" +
+                "$lowConf$gate" +
+                "记录时间: $timeStr\n"
+            )
+        } catch (_: Exception) {}
     }
 
     override fun onDestroy() {

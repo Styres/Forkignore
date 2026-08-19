@@ -251,7 +251,8 @@ class FloatingBubbleService : Service() {
         try {
             val debugDir = File(filesDir, "debug")
             if (!debugDir.exists()) debugDir.mkdirs()
-            File(debugDir, "projection_state.txt").writeText("$desc\nTime: ${System.currentTimeMillis()}\n")
+            val timeStr = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
+            File(debugDir, "projection_state.txt").writeText("$desc\n记录时间: $timeStr\n")
         } catch (_: Exception) {}
     }
 
@@ -647,14 +648,16 @@ class FloatingBubbleService : Service() {
                 fos.close()
 
                 val txtFile = File(debugDir, "last_diagnostic.txt")
+                val timeStr = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
                 txtFile.writeText(
+                    "来源: [实机悬浮窗]\n" +
                     "BoardRect: $rect\n" +
                     "LocateScore: ${String.format("%.1f", locateResult.score)}\n" +
                     "Confidence: ${locateResult.confidence}\n" +
                     "Residual: ${String.format("%.2f", locateResult.residual)}\n" +
                     "IsCropped: ${locateResult.isCropped}\n" +
                     "FEN: $fen\n" +
-                    "${cellForensics}Time: ${System.currentTimeMillis()}\n"
+                    "${cellForensics}记录时间: $timeStr\n"
                 )
             } catch (_: Exception) {
             } finally {

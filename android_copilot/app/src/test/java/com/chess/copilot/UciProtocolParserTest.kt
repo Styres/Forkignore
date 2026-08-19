@@ -126,4 +126,33 @@ class UciProtocolParserTest {
         val invalidLine = "info currmove e2e4 currmovenumber 1"
         assertEquals(null, StockfishBridge.parseBestMoveLine(invalidLine))
     }
+
+    @Test
+    fun testEngineEvaluationDiagnosticInfoPreservation() {
+        val diag = "【Stockfish 计算成功】\n耗时: 120ms | 深度: 12 层 | 评分: +0.45 | 走法: e2e4"
+        val eval = StockfishBridge.EngineEvaluation(
+            bestMove = "e2e4",
+            evalScore = 0.45f,
+            depth = 12,
+            isMate = false,
+            diagnosticInfo = diag
+        )
+        assertEquals("e2e4", eval.bestMove)
+        assertEquals(diag, eval.diagnosticInfo)
+    }
+
+    @Test
+    fun testFallbackReturnsDiagnosticInfo() {
+        val fen = "8/8/8/6B1/8/8/8/4K2k w - - 0 1"
+        val eval = StockfishBridge.evaluateFallback(fen)
+        assertTrue("Fallback result must contain diagnosticInfo", eval.diagnosticInfo.contains("【Kotlin 纯算法规则兜底】"))
+    }
+
+    @Test
+    fun testSanityCheckRejectsInvalidFen() {
+        // 无双王局面应被拦截
+        val invalidFen = "8/8/8/8/8/8/8/8 w - - 0 1"
+        val problem = StockfishBridge.validateFenSanity(invalidFen)
+        assertNotNull("validateFenSanity should reject kingless board", problem)
+    }
 }

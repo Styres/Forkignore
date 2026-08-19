@@ -110,20 +110,40 @@ class TransparentCanvasOverlay(private val context: Context) {
             isAntiAlias = true
         }
 
+        private val fenTextPaint = Paint().apply {
+            color = Color.rgb(180, 215, 255)
+            textSize = 22f
+            isAntiAlias = true
+        }
+
+        private fun drawFenText(canvas: Canvas, text: String, x: Float, y: Float, maxWidth: Float) {
+            var currentSize = 22f
+            fenTextPaint.textSize = currentSize
+            while (fenTextPaint.measureText(text) > maxWidth && currentSize > 14f) {
+                currentSize -= 1f
+                fenTextPaint.textSize = currentSize
+            }
+            canvas.drawText(text, x, y, fenTextPaint)
+        }
+
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             
+            val screenW = width.toFloat()
+
             // 【新增】优先绘制故障看板
             val errMsg = errorMessage
             if (errMsg != null) {
                 val cx = width / 2f
                 val cy = height / 2f
-                val pillW = 900f
+                val pillW = (screenW - 48f).coerceAtMost(1020f)
                 val pillH = 160f
-                canvas.drawRoundRect(RectF(cx - pillW/2, cy - pillH/2, cx + pillW/2, cy + pillH/2), 24f, 24f, errorBgPaint)
-                canvas.drawText("❌ $errMsg", cx - pillW/2 + 40f, cy - 20f, textPaint)
+                val pillX = cx - pillW / 2f
+                val pillY = cy - pillH / 2f
+                canvas.drawRoundRect(RectF(pillX, pillY, pillX + pillW, pillY + pillH), 24f, 24f, errorBgPaint)
+                canvas.drawText("❌ $errMsg", pillX + 24f, cy - 20f, textPaint)
                 if (fenString.isNotEmpty()) {
-                    canvas.drawText("FEN: $fenString", cx - pillW/2 + 40f, cy + 30f, subTextPaint)
+                    drawFenText(canvas, "FEN: $fenString", pillX + 24f, cy + 30f, pillW - 48f)
                 }
                 
                 // 如果有假框坐标，也一并画出来让它暴露
@@ -144,11 +164,13 @@ class TransparentCanvasOverlay(private val context: Context) {
             } else ""
             val perspectiveStr = "${if (isWhitePerspective) "执白" else "执黑"}$conflictStr"
             
-            // 【修改】加大胶囊尺寸以容纳 FEN 字符串
-            val pillW = 900f 
+            // 【修改】自适应胶囊尺寸与安全边距，防止超宽溢出屏幕与黑框
+            val pillW = (screenW - 48f).coerceAtMost(1020f)
             val pillH = 150f 
-            val pillX = rect.left + (rect.width() - pillW) / 2f
+            val idealPillX = rect.left + (rect.width() - pillW) / 2f
+            val pillX = idealPillX.coerceIn(24f, (screenW - pillW - 24f).coerceAtLeast(24f))
             val pillY = (rect.top - pillH - 25f).coerceAtLeast(50f)
+            val maxFenW = pillW - 48f
 
             if (uci.length < 4 || uci == "(none)" || uci == "(checkmate)" || uci == "(stalemate)" || uci == "(invalid)") {
                 val statusStr = when {
@@ -164,7 +186,7 @@ class TransparentCanvasOverlay(private val context: Context) {
                 canvas.drawRoundRect(RectF(pillX, pillY, pillX + pillW, pillY + pillH), 24f, 24f, textBgPaint)
                 canvas.drawText(line1, pillX + 24f, pillY + 42f, textPaint)
                 canvas.drawText(line2, pillX + 24f, pillY + 84f, subTextPaint)
-                canvas.drawText(line3, pillX + 24f, pillY + 126f, subTextPaint)
+                drawFenText(canvas, line3, pillX + 24f, pillY + 126f, maxFenW)
                 return
             }
 
@@ -204,7 +226,7 @@ class TransparentCanvasOverlay(private val context: Context) {
             canvas.drawRoundRect(RectF(pillX, pillY, pillX + pillW, pillY + pillH), 24f, 24f, textBgPaint)
             canvas.drawText(line1, pillX + 24f, pillY + 42f, textPaint)
             canvas.drawText(line2, pillX + 24f, pillY + 84f, subTextPaint)
-            canvas.drawText(line3, pillX + 24f, pillY + 126f, subTextPaint)
+            drawFenText(canvas, line3, pillX + 24f, pillY + 126f, maxFenW)
         }
 
         private fun drawArrowHead(canvas: Canvas, x1: Float, y1: Float, x2: Float, y2: Float) {

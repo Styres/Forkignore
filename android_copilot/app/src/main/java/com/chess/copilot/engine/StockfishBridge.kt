@@ -22,6 +22,9 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.regex.Pattern
 
 /**
@@ -32,6 +35,7 @@ import java.util.regex.Pattern
  * 3. 严格 UCI 握手与全链路诊断日志
  * 4. 彻底重构 evaluateFallback 走法规则（主教斜走、车直走、后八向），标明 depth=0 兜底
  * 5. 严格遵守"fallback 结果绝对不写入 evalCache"规则
+ * 6. 诊断信息封装入 EngineEvaluation 实例，彻底消除单例全局状态跨图残留
  */
 object StockfishBridge {
 
@@ -45,7 +49,8 @@ object StockfishBridge {
         val bestMove: String,     // UCI 走法，如 "e2e4", "e7e8q"; "(invalid)" 为识别层非法局面哨兵
         val evalScore: Float,     // 局面评分，如 +0.58, -1.20
         val depth: Int,           // 搜索深度 (真实引擎 >= 10, 兜底为 0)
-        val isMate: Boolean = false
+        val isMate: Boolean = false,
+        val diagnosticInfo: String = "" // 单次算招专属诊断信息（耗时、深度、UCI末尾输出或异常/兜底原因）
     )
 
     private var process: Process? = null
@@ -62,8 +67,7 @@ object StockfishBridge {
     private var lastEngineError: String? = null
 
     @Volatile
-    var lastDiagnosticInfo: String = "引擎尚未初始化"
-        private set
+    private var lastEngineStartupStatus: String = "引擎尚未初始化"
 
     private val engineMutex = Mutex()
     private val scope = CoroutineScope(Dispatchers.IO)
@@ -128,7 +132,7 @@ object StockfishBridge {
 
     private suspend fun startEngineProcessLocked() {
         val context = appContext ?: run {
-            lastDiagnosticInfo = "启动失败: appContext 为空"
+            lastEngineStartupStatus = "启动失败: appContext 为空"
             Log.w(TAG, "startEngineProcessLocked failed: appContext is null")
             return
         }
@@ -181,7 +185,7 @@ object StockfishBridge {
             }
 
             if (selectedBinary == null || !selectedBinary.exists()) {
-                lastDiagnosticInfo = "【引擎启动失败】\n$diag\n无可用可执行二进制，跌入纯 Kotlin 兜底"
+                lastEngineStartupStatus = "【引擎启动失败】\n$diag\n无可用可执行二进制，跌入纯 Kotlin 兜底"
                 Log.w(TAG, "Stockfish binary unavailable, using fallback\n$diag")
                 isEngineReady = false
                 return
@@ -250,21 +254,21 @@ object StockfishBridge {
                 if (readyOk) {
                     val totalTime = System.currentTimeMillis() - startTime
                     diag.append("总耗时: ${totalTime}ms | 真实 Stockfish 准备就绪")
-                    lastDiagnosticInfo = "【引擎就绪 ($startupPathDesc)】\n$diag"
+                    lastEngineStartupStatus = "【引擎就绪 ($startupPathDesc)】\n$diag"
                     Log.i(TAG, "Stockfish ready successfully\n$diag")
                 } else {
-                    lastDiagnosticInfo = "【引擎握手失败】\n$diag\nreadyok 超时，销毁进程${lastEngineError?.let { "\n引擎报错: $it" } ?: ""}"
+                    lastEngineStartupStatus = "【引擎握手失败】\n$diag\nreadyok 超时，销毁进程${lastEngineError?.let { "\n引擎报错: $it" } ?: ""}"
                     isEngineReady = false
                     destroyProcessLocked()
                 }
             } else {
-                lastDiagnosticInfo = "【引擎握手失败】\n$diag\nuciok 超时，销毁进程${lastEngineError?.let { "\n引擎报错: $it" } ?: ""}"
+                lastEngineStartupStatus = "【引擎握手失败】\n$diag\nuciok 超时，销毁进程${lastEngineError?.let { "\n引擎报错: $it" } ?: ""}"
                 isEngineReady = false
                 destroyProcessLocked()
             }
         } catch (e: Exception) {
             diag.append("异常终止: ${e.javaClass.simpleName}: ${e.message}\n")
-            lastDiagnosticInfo = "【引擎启动异常】\n$diag"
+            lastEngineStartupStatus = "【引擎启动异常】\n$diag"
             Log.e(TAG, "Failed to start Stockfish process\n$diag", e)
             destroyProcessLocked()
         }
@@ -345,7 +349,7 @@ object StockfishBridge {
      * 对 FEN 执行深度分析并返回推荐走法与评估分（带结果缓存与自动重启自愈）
      */
     suspend fun evaluateFen(fen: String, moveTimeMs: Long = 200): EngineEvaluation = withContext(Dispatchers.IO) {
-        // 1. 优先命中 LRU 缓存，保证静止盘面建议确定无跳变
+        // 1. 优先命中 LRU 缓存，保证静止盘面建议确定无跳变，且直接返回该局面专属原始诊断文本
         val cached = evalCache.get(fen)
         if (cached != null) {
             return@withContext cached
@@ -363,14 +367,15 @@ object StockfishBridge {
             // 此类问题根因在识别层，直接返回哨兵结果，不打扰引擎也不兜底乱下
             val fenProblem = validateFenSanity(fen)
             if (fenProblem != null) {
-                lastDiagnosticInfo = "【FEN 非法，未启动引擎】\n原因: $fenProblem\nFEN: $fen\n结论: 识别层产出不可能局面 (走子方被将等)，属于识别/视角错误而非引擎故障"
+                val diag = "【FEN 非法，未启动引擎】\n原因: $fenProblem\nFEN: $fen\n结论: 识别层产出不可能局面 (走子方被将等)，属于识别/视角错误而非引擎故障"
                 Log.w(TAG, "FEN rejected by sanity check: $fenProblem, fen=$fen")
-                appendFallbackLog("[FEN非法拦截] $fen")
+                appendFallbackLog("[FEN非法拦截] $fen", diag)
                 return@withContext EngineEvaluation(
                     bestMove = "(invalid)",
                     evalScore = 0.0f,
                     depth = -1,
-                    isMate = false
+                    isMate = false,
+                    diagnosticInfo = diag
                 )
             }
 
@@ -393,8 +398,9 @@ object StockfishBridge {
 
             // 4. 双重兜底：纯 Kotlin 合法走法评估（安全兜底，且 fallback 结果绝对严禁写入 evalCache）
             Log.w(TAG, "Using fallback heuristic evaluator for FEN: $fen")
-            appendFallbackLog(fen)
-            val fallback = evaluateFallback(fen)
+            val fallbackDiag = "【Kotlin 纯算法规则兜底】\n原因: 引擎尝试计算未产出走法，降级至纯规则走法生成器\n启动状态: $lastEngineStartupStatus"
+            appendFallbackLog(fen, fallbackDiag)
+            val fallback = evaluateFallback(fen).copy(diagnosticInfo = fallbackDiag)
             return@withContext fallback
         }
     }
@@ -474,26 +480,31 @@ object StockfishBridge {
             // 引擎已有输出行即证明进程存活: 按终局语义消费结果，保持进程不动
             if (bestMoveResult == "(none)") {
                 val inCheck = isKingInCheck(parseFenBoard(fen), parseFenIsWhite(fen))
-                val terminal = if (inCheck) {
-                    EngineEvaluation("(checkmate)", if (parseFenIsWhite(fen)) -100.0f else 100.0f, 0, isMate = true)
-                } else {
-                    EngineEvaluation("(stalemate)", 0.0f, 0, isMate = false)
-                }
-                lastDiagnosticInfo = "【Stockfish 确认无合法着法】\n引擎存活并秒回 bestmove (none) | 收到行数: ${receivedLines.size}\n判定: ${if (inCheck) "将杀" else "逼和"} (非引擎故障，未重启进程)"
+                val diag = "【Stockfish 确认无合法着法】\n引擎存活并秒回 bestmove (none) | 收到行数: ${receivedLines.size}\n判定: ${if (inCheck) "将杀" else "逼和"} (非引擎故障，未重启进程)"
+                val terminal = EngineEvaluation(
+                    bestMove = if (inCheck) "(checkmate)" else "(stalemate)",
+                    evalScore = if (parseFenIsWhite(fen)) -100.0f else 100.0f,
+                    depth = 0,
+                    isMate = inCheck,
+                    diagnosticInfo = diag
+                )
                 Log.i(TAG, "Stockfish bestmove (none) consumed as terminal state (inCheck=$inCheck), engine kept alive")
                 evalCache.put(fen, terminal)
                 return terminal
             }
 
             if (bestMoveResult != null) {
+                val totalElapsed = System.currentTimeMillis() - evalStartTime
+                val depth = if ((lastEval?.depth ?: -1) > 0) lastEval!!.depth else 0
+                val score = lastEval?.evalScore ?: 0.0f
+                val diag = "【Stockfish 计算成功】\n耗时: ${totalElapsed}ms | 深度: $depth 层 | 评分: $score | 走法: $bestMoveResult\n末尾输出: ${receivedLines.takeLast(2).joinToString(" || ")}"
                 val result = EngineEvaluation(
                     bestMove = bestMoveResult,
-                    evalScore = lastEval?.evalScore ?: 0.0f,
-                    depth = if ((lastEval?.depth ?: -1) > 0) lastEval!!.depth else 0,
-                    isMate = lastEval?.isMate ?: false
+                    evalScore = score,
+                    depth = depth,
+                    isMate = lastEval?.isMate ?: false,
+                    diagnosticInfo = diag
                 )
-                val totalElapsed = System.currentTimeMillis() - evalStartTime
-                lastDiagnosticInfo = "【Stockfish 计算成功】\n耗时: ${totalElapsed}ms | 深度: ${result.depth} 层 | 评分: ${result.evalScore} | 走法: ${result.bestMove}\n末尾输出: ${receivedLines.takeLast(2).joinToString(" || ")}"
                 Log.i(TAG, "Stockfish evaluate success: bestMove=${result.bestMove}, depth=${result.depth}, score=${result.evalScore}")
                 evalCache.put(fen, result)
                 return result
@@ -501,13 +512,13 @@ object StockfishBridge {
 
             val totalElapsed = System.currentTimeMillis() - evalStartTime
             val engineErr = lastEngineError?.let { "\n引擎报错: $it" } ?: ""
-            lastDiagnosticInfo = "【Stockfish 单次尝试无输出】\n已耗时: ${totalElapsed}ms | 收到行数: ${receivedLines.size}\n最近行: ${receivedLines.takeLast(2).joinToString(" || ")}$engineErr"
-            Log.w(TAG, "Stockfish evaluate attempt produced no bestmove, resetting process\n$lastDiagnosticInfo")
+            val diag = "【Stockfish 单次尝试无输出】\n已耗时: ${totalElapsed}ms | 收到行数: ${receivedLines.size}\n最近行: ${receivedLines.takeLast(2).joinToString(" || ")}$engineErr"
+            Log.w(TAG, "Stockfish evaluate attempt produced no bestmove, resetting process\n$diag")
             destroyProcessLocked()
             return null
         } catch (e: Exception) {
-            lastDiagnosticInfo = "【Stockfish 分析异常，降级兜底】\n异常: ${e.javaClass.simpleName}: ${e.message}"
-            Log.w(TAG, "Stockfish evaluateFen exception: ${e.message}", e)
+            val diag = "【Stockfish 分析异常，降级兜底】\n异常: ${e.javaClass.simpleName}: ${e.message}"
+            Log.w(TAG, "Stockfish evaluateFen exception: ${e.message}\n$diag", e)
             destroyProcessLocked()
             return null
         }
@@ -517,13 +528,14 @@ object StockfishBridge {
      * 兜底事件落盘自取证 (bug_15 教训: 悬浮层只显示 [兜]，原因被后续成功评估覆盖后无从查考)
      * 追加写入 filesDir/debug/engine_fallback_log.txt，保留最近 30 条
      */
-    private fun appendFallbackLog(fen: String) {
+    private fun appendFallbackLog(fen: String, diagInfo: String) {
         try {
             val ctx = appContext ?: return
             val debugDir = File(ctx.filesDir, "debug")
             if (!debugDir.exists()) debugDir.mkdirs()
             val logFile = File(debugDir, "engine_fallback_log.txt")
-            val entry = "[${System.currentTimeMillis()}] FEN: $fen\n诊断: ${lastDiagnosticInfo.replace("\n", " | ")}\n\n"
+            val timeStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+            val entry = "[$timeStr] FEN: $fen\n诊断: ${diagInfo.replace("\n", " | ")}\n\n"
             val existing = if (logFile.exists()) logFile.readText() else ""
             val entries = (existing + entry).split("\n\n").filter { it.isNotBlank() }
             logFile.writeText(entries.takeLast(30).joinToString("\n\n") + "\n\n")
@@ -960,7 +972,8 @@ object StockfishBridge {
                     bestMove = "(checkmate)",
                     evalScore = if (isWhite) -100.0f else 100.0f,
                     depth = 0,
-                    isMate = true
+                    isMate = true,
+                    diagnosticInfo = "【Kotlin 纯算法规则兜底】\n判定: 将杀 (胜负已分)"
                 )
             } else {
                 // 逼和 (Stalemate)
@@ -968,7 +981,8 @@ object StockfishBridge {
                     bestMove = "(stalemate)",
                     evalScore = 0.0f,
                     depth = 0,
-                    isMate = false
+                    isMate = false,
+                    diagnosticInfo = "【Kotlin 纯算法规则兜底】\n判定: 逼和 (和棋)"
                 )
             }
         }
@@ -981,7 +995,8 @@ object StockfishBridge {
             bestMove = bestMove,
             evalScore = 0.0f,
             depth = 0,
-            isMate = false
+            isMate = false,
+            diagnosticInfo = "【Kotlin 纯算法规则兜底】\n走法: $bestMove | 深度: 0 层"
         )
     }
 
