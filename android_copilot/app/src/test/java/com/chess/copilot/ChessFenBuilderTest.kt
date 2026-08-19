@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.Ignore // 确保顶部有导入
 
 /**
  * 针对 8x8 棋盘矩阵压缩为 FEN 串、视角翻转、双王守恒、Rank 1/8 禁兵与数量约束的单元测试用例
@@ -60,6 +61,7 @@ class ChessFenBuilderTest {
         assertEquals("8", UltraRobustClassifier.compressRow(fullEmptyRow))
     }
 
+    @Ignore("回填机制已废除，此测试作废")
     @Test
     fun testZeroKingRecovery() {
         // 关键用例：测试当识别结果中白王数量为 0 时，算法自动在白方底线回填国王
