@@ -41,6 +41,26 @@ class TransparentCanvasOverlay(private val context: Context) {
         var medianSim: Float = 1.0f
         var occupiedCount: Int = 0
         var detectedPerspective: Boolean? = null
+        
+        // 【新增】用于接收格式化后的人类可读着法 (如 R-d4d5)
+        var displayMoveStr: String = ""
+        // 【新增】用于显示大屏故障看板
+        var errorMessage: String? = null 
+
+        // 【新增】棋盘调试红框画笔，让假框无所遁形
+        private val boardDebugPaint = Paint().apply {
+            color = Color.RED
+            style = Paint.Style.STROKE
+            strokeWidth = 6f
+            isAntiAlias = true
+        }
+
+        // 【新增】故障看板底色画笔
+        private val errorBgPaint = Paint().apply {
+            color = Color.argb(230, 180, 0, 0) // 半透明深红
+            style = Paint.Style.FILL
+            isAntiAlias = true
+        }
 
         private val startPaint = Paint().apply {
             color = Color.argb(130, 0, 230, 115) // 半透明青绿
@@ -90,8 +110,27 @@ class TransparentCanvasOverlay(private val context: Context) {
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
+            
+            // 【新增】优先绘制故障看板
+            val errMsg = errorMessage
+            if (errMsg != null) {
+                val cx = width / 2f
+                val cy = height / 2f
+                val pillW = 900f
+                val pillH = 120f
+                canvas.drawRoundRect(RectF(cx - pillW/2, cy - pillH/2, cx + pillW/2, cy + pillH/2), 24f, 24f, errorBgPaint)
+                canvas.drawText("❌ $errMsg", cx - pillW/2 + 40f, cy + 10f, textPaint)
+                
+                // 如果有假框坐标，也一并画出来让它社死
+                boardRect?.let { canvas.drawRect(it, boardDebugPaint) }
+                return
+            }
+
             val rect = boardRect ?: return
             val move = moveInfo ?: return
+
+            // 【新增】画出 AI 认为的棋盘边界
+            canvas.drawRect(rect, boardDebugPaint)
 
             val step = (rect.right - rect.left) / 8.0f
             val uci = move.bestMove
@@ -148,7 +187,8 @@ class TransparentCanvasOverlay(private val context: Context) {
             // 3. 绘制上方局势胶囊 (双行卡片: 招法评估 + 底层取证遥测)
             val scoreStr = if (move.isMate) "MATE" else "${if (move.evalScore >= 0) "+" else ""}${String.format("%.2f", move.evalScore)}"
             val depthStr = if (move.depth <= 0) "[兜底]" else "深${move.depth}"
-            val line1 = "招法: ${move.bestMove} | 评估: $scoreStr ($depthStr)"
+            // 【修改】使用传入的带有棋子类型的 displayMoveStr
+            val line1 = "招法: $displayMoveStr | 评估: $scoreStr ($depthStr)"
             val line2 = "视角: $perspectiveStr | Sim: ${String.format("%.3f", medianSim)} | 占位: $occupiedCount"
 
             canvas.drawRoundRect(RectF(pillX, pillY, pillX + pillW, pillY + pillH), 24f, 24f, textBgPaint)
@@ -180,42 +220,21 @@ class TransparentCanvasOverlay(private val context: Context) {
         boardRect: Rect,
         moveInfo: StockfishBridge.EngineEvaluation,
         isWhitePerspective: Boolean,
+        displayMoveStr: String,
         medianSim: Float = 1.0f,
         occupiedCount: Int = 0,
         detectedPerspective: Boolean? = null
     ) {
         if (overlayView == null) {
-            overlayView = OverlayDrawView(context)
-            val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            } else {
-                WindowManager.LayoutParams.TYPE_PHONE
-            }
-
-            val params = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
-                layoutType,
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                PixelFormat.TRANSLUCENT
-            ).apply {
-                gravity = Gravity.TOP or Gravity.START
-                x = 0
-                y = 0
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-                }
-            }
-            windowManager.addView(overlayView, params)
-            isShowing = true
+            initOverlayView()
         }
 
         overlayView?.apply {
+            this.errorMessage = null
             this.boardRect = boardRect
             this.moveInfo = moveInfo
             this.isWhitePerspective = isWhitePerspective
+            this.displayMoveStr = displayMoveStr
             this.medianSim = medianSim
             this.occupiedCount = occupiedCount
             this.detectedPerspective = detectedPerspective
@@ -228,6 +247,51 @@ class TransparentCanvasOverlay(private val context: Context) {
             delay(4000)
             hide()
         }
+    }
+
+    // 【新增】红牌警告弹窗，用于大屏展示各种拦截与非法局面
+    fun showError(reason: String, errorRect: Rect? = null) {
+        if (overlayView == null) {
+            initOverlayView()
+        }
+        overlayView?.apply {
+            this.errorMessage = reason
+            this.boardRect = errorRect
+            postInvalidate()
+        }
+        autoDismissJob?.cancel()
+        autoDismissJob = scope.launch { 
+            delay(4000)
+            hide() 
+        }
+    }
+
+    private fun initOverlayView() {
+        overlayView = OverlayDrawView(context)
+        val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            layoutType,
+            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = 0
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+        windowManager.addView(overlayView, params)
+        isShowing = true
     }
 
     fun hide() {
