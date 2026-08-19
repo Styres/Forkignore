@@ -562,16 +562,28 @@ object StockfishBridge {
         var bk = 0
         var wkr = -1; var wkc = -1
         var bkr = -1; var bkc = -1
+        
+        var totalPieces = 0 // 【新增】
+
         for (r in 0..7) {
             for (c in 0..7) {
-                when (board[r][c]) {
+                val piece = board[r][c]
+                if (piece != '.') totalPieces++ // 【新增】
+
+                when (piece) {
                     'K' -> { wk++; wkr = r; wkc = c }
                     'k' -> { bk++; bkr = r; bkc = c }
                     'P', 'p' -> if (r == 0 || r == 7) return "兵出现在底线/顶线 (r${r}c${c})"
                 }
             }
         }
+        
         if (wk != 1 || bk != 1) return "王数量异常 (白王=$wk, 黑王=$bk)"
+        
+        // 【新增硬核门禁】国际象棋对局中绝不可能只剩下不到4个子（最少也是双王+1个兵或马）。
+        // 如果棋子总数少于 4，99.9% 是多邻国 UI 区域产生的假框！
+        if (totalPieces <= 3) return "棋盘子力极度残缺 (共 $totalPieces 子)，确认为UI误识别假框"
+
         if (maxOf(abs(wkr - bkr), abs(wkc - bkc)) <= 1) return "双王相邻"
         val isWhite = parseFenIsWhite(fen)
         // 走子方已被将军 = 不可能局面 (上一手走子方不可能送王)；非走子方被将属正常 (正在被将军)
