@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [ master, main ]
   workflow_dispatch:
+  
+# --- 新增并发控制 ---
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+# ------------------
 
 jobs:
   build:
