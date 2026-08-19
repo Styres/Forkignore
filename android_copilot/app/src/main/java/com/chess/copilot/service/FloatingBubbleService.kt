@@ -5,6 +5,8 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -235,12 +237,8 @@ class FloatingBubbleService : Service() {
      * 回滚/回收投影资源但不主动 stop() (onStop 回调中会话已由系统终止)
      */
     private fun rollbackProjection() {
-        try {
-            virtualDisplay?.release()
-        } catch (_: Exception) {}
-        try {
-            imageReader?.close()
-        } catch (_: Exception) {}
+        try { virtualDisplay?.release() } catch (_: Exception) {}
+        try { imageReader?.close() } catch (_: Exception) {}
         virtualDisplay = null
         imageReader = null
         mediaProjection = null
@@ -254,8 +252,7 @@ class FloatingBubbleService : Service() {
             val debugDir = File(filesDir, "debug")
             if (!debugDir.exists()) debugDir.mkdirs()
             File(debugDir, "projection_state.txt").writeText("$desc\nTime: ${System.currentTimeMillis()}\n")
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
     }
 
     private fun createFloatingBubble() {
@@ -269,6 +266,7 @@ class FloatingBubbleService : Service() {
         val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         } else {
+            @Suppress("DEPRECATION")
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
@@ -363,15 +361,15 @@ class FloatingBubbleService : Service() {
                 }
                 var boardRect = locateResult.rect
 
-                // 裁剪帧识别契约 (负边距/越界): 
+                // 裁剪帧识别契约 (负边距/越界): 只提示不硬匹配——rect 越界直接进分类裁图会抛异常崩溃，
+                // 且画面不完整本就无法可靠识别; 【修改】触发故障大屏看板并曝光红框
                 if (locateResult.isCropped) {
                     val croppedCopy = try {
                         screenBitmap.copy(screenBitmap.config ?: Bitmap.Config.ARGB_8888, false)
                     } catch (_: Exception) { null }
                     saveDebugArtifactsAsync(croppedCopy, boardRect, locateResult, "CROPPED_FRAME_NO_FEN")
                     withContext(Dispatchers.Main) {
-                        // 【修改】大红框曝光
-                        transparentOverlay?.showError("定位越界: 棋盘画面不完整", boardRect)
+                        transparentOverlay?.showError("定位越界: 棋盘不完整，请居中棋盘", boardRect)
                     }
                     return@launch
                 }
@@ -386,10 +384,13 @@ class FloatingBubbleService : Service() {
 
                 // 候选救援 (bug_19/superbug 定案): 主框产出"不可能局面"或整体被门禁拦截，都是定位器双峰误选假框的
                 // 实锤特征 (假框因 UI 边缘能量可反超真框 710 vs 670，单峰 argmax 不可靠)，自动改用次候选框重识别
-                val needRescue = (detailedResp is UltraRobustClassifier.ClassificationResponse.Success &&
+                // 【修改】同时要求定位置信度不能为 low，强制避开墓地 UI 等残缺定位
+                val primaryNeedsRescue = locateResult.confidence == "low" ||
+                    (detailedResp is UltraRobustClassifier.ClassificationResponse.Success &&
                     StockfishBridge.validateFenSanity(detailedResp.result.fullFen) != null) ||
                     detailedResp is UltraRobustClassifier.ClassificationResponse.Rejected
-                if (needRescue) {
+
+                if (primaryNeedsRescue) {
                     val candidates = withContext(Dispatchers.Default) {
                         ChessLocator.locateTopCandidates(screenBitmap, 2)
                     }
@@ -402,7 +403,7 @@ class FloatingBubbleService : Service() {
                                 overridePerspective = sessionLockedPerspective
                             )
                         }
-                        // 【修改】绝对硬性约束：次候选的残差必须足够低，且不能是退化定位
+                        // 【修改】绝对硬性约束：次候选的残差必须足够低，且不能是退化定位，避免救援错上加错
                         if (rescueResp is UltraRobustClassifier.ClassificationResponse.Success &&
                             StockfishBridge.validateFenSanity(rescueResp.result.fullFen) == null &&
                             candidates[1].residual <= 3.5f && 
@@ -422,6 +423,12 @@ class FloatingBubbleService : Service() {
                 when (detailedResp) {
                     is UltraRobustClassifier.ClassificationResponse.Success -> {
                         val res = detailedResp.result
+                        
+                        // 【新增】只要获得合法的 FEN，立刻静默复制到系统剪贴板，方便溯源假框证据
+                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        val clip = ClipData.newPlainText("FEN", res.fullFen)
+                        clipboard.setPrimaryClip(clip)
+
                         // 方案 A: 使用纯函数状态机更新会话锁定视角 (新局>=26颗子强制校准为 detectedPerspective, 中残局锁定不漂移)
                         sessionLockedPerspective = UltraRobustClassifier.resolvePerspectiveLock(
                             currentLock = sessionLockedPerspective,
@@ -459,23 +466,26 @@ class FloatingBubbleService : Service() {
                         val eval = StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = 200)
 
                         // 识别异常哨兵 (bug_19/superbug 定案): FEN 预校验拦截的不可能局面不是引擎故障更不是兜底场景，
-                        // 隐藏建议箭头避免误导，Toast 直指识别/视角错误 (详情已落盘 engine_fallback_log.txt)
+                        // 【修改】隐藏建议箭头避免误导，直接弹大红框并曝光错误的 FEN
                         if (eval.bestMove == "(invalid)") {
                             withContext(Dispatchers.Main) {
-                                // 【修改】暴露大红框与故障看板
-                                transparentOverlay?.showError("识别出不可能局面(如走子方被将)", boardRect)
+                                transparentOverlay?.showError("识别出不可能局面 (双王相邻或走子方被将)", boardRect, res.fullFen)
                             }
                             lastFen = res.fullFen
                             return@launch
                         }
 
-                        // 【新增】提取起点棋子类型，构建如 R-d4d5 的展示字符串
+                        // 【新增】提取起点棋子类型，构建如 R-d4d5 的展示字符串 (UCI -> SAN)
                         var displayMoveStr = eval.bestMove
                         if (eval.bestMove.length >= 4 && eval.bestMove[0] in 'a'..'h') {
                             val fileIdx = eval.bestMove[0] - 'a'
                             val rankIdx = 8 - (eval.bestMove[1] - '0') // standardBoard 的 r=0 是 rank 8
                             val pieceChar = res.standardBoard[rankIdx][fileIdx]
-                            displayMoveStr = "${pieceChar.uppercaseChar()}-${eval.bestMove}"
+                            
+                            // 规则：兵不加前缀，其他棋子加首字母大写
+                            if (!pieceChar.equals('p', ignoreCase = true) && pieceChar != '.') {
+                                displayMoveStr = "${pieceChar.uppercaseChar()}-${eval.bestMove}"
+                            }
                         }
 
                         // 识别抖动警示: 棋盘未动但 FEN 变化 = 分类/视角层抖动，两次建议不同的直接证据
@@ -487,7 +497,7 @@ class FloatingBubbleService : Service() {
                         val isTrueFallback = eval.depth <= 0 &&
                             eval.bestMove != "(checkmate)" && eval.bestMove != "(stalemate)"
                         val engineWarn = if (isTrueFallback) {
-                            " | 【引擎兜底】${StockfishBridge.lastDiagnosticInfo.lineSequence().firstOrNull() ?: "原因未知"}"
+                            " | 【引擎兜底】"
                         } else ""
                         
                         // 低置信格徽标 (bug_11 教训): 单格误分类嫌疑现场可见，全量详情在 cells_forensics.txt
@@ -495,11 +505,13 @@ class FloatingBubbleService : Service() {
                             " | ⚠疑格:${detailedResp.lowConfidenceCells.take(3).joinToString(",")}"
                         } else ""
 
+                        // 【修改】增加 displayMoveStr 和 fenString
                         transparentOverlay?.showSuggestion(
                             boardRect = res.boardRect,
                             moveInfo = eval,
                             isWhitePerspective = res.isWhitePerspective,
-                            displayMoveStr = displayMoveStr, // 【传入新参数】
+                            displayMoveStr = displayMoveStr,
+                            fenString = res.fullFen,
                             medianSim = detailedResp.medianSim,
                             occupiedCount = detailedResp.occupiedCount,
                             detectedPerspective = detailedResp.detectedPerspective
@@ -514,7 +526,7 @@ class FloatingBubbleService : Service() {
                         withContext(Dispatchers.Main) {
                             Toast.makeText(
                                 this@FloatingBubbleService,
-                                "【检测成功】视角: $perspectiveName | Sim: ${String.format("%.3f", detailedResp.medianSim)} | 占位: ${detailedResp.occupiedCount}$engineWarn$lowConfWarn$fenFlickerWarn",
+                                "【FEN 已复制】视角: $perspectiveName | Sim: ${String.format("%.3f", detailedResp.medianSim)}$engineWarn$lowConfWarn$fenFlickerWarn",
                                 if (isTrueFallback) Toast.LENGTH_LONG else Toast.LENGTH_SHORT
                             ).show()
                         }
@@ -530,10 +542,9 @@ class FloatingBubbleService : Service() {
                         }
                         saveDebugArtifactsAsync(copyForDebug, boardRect, locateResult, "REJECTED_${detailedResp.reason}", rejectedForensics)
                         
+                        // 【修改】弹出大红框与故障原因，让假框无所遁形
                         withContext(Dispatchers.Main) {
-                            // 【修改】弹出大红框与故障原因，让假框无所遁形
                             transparentOverlay?.showError(detailedResp.reason, boardRect)
-                            
                             Toast.makeText(
                                 this@FloatingBubbleService,
                                 "【门禁拦截】原因: ${detailedResp.reason} (Sim=${String.format("%.3f", detailedResp.medianSim)}, 占位=${detailedResp.occupiedCount}, 定位分=${String.format("%.0f", locateResult.score)})",
@@ -543,7 +554,7 @@ class FloatingBubbleService : Service() {
                     }
                     null -> {
                         withContext(Dispatchers.Main) {
-                            transparentOverlay?.showError("分类器未初始化") // 【修改】
+                            transparentOverlay?.showError("分类器未初始化")
                         }
                     }
                 }
@@ -652,15 +663,9 @@ class FloatingBubbleService : Service() {
     }
 
     private fun cleanupProjection() {
-        try {
-            virtualDisplay?.release()
-        } catch (_: Exception) {}
-        try {
-            imageReader?.close()
-        } catch (_: Exception) {}
-        try {
-            mediaProjection?.stop()
-        } catch (_: Exception) {}
+        try { virtualDisplay?.release() } catch (_: Exception) {}
+        try { imageReader?.close() } catch (_: Exception) {}
+        try { mediaProjection?.stop() } catch (_: Exception) {}
         virtualDisplay = null
         imageReader = null
         mediaProjection = null
@@ -672,9 +677,7 @@ class FloatingBubbleService : Service() {
         bubbleView?.let { windowManager.removeView(it) }
         transparentOverlay?.hide()
         cleanupProjection()
-        try {
-            captureThread?.quitSafely()
-        } catch (_: Exception) {}
+        try { captureThread?.quitSafely() } catch (_: Exception) {}
         captureThread = null
         captureHandler = null
         StockfishBridge.release()

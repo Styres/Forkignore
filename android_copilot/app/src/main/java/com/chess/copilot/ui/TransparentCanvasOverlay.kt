@@ -46,8 +46,10 @@ class TransparentCanvasOverlay(private val context: Context) {
         var displayMoveStr: String = ""
         // 【新增】用于显示大屏故障看板
         var errorMessage: String? = null 
+        // 【新增】用于在屏幕显示当前计算出的FEN，固化证据
+        var fenString: String = "" 
 
-        // 【新增】棋盘调试红框画笔，让假框无所遁形
+        // 【新增】棋盘调试红框画笔，让假框和偏移无所遁形
         private val boardDebugPaint = Paint().apply {
             color = Color.RED
             style = Paint.Style.STROKE
@@ -117,11 +119,14 @@ class TransparentCanvasOverlay(private val context: Context) {
                 val cx = width / 2f
                 val cy = height / 2f
                 val pillW = 900f
-                val pillH = 120f
+                val pillH = 160f
                 canvas.drawRoundRect(RectF(cx - pillW/2, cy - pillH/2, cx + pillW/2, cy + pillH/2), 24f, 24f, errorBgPaint)
-                canvas.drawText("❌ $errMsg", cx - pillW/2 + 40f, cy + 10f, textPaint)
+                canvas.drawText("❌ $errMsg", cx - pillW/2 + 40f, cy - 20f, textPaint)
+                if (fenString.isNotEmpty()) {
+                    canvas.drawText("FEN: $fenString", cx - pillW/2 + 40f, cy + 30f, subTextPaint)
+                }
                 
-                // 如果有假框坐标，也一并画出来让它社死
+                // 如果有假框坐标，也一并画出来让它暴露
                 boardRect?.let { canvas.drawRect(it, boardDebugPaint) }
                 return
             }
@@ -138,8 +143,10 @@ class TransparentCanvasOverlay(private val context: Context) {
                 "(探测:${if (detectedPerspective == true) "白" else "黑"})"
             } else ""
             val perspectiveStr = "${if (isWhitePerspective) "执白" else "执黑"}$conflictStr"
-            val pillW = 600f
-            val pillH = 105f
+            
+            // 【修改】加大胶囊尺寸以容纳 FEN 字符串
+            val pillW = 900f 
+            val pillH = 150f 
             val pillX = rect.left + (rect.width() - pillW) / 2f
             val pillY = (rect.top - pillH - 25f).coerceAtLeast(50f)
 
@@ -152,10 +159,12 @@ class TransparentCanvasOverlay(private val context: Context) {
                 }
                 val line1 = "局面: $statusStr"
                 val line2 = "视角: $perspectiveStr | Sim: ${String.format("%.3f", medianSim)} | 占位: $occupiedCount"
+                val line3 = "FEN: $fenString" // 【新增】
 
                 canvas.drawRoundRect(RectF(pillX, pillY, pillX + pillW, pillY + pillH), 24f, 24f, textBgPaint)
                 canvas.drawText(line1, pillX + 24f, pillY + 42f, textPaint)
                 canvas.drawText(line2, pillX + 24f, pillY + 84f, subTextPaint)
+                canvas.drawText(line3, pillX + 24f, pillY + 126f, subTextPaint)
                 return
             }
 
@@ -184,16 +193,18 @@ class TransparentCanvasOverlay(private val context: Context) {
             canvas.drawLine(x1, y1, x2, y2, arrowPaint)
             drawArrowHead(canvas, x1, y1, x2, y2)
 
-            // 3. 绘制上方局势胶囊 (双行卡片: 招法评估 + 底层取证遥测)
+            // 3. 绘制上方局势胶囊 (招法评估 + 底层取证遥测 + FEN)
             val scoreStr = if (move.isMate) "MATE" else "${if (move.evalScore >= 0) "+" else ""}${String.format("%.2f", move.evalScore)}"
             val depthStr = if (move.depth <= 0) "[兜底]" else "深${move.depth}"
             // 【修改】使用传入的带有棋子类型的 displayMoveStr
             val line1 = "招法: $displayMoveStr | 评估: $scoreStr ($depthStr)"
             val line2 = "视角: $perspectiveStr | Sim: ${String.format("%.3f", medianSim)} | 占位: $occupiedCount"
+            val line3 = "FEN: $fenString" // 【新增】
 
             canvas.drawRoundRect(RectF(pillX, pillY, pillX + pillW, pillY + pillH), 24f, 24f, textBgPaint)
             canvas.drawText(line1, pillX + 24f, pillY + 42f, textPaint)
             canvas.drawText(line2, pillX + 24f, pillY + 84f, subTextPaint)
+            canvas.drawText(line3, pillX + 24f, pillY + 126f, subTextPaint)
         }
 
         private fun drawArrowHead(canvas: Canvas, x1: Float, y1: Float, x2: Float, y2: Float) {
@@ -216,11 +227,13 @@ class TransparentCanvasOverlay(private val context: Context) {
         }
     }
 
+    // 【修改】增加 displayMoveStr 和 fenString 参数
     fun showSuggestion(
         boardRect: Rect,
         moveInfo: StockfishBridge.EngineEvaluation,
         isWhitePerspective: Boolean,
         displayMoveStr: String,
+        fenString: String,
         medianSim: Float = 1.0f,
         occupiedCount: Int = 0,
         detectedPerspective: Boolean? = null
@@ -235,33 +248,35 @@ class TransparentCanvasOverlay(private val context: Context) {
             this.moveInfo = moveInfo
             this.isWhitePerspective = isWhitePerspective
             this.displayMoveStr = displayMoveStr
+            this.fenString = fenString
             this.medianSim = medianSim
             this.occupiedCount = occupiedCount
             this.detectedPerspective = detectedPerspective
             postInvalidate()
         }
 
-        // 4 秒后自动淡出消除
+        // 【修改】延长至 5 秒方便用户查看或截图 FEN
         autoDismissJob?.cancel()
         autoDismissJob = scope.launch {
-            delay(4000)
+            delay(5000) 
             hide()
         }
     }
 
     // 【新增】红牌警告弹窗，用于大屏展示各种拦截与非法局面
-    fun showError(reason: String, errorRect: Rect? = null) {
+    fun showError(reason: String, errorRect: Rect? = null, fenString: String = "") {
         if (overlayView == null) {
             initOverlayView()
         }
         overlayView?.apply {
             this.errorMessage = reason
             this.boardRect = errorRect
+            this.fenString = fenString
             postInvalidate()
         }
         autoDismissJob?.cancel()
         autoDismissJob = scope.launch { 
-            delay(4000)
+            delay(5000)
             hide() 
         }
     }
@@ -271,6 +286,7 @@ class TransparentCanvasOverlay(private val context: Context) {
         val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         } else {
+            @Suppress("DEPRECATION")
             WindowManager.LayoutParams.TYPE_PHONE
         }
 

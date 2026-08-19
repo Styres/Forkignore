@@ -155,14 +155,23 @@ object ChessLocator {
         fun evaluateBox(x: Int, y: Int, size: Int): Float {
             val step = size / 8.0f
 
-            // (1) 7 条横向与 7 条纵向分割线边缘能量
-            var edgeScore = 0.0f
+            // 【重构核心：引入网格能量平衡验证，杜绝单向条纹(墓地UI等)误报】
+            var hEdgeScore = 0.0f
+            var vEdgeScore = 0.0f
             for (i in 1..7) {
                 val ly = (y + i * step).toInt()
                 val lx = (x + i * step).toInt()
-                edgeScore += rectMean(satMag, x, ly - 1, x + size, ly + 2)
-                edgeScore += rectMean(satMag, lx - 1, y, lx + 2, y + size)
+                hEdgeScore += rectMean(satMag, x, ly - 1, x + size, ly + 2)
+                vEdgeScore += rectMean(satMag, lx - 1, y, lx + 2, y + size)
             }
+            
+            // 墓地 UI 有强烈的水平边缘，但缺乏等距垂直交叉边缘
+            val minEdge = min(hEdgeScore, vEdgeScore)
+            val maxEdge = max(hEdgeScore, vEdgeScore)
+            val edgeBalance = minEdge / max(1e-5f, maxEdge) // 真实棋盘此值应接近 1.0
+            
+            // 能量乘上平衡系数，单向强边的假框得分将崩塌至十分之一
+            val balancedEdgeScore = (hEdgeScore + vEdgeScore) * edgeBalance
 
             // (2) 8x8 格子 4 角采样（18% 边角）避开棋子中心
             val gridMeans = FloatArray(64)
@@ -196,9 +205,11 @@ object ChessLocator {
 
             // (3) 多邻国垂直合理性先验 (底部比例在 60%~99% 之间)
             val bottomRatio = (y + size).toFloat() / sH.toFloat()
-            val posPrior = if (bottomRatio in 0.60f..0.99f) 1.0f else 0.35f
+            // 【修改】稍稍放宽先验限制，让十字网格算法自己去战斗
+            val posPrior = if (bottomRatio in 0.55f..0.99f) 1.0f else 0.35f
 
-            return (corr * 2.0f + edgeScore * 0.4f) * posPrior
+            // 【修改】增大 8x8 交替模式特征权重，结合平衡边缘得分
+            return (corr * 2.5f + balancedEdgeScore * 0.5f) * posPrior
         }
 
         // 5. 阶段一：粗扫 (step=4)，尺寸上界放宽至 sW (400px)，横向自由搜索 (全区间 [0, sW-size]，不预设居中)
@@ -878,4 +889,3 @@ object ChessLocator {
         return CalibratedBox(x0, y0, size, confidence, residual)
     }
 }
-

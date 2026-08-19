@@ -563,12 +563,13 @@ object StockfishBridge {
         var wkr = -1; var wkc = -1
         var bkr = -1; var bkc = -1
         
-        var totalPieces = 0 // 【新增】
+        // 【新增】总棋子数量硬核拦截，杜绝 UI 假框残留的零星特征拼凑成残局
+        var totalPieces = 0 
 
         for (r in 0..7) {
             for (c in 0..7) {
                 val piece = board[r][c]
-                if (piece != '.') totalPieces++ // 【新增】
+                if (piece != '.') totalPieces++ 
 
                 when (piece) {
                     'K' -> { wk++; wkr = r; wkc = c }
@@ -577,7 +578,6 @@ object StockfishBridge {
                 }
             }
         }
-        
         if (wk != 1 || bk != 1) return "王数量异常 (白王=$wk, 黑王=$bk)"
         
         // 【新增硬核门禁】国际象棋对局中绝不可能只剩下不到4个子（最少也是双王+1个兵或马）。

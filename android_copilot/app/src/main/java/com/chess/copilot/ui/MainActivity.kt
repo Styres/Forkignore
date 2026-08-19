@@ -1,6 +1,8 @@
 package com.chess.copilot.ui
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
@@ -134,9 +136,12 @@ class MainActivity : AppCompatActivity() {
 
                 // 2.5 候选救援 (bug_19/superbug 定案): 主框产出"不可能局面"或整体被门禁拦截，都是定位器双峰误选
                 // 假框的实锤特征 (假框因 UI 边缘能量可反超真框 710 vs 670)，自动改用次候选框重识别
-                val needRescue = (detailedResp is UltraRobustClassifier.ClassificationResponse.Success &&
+                // 【修改】同时要求定位置信度不能为 low，残差极小
+                val needRescue = locateResult.confidence == "low" ||
+                    (detailedResp is UltraRobustClassifier.ClassificationResponse.Success &&
                     StockfishBridge.validateFenSanity(detailedResp.result.fullFen) != null) ||
                     detailedResp is UltraRobustClassifier.ClassificationResponse.Rejected
+                    
                 if (needRescue) {
                     val candidates = withContext(Dispatchers.Default) {
                         ChessLocator.locateTopCandidates(bitmap, 2)
@@ -146,8 +151,11 @@ class MainActivity : AppCompatActivity() {
                         val rescueResp = withContext(Dispatchers.Default) {
                             classifier?.classifyBoardDetailed(bitmap, rescueRect)
                         }
+                        // 【修改】强制约束
                         if (rescueResp is UltraRobustClassifier.ClassificationResponse.Success &&
-                            StockfishBridge.validateFenSanity(rescueResp.result.fullFen) == null
+                            StockfishBridge.validateFenSanity(rescueResp.result.fullFen) == null &&
+                            candidates[1].residual <= 3.5f && 
+                            candidates[1].confidence != "low" 
                         ) {
                             locateResult = candidates[1]
                             boardRect = rescueRect
@@ -159,6 +167,12 @@ class MainActivity : AppCompatActivity() {
                 when (detailedResp) {
                     is UltraRobustClassifier.ClassificationResponse.Success -> {
                         val res = detailedResp.result
+                        
+                        // 【新增】离线诊断也将 FEN 自动复制到剪贴板
+                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        val clip = ClipData.newPlainText("FEN", res.fullFen)
+                        clipboard.setPrimaryClip(clip)
+                        
                         // 3. Stockfish 计算最佳走法
                         val eval = StockfishBridge.evaluateFen(res.fullFen)
 
@@ -177,13 +191,26 @@ class MainActivity : AppCompatActivity() {
                         }
                         sb.append("局面 FEN: ${res.boardFen}\n")
                         sb.append("完整 FEN: ${res.fullFen}\n")
+                        sb.append("（✅ FEN 已自动复制到剪贴板）\n")
                         sb.append("-----------------------------\n")
+                        
+                        // 【新增】拼接带有棋子类型的走法字符串
+                        var displayMoveStr = eval.bestMove
+                        if (eval.bestMove.length >= 4 && eval.bestMove[0] in 'a'..'h') {
+                            val fileIdx = eval.bestMove[0] - 'a'
+                            val rankIdx = 8 - (eval.bestMove[1] - '0')
+                            val pieceChar = res.standardBoard[rankIdx][fileIdx]
+                            if (!pieceChar.equals('p', ignoreCase = true) && pieceChar != '.') {
+                                displayMoveStr = "${pieceChar.uppercaseChar()}-${eval.bestMove}"
+                            }
+                        }
+                        
                         val displayMove = when (eval.bestMove) {
                             "(checkmate)" -> "无合法走法 (胜负已分/将杀)"
                             "(stalemate)" -> "无合法走法 (和棋/逼和)"
                             "(none)" -> "无合法走法"
                             "(invalid)" -> "已拒绝: 识别出不可能局面 (非引擎故障，见下方诊断)"
-                            else -> eval.bestMove
+                            else -> displayMoveStr
                         }
                         sb.append("推荐走法: $displayMove\n")
                         sb.append("局势评估分: ${if (eval.evalScore >= 0) "+" else ""}${String.format("%.2f", eval.evalScore)}\n")
@@ -195,6 +222,7 @@ class MainActivity : AppCompatActivity() {
                         sb.append("${StockfishBridge.lastDiagnosticInfo}\n")
 
                         tvResult.text = sb.toString()
+                        Toast.makeText(this@MainActivity, "FEN 已复制到剪贴板", Toast.LENGTH_SHORT).show()
                     }
                     is UltraRobustClassifier.ClassificationResponse.Rejected -> {
                         val sb = StringBuilder()
