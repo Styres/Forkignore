@@ -47,7 +47,7 @@ class UltraRobustClassifier(context: Context? = null) {
             val gateRejectedCells: List<String> = emptyList()
         ) : ClassificationResponse()
 
-                data class Rejected(
+        data class Rejected(
             val reason: String,
             val medianSim: Float,
             val occupiedCount: Int,
@@ -231,7 +231,7 @@ class UltraRobustClassifier(context: Context? = null) {
             rawBoard[cell.r][cell.c] = sym
         }
 
-        // 4. 约束校验（双王守恒、Rank 1/8 禁兵、数量上限容量感知降级）
+        // 4. 约束校验（Rank 1/8 禁兵、数量上限容量感知降级）
         val sanitizedBoard = sanitizeBoard(rawBoard)
 
         // 5. 统计顶底黑白子判定视角
@@ -519,67 +519,13 @@ class UltraRobustClassifier(context: Context? = null) {
                 }
             }
 
-            // 3. 双王唯一性保证（王=0 时从底线候选回填国王）
+            // 3. 双王唯一性保证（旧版回填已废除，交由下游严苛校验）
             var whiteKingCount = 0
             var blackKingCount = 0
             for (r in 0..7) {
                 for (c in 0..7) {
                     if (result[r][c] == 'K') whiteKingCount++
                     if (result[r][c] == 'k') blackKingCount++
-                }
-            }
-
-            // 白王回填
-            if (whiteKingCount == 0) {
-                var placed = false
-                for (r in 7 downTo 6) {
-                    for (c in 3..4) {
-                        if (result[r][c] == '.' || result[r][c].isUpperCase()) {
-                            result[r][c] = 'K'
-                            placed = true
-                            break
-                        }
-                    }
-                    if (placed) break
-                }
-                if (!placed) {
-                    for (r in 7 downTo 0) {
-                        for (c in 0..7) {
-                            if (result[r][c] != 'k') {
-                                result[r][c] = 'K'
-                                placed = true
-                                break
-                            }
-                        }
-                        if (placed) break
-                    }
-                }
-            }
-
-            // 黑王回填
-            if (blackKingCount == 0) {
-                var placed = false
-                for (r in 0..1) {
-                    for (c in 3..4) {
-                        if (result[r][c] == '.' || result[r][c].isLowerCase()) {
-                            result[r][c] = 'k'
-                            placed = true
-                            break
-                        }
-                    }
-                    if (placed) break
-                }
-                if (!placed) {
-                    for (r in 0..7) {
-                        for (c in 0..7) {
-                            if (result[r][c] != 'K') {
-                                result[r][c] = 'k'
-                                placed = true
-                                break
-                            }
-                        }
-                        if (placed) break
-                    }
                 }
             }
 
