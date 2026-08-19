@@ -350,7 +350,7 @@ object ChessLocator {
     // 阶段二: 格线直测精标定核心算子 (Kotlin 直译对偶实现)
     // =========================================================================
 
-    private data class CalibratedBox(
+    internal data class CalibratedBox(
         val x0: Float,
         val y0: Float,
         val size: Float,
@@ -816,7 +816,7 @@ object ChessLocator {
     /**
      * 格线精标定主入口 (400 宽空间)
      */
-    private fun refineByGridLines(
+    internal fun refineByGridLines(
         gray: FloatArray, sW: Int, sH: Int,
         x0c: Int, y0c: Int, sizec: Int
     ): CalibratedBox {
@@ -827,28 +827,40 @@ object ChessLocator {
         val hResid = hParams[2]
         val sizeV = if (hOk) size else hParams[3]
 
-        // 2. 纵向精修: 上下框主锚
+        // 2. 纵向精修: 上下框主锚 + 环形交替度双重验证 (对齐 duolingo-pgn-export 环形采样算法)
         var y0 = y0c.toFloat()
         var vPath = "coarse"
         var vResid = 99f
 
         val bars = findVerticalBarAnchors(gray, sW, sH, x0c, y0c, sizec, size, x0, size)
         if (bars != null) {
-            val cross = fitHorizontalLines(gray, sW, sH, x0c, bars.first, size.roundToInt())
-            if (cross.isOk) {
-                y0 = bars.first.toFloat()
+            val barsY0 = bars.first.toFloat()
+            val altScore = computeRingAlternationScore(gray, sW, sH, x0, barsY0, size)
+            val devOk = bars.third <= max(4.0f, size * RELATIVE_SQUARE_GATE_RATIO)
+            
+            // 多证据主路径：物理外框几何闭环 (devOk) + 64 格环形采样交替度 >= 0.85 (真棋盘标志)
+            if (devOk && altScore >= 0.85f) {
+                y0 = barsY0
                 vPath = "bars"
                 vResid = bars.third
+            } else {
+                val cross = fitHorizontalLines(gray, sW, sH, x0c, bars.first, size.roundToInt())
+                val sEst = size / 8.0f
+                if (cross.isOk || (devOk && cross.residual <= sEst * 0.10f && altScore >= 0.75f)) {
+                    y0 = barsY0
+                    vPath = "bars"
+                    vResid = min(bars.third, cross.residual)
+                }
             }
         }
 
-        // 3. 纵向退化路径: 多档相位试探与实测强边吸附
+        // 3. 纵向退化路径: 多档严格邻域相位试探 (严格限制在 <= 0.5 格邻域，杜绝上下跨格越狱) + 环形交替度门禁
         if (vPath == "coarse") {
             val sEst = sizeV / 8.0f
             var bestResid = 99f
             var bestY0 = y0c.toFloat()
 
-            for (k in floatArrayOf(0f, -0.5f, 0.5f, -1.0f, 1.0f, -1.5f, 1.5f, -2.0f, 2.0f)) {
+            for (k in getDegeneratePhaseSteps()) {
                 val yTry = (y0c + k * sEst).roundToInt()
                 val hfit = fitHorizontalLines(gray, sW, sH, x0c, yTry, sizeV.roundToInt())
                 if (hfit.isOk && abs(hfit.step - sEst) <= WAVE_GATE_V * sEst) {
@@ -857,10 +869,15 @@ object ChessLocator {
                     val be = edges[1]
                     val yt = edges[2]
                     if (te >= BAR_GRAD_MIN && be >= BAR_GRAD_MIN) {
-                        if (hfit.residual < bestResid) {
-                            bestResid = hfit.residual
-                            // 吸附到实测强边位置 yt (对齐 Python chosen = (float(yt), hfit['residual']))
-                            bestY0 = yt
+                        val candAlt = computeRingAlternationScore(gray, sW, sH, x0, yt, sizeV)
+                        // 必须满足 8x8 黑白格交替性 >= 0.80，彻底杜绝跳入 UI 纯色/非棋盘区域
+                        if (candAlt >= 0.80f) {
+                            // 距离惩罚项：优先选靠近粗定位中心的微调，防止远端伪谐振
+                            val effectiveResid = hfit.residual + abs(k) * (sEst * 0.02f)
+                            if (effectiveResid < bestResid) {
+                                bestResid = effectiveResid
+                                bestY0 = yt
+                            }
                         }
                     }
                 }
@@ -893,5 +910,78 @@ object ChessLocator {
         val residual = max(if (hOk) hResid else 0f, if (vPath != "coarse") vResid else 99f)
 
         return CalibratedBox(x0, y0, size, confidence, residual)
+    }
+
+    // 8 sample directions at 0, 45, 90, 135, 180, 225, 270, 315 degrees
+    private val RING_ANGLES = floatArrayOf(
+        0f,
+        (Math.PI / 4.0).toFloat(),
+        (Math.PI / 2.0).toFloat(),
+        (3.0 * Math.PI / 4.0).toFloat(),
+        Math.PI.toFloat(),
+        (5.0 * Math.PI / 4.0).toFloat(),
+        (3.0 * Math.PI / 2.0).toFloat(),
+        (7.0 * Math.PI / 4.0).toFloat()
+    )
+
+    /**
+     * 纯函数：环形采样 8x8 棋盘黑白格交替度计算 (对齐 duolingo-pgn-export / DuoChess 算法)
+     * 针对 64 个格子，在格子中心以 0.42 * cell_size 半径采样 8 个方向的环形点 (避开中心棋子)，
+     * 取 8 点中位数作为该格底色亮度，并评估 64 格与国际象棋 (row + col) % 2 交替模式的一致率。
+     * 真实棋盘得分接近 1.0 (通常 >= 0.90)；偏离 1~2 格的伪框由于落在纯色/非交替背景，得分崩塌至 0.5~0.6。
+     */
+    fun computeRingAlternationScore(
+        gray: FloatArray,
+        width: Int,
+        height: Int,
+        x0: Float,
+        y0: Float,
+        size: Float
+    ): Float {
+        val cs = size / 8.0f
+        if (cs < 2f || width <= 0 || height <= 0) return 0f
+        val rad = cs * 0.42f
+        val cellColors = FloatArray(64)
+        val ringSamples = FloatArray(8)
+
+        for (r in 0 until 8) {
+            val cy = y0 + (r + 0.5f) * cs
+            for (c in 0 until 8) {
+                val cx = x0 + (c + 0.5f) * cs
+                for (a in 0 until 8) {
+                    val theta = RING_ANGLES[a]
+                    val px = (cx + rad * kotlin.math.cos(theta)).roundToInt().coerceIn(0, width - 1)
+                    val py = (cy + rad * kotlin.math.sin(theta)).roundToInt().coerceIn(0, height - 1)
+                    ringSamples[a] = gray[py * width + px]
+                }
+                ringSamples.sort()
+                // 8 点排序取中位数 (第 3 和第 4 点均值)
+                val med = (ringSamples[3] + ringSamples[4]) * 0.5f
+                cellColors[r * 8 + c] = med
+            }
+        }
+
+        // 计算 64 格亮度的中位数作为黑白格二值化阈值
+        val sortedCols = cellColors.clone().apply { sort() }
+        val thr = (sortedCols[31] + sortedCols[32]) * 0.5f
+
+        var p0 = 0
+        var p1 = 0
+        for (r in 0 until 8) {
+            for (c in 0 until 8) {
+                val isLight = cellColors[r * 8 + c] > thr
+                val even = (r + c) % 2 == 0
+                if (isLight == even) p0++
+                if (isLight != even) p1++
+            }
+        }
+        return max(p0, p1) / 64.0f
+    }
+
+    /**
+     * 退化路径相位试探步长因子列表 (严格限制在 [-0.5, 0.5] 范围内)
+     */
+    fun getDegeneratePhaseSteps(): FloatArray {
+        return floatArrayOf(0f, -0.15f, 0.15f, -0.30f, 0.30f, -0.45f, 0.45f)
     }
 }
