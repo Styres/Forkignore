@@ -9,4 +9,6 @@ build/
 android_copilot/.gradle/
 android_copilot/build/
 android_copilot/app/build/
+android_copilot/local.properties
+*.local.properties
 scratch/
