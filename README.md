@@ -1,6 +1,16 @@
 # ♟️ Duolingo Chess Copilot (多邻国国际象棋战术伴侣)
 
 <p align="center">
+  <a href="README.md">
+    <img src="https://img.shields.io/badge/语言-简体中文-red?style=for-the-badge&logo=google-translate&logoColor=white" alt="简体中文" />
+  </a>
+  &nbsp;&nbsp;
+  <a href="README_EN.md">
+    <img src="https://img.shields.io/badge/Language-English-blue?style=for-the-badge&logo=google-translate&logoColor=white" alt="English" />
+  </a>
+</p>
+
+<p align="center">
   <a href="https://github.com/risenh/duolingo-chess-copilot/actions/workflows/build-apk.yml">
     <img src="https://github.com/risenh/duolingo-chess-copilot/actions/workflows/build-apk.yml/badge.svg" alt="Build Status" />
   </a>
@@ -15,11 +25,6 @@
 <p align="center">
   <strong>专为多邻国国际象棋（Duolingo Chess）量身打造的 Android 实时无感战术辅助工具。</strong><br>
   结合计算机视觉精标定、嵌入式 Stockfish 16 深度神经网络算力与原生悬浮交互，助你洞悉每一步最佳胜着。
-</p>
-
-<p align="center">
-  <a href="README_EN.md">English</a> •
-  <a href="README.md">简体中文</a>
 </p>
 
 ---

@@ -1,6 +1,16 @@
 # ♟️ Duolingo Chess Copilot
 
 <p align="center">
+  <a href="README.md">
+    <img src="https://img.shields.io/badge/语言-简体中文-red?style=for-the-badge&logo=google-translate&logoColor=white" alt="简体中文" />
+  </a>
+  &nbsp;&nbsp;
+  <a href="README_EN.md">
+    <img src="https://img.shields.io/badge/Language-English-blue?style=for-the-badge&logo=google-translate&logoColor=white" alt="English" />
+  </a>
+</p>
+
+<p align="center">
   <a href="https://github.com/risenh/duolingo-chess-copilot/actions/workflows/build-apk.yml">
     <img src="https://github.com/risenh/duolingo-chess-copilot/actions/workflows/build-apk.yml/badge.svg" alt="Build Status" />
   </a>
@@ -15,11 +25,6 @@
 <p align="center">
   <strong>An ultra-fast, seamless real-time Android tactical assistant tailored for Duolingo Chess.</strong><br>
   Powered by precision sub-pixel board localization, an ultra-robust piece classifier, embedded Stockfish 16 + NNUE neural network engine, and a lightweight floating overlay.
-</p>
-
-<p align="center">
-  <a href="README_EN.md">English</a> •
-  <a href="README.md">简体中文</a>
 </p>
 
 ---
