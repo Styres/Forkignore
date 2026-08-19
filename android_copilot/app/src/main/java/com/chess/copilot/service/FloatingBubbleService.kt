@@ -471,7 +471,7 @@ class FloatingBubbleService : Service() {
                         // 【修改】隐藏建议箭头避免误导，直接弹大红框并曝光错误的 FEN
                         if (eval.bestMove == "(invalid)") {
                             withContext(Dispatchers.Main) {
-                                transparentOverlay?.showError("识别出不可能局面 (双王相邻或走子方被将)", boardRect, res.fullFen)
+                                transparentOverlay?.showError("识别出不可能局面 (双王相邻或棋子异常)", boardRect, res.fullFen)
                             }
                             lastFen = res.fullFen
                             return@launch

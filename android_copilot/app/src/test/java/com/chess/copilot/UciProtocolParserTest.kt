@@ -4,6 +4,7 @@ import com.chess.copilot.engine.StockfishBridge
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -154,5 +155,13 @@ class UciProtocolParserTest {
         val invalidFen = "8/8/8/8/8/8/8/8 w - - 0 1"
         val problem = StockfishBridge.validateFenSanity(invalidFen)
         assertNotNull("validateFenSanity should reject kingless board", problem)
+    }
+
+    @Test
+    fun testSanityCheckAllowsActiveKingInCheck() {
+        // 白方王在 e1，黑王在 e7，黑车在 e8 处于将军状态，白兵在 a2：这是正常合法对局，绝不可被判定为不可能局面
+        val inCheckFen = "4r3/4k3/8/8/8/8/P7/4K3 w - - 0 1"
+        val problem = StockfishBridge.validateFenSanity(inCheckFen)
+        assertNull("validateFenSanity must allow active king in check position", problem)
     }
 }

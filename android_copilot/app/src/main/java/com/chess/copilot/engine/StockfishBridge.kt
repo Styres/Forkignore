@@ -626,9 +626,6 @@ object StockfishBridge {
         if (totalPieces <= 3) return "棋盘子力极度残缺 (共 $totalPieces 子)，确认为UI误识别假框"
 
         if (maxOf(abs(wkr - bkr), abs(wkc - bkc)) <= 1) return "双王相邻"
-        val isWhite = parseFenIsWhite(fen)
-        // 走子方已被将军 = 不可能局面 (上一手走子方不可能送王)；非走子方被将属正常 (正在被将军)
-        if (isKingInCheck(board, isWhite)) return "走子方已被将军 (不可能局面)"
         return null
     }
 
