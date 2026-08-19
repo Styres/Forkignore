@@ -363,19 +363,15 @@ class FloatingBubbleService : Service() {
                 }
                 var boardRect = locateResult.rect
 
-                // 裁剪帧识别契约 (负边距/越界): 只提示不硬匹配——rect 越界直接进分类裁图会抛异常崩溃，
-                // 且画面不完整本就无法可靠识别; 现场 Toast 提示 + 遥测落盘后直接返回
+                // 裁剪帧识别契约 (负边距/越界): 
                 if (locateResult.isCropped) {
                     val croppedCopy = try {
                         screenBitmap.copy(screenBitmap.config ?: Bitmap.Config.ARGB_8888, false)
                     } catch (_: Exception) { null }
                     saveDebugArtifactsAsync(croppedCopy, boardRect, locateResult, "CROPPED_FRAME_NO_FEN")
                     withContext(Dispatchers.Main) {
-                        Toast.makeText(
-                            this@FloatingBubbleService,
-                            "【裁剪帧】棋盘画面不完整 (超出屏幕边界)，无法可靠识别，请完整显示棋盘后重试",
-                            Toast.LENGTH_LONG
-                        ).show()
+                        // 【修改】大红框曝光
+                        transparentOverlay?.showError("定位越界: 棋盘画面不完整", boardRect)
                     }
                     return@launch
                 }
@@ -406,8 +402,11 @@ class FloatingBubbleService : Service() {
                                 overridePerspective = sessionLockedPerspective
                             )
                         }
+                        // 【修改】绝对硬性约束：次候选的残差必须足够低，且不能是退化定位
                         if (rescueResp is UltraRobustClassifier.ClassificationResponse.Success &&
-                            StockfishBridge.validateFenSanity(rescueResp.result.fullFen) == null
+                            StockfishBridge.validateFenSanity(rescueResp.result.fullFen) == null &&
+                            candidates[1].residual <= 3.5f && 
+                            candidates[1].confidence != "low" 
                         ) {
                             locateResult = candidates[1]
                             boardRect = rescueRect
@@ -445,12 +444,6 @@ class FloatingBubbleService : Service() {
                             perspectiveConflictStreak = 0
                         }
 
-                        val conflictDesc = if (sessionLockedPerspective != null && detailedResp.detectedPerspective != res.isWhitePerspective) {
-                            ", 探测:${if (detailedResp.detectedPerspective) "白" else "黑"}"
-                        } else ""
-                        val lockedStateDesc = if (sessionLockedPerspective != null) "(锁定$conflictDesc)" else ""
-                        val perspectiveName = if (res.isWhitePerspective) "执白$lockedStateDesc" else "执黑$lockedStateDesc"
-                        
                         // 逐格取证落盘 (bug_11~14 定案用): 低置信格与门控截断候选写入 cells_forensics.txt
                         // LocateScore/Confidence/Residual (阶段二精标定定案用): 定位器置信分与残差遥测落盘
                         val cellForensics = buildString {
@@ -468,16 +461,21 @@ class FloatingBubbleService : Service() {
                         // 识别异常哨兵 (bug_19/superbug 定案): FEN 预校验拦截的不可能局面不是引擎故障更不是兜底场景，
                         // 隐藏建议箭头避免误导，Toast 直指识别/视角错误 (详情已落盘 engine_fallback_log.txt)
                         if (eval.bestMove == "(invalid)") {
-                            transparentOverlay?.hide()
                             withContext(Dispatchers.Main) {
-                                Toast.makeText(
-                                    this@FloatingBubbleService,
-                                    "【识别异常】识别出不可能局面 (如走子方被将)，拒绝给出建议。多为视角误判/画面遮挡，请调整后再试",
-                                    Toast.LENGTH_LONG
-                                ).show()
+                                // 【修改】暴露大红框与故障看板
+                                transparentOverlay?.showError("识别出不可能局面(如走子方被将)", boardRect)
                             }
                             lastFen = res.fullFen
                             return@launch
+                        }
+
+                        // 【新增】提取起点棋子类型，构建如 R-d4d5 的展示字符串
+                        var displayMoveStr = eval.bestMove
+                        if (eval.bestMove.length >= 4 && eval.bestMove[0] in 'a'..'h') {
+                            val fileIdx = eval.bestMove[0] - 'a'
+                            val rankIdx = 8 - (eval.bestMove[1] - '0') // standardBoard 的 r=0 是 rank 8
+                            val pieceChar = res.standardBoard[rankIdx][fileIdx]
+                            displayMoveStr = "${pieceChar.uppercaseChar()}-${eval.bestMove}"
                         }
 
                         // 识别抖动警示: 棋盘未动但 FEN 变化 = 分类/视角层抖动，两次建议不同的直接证据
@@ -501,10 +499,17 @@ class FloatingBubbleService : Service() {
                             boardRect = res.boardRect,
                             moveInfo = eval,
                             isWhitePerspective = res.isWhitePerspective,
+                            displayMoveStr = displayMoveStr, // 【传入新参数】
                             medianSim = detailedResp.medianSim,
                             occupiedCount = detailedResp.occupiedCount,
                             detectedPerspective = detailedResp.detectedPerspective
                         )
+
+                        val conflictDesc = if (sessionLockedPerspective != null && detailedResp.detectedPerspective != res.isWhitePerspective) {
+                            ", 探测:${if (detailedResp.detectedPerspective) "白" else "黑"}"
+                        } else ""
+                        val lockedStateDesc = if (sessionLockedPerspective != null) "(锁定$conflictDesc)" else ""
+                        val perspectiveName = if (res.isWhitePerspective) "执白$lockedStateDesc" else "执黑$lockedStateDesc"
 
                         withContext(Dispatchers.Main) {
                             Toast.makeText(
@@ -515,7 +520,6 @@ class FloatingBubbleService : Service() {
                         }
                     }
                     is UltraRobustClassifier.ClassificationResponse.Rejected -> {
-                        transparentOverlay?.hide()
                         val rejectedForensics = buildString {
                             appendLine("LocateScore: ${String.format("%.1f", locateResult.score)}")
                             appendLine("Confidence: ${locateResult.confidence}")
@@ -525,7 +529,11 @@ class FloatingBubbleService : Service() {
                             appendLine("GateRejected: ${detailedResp.gateRejectedCells.joinToString(" ")}")
                         }
                         saveDebugArtifactsAsync(copyForDebug, boardRect, locateResult, "REJECTED_${detailedResp.reason}", rejectedForensics)
+                        
                         withContext(Dispatchers.Main) {
+                            // 【修改】弹出大红框与故障原因，让假框无所遁形
+                            transparentOverlay?.showError(detailedResp.reason, boardRect)
+                            
                             Toast.makeText(
                                 this@FloatingBubbleService,
                                 "【门禁拦截】原因: ${detailedResp.reason} (Sim=${String.format("%.3f", detailedResp.medianSim)}, 占位=${detailedResp.occupiedCount}, 定位分=${String.format("%.0f", locateResult.score)})",
@@ -534,9 +542,8 @@ class FloatingBubbleService : Service() {
                         }
                     }
                     null -> {
-                        transparentOverlay?.hide()
                         withContext(Dispatchers.Main) {
-                            Toast.makeText(this@FloatingBubbleService, "分类器未初始化", Toast.LENGTH_SHORT).show()
+                            transparentOverlay?.showError("分类器未初始化") // 【修改】
                         }
                     }
                 }
