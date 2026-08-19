@@ -428,7 +428,8 @@ object StockfishBridge {
                 return null
             }
 
-            sendCommand("position fen $fen")
+            val sanitizedFen = sanitizeCastlingRights(fen)
+            sendCommand("position fen $sanitizedFen")
             sendCommand("go movetime $moveTimeMs")
 
             var lastEval: EngineEvaluation? = null
@@ -549,6 +550,34 @@ object StockfishBridge {
     private fun parseFenIsWhite(fen: String): Boolean {
         val parts = fen.split(" ")
         return parts.size < 2 || parts[1] == "w"
+    }
+
+    /**
+     * 纯函数：FEN 王车易位合法性清洗 (防御性编程)
+     * 检查 FEN 中的王车易位标识 (KQkq) 是否与盘面实际王、车位置匹配。
+     * 若王或对应车已离开初始格，剥离该失效易位标识；若全无效则替换为 "-"。
+     * 保证传入 Stockfish UCI 引擎的 FEN 永远不会因 BAD_CASTLING_RIGHTS 崩溃。
+     */
+    fun sanitizeCastlingRights(fen: String): String {
+        val parts = fen.trim().split("\\s+".toRegex()).toMutableList()
+        if (parts.size < 3) return fen
+        val board = parseFenBoard(fen)
+        val originalCastling = parts[2]
+        if (originalCastling == "-") return fen
+
+        val sb = StringBuilder()
+        // K: White kingside (K at e1, R at h1)
+        if (originalCastling.contains('K') && board.size >= 8 && board[7].size >= 8 && board[7][4] == 'K' && board[7][7] == 'R') sb.append('K')
+        // Q: White queenside (K at e1, R at a1)
+        if (originalCastling.contains('Q') && board.size >= 8 && board[7].size >= 8 && board[7][4] == 'K' && board[7][0] == 'R') sb.append('Q')
+        // k: Black kingside (k at e8, r at h8)
+        if (originalCastling.contains('k') && board.size >= 8 && board[0].size >= 8 && board[0][4] == 'k' && board[0][7] == 'r') sb.append('k')
+        // q: Black queenside (k at e8, r at a8)
+        if (originalCastling.contains('q') && board.size >= 8 && board[0].size >= 8 && board[0][4] == 'k' && board[0][0] == 'r') sb.append('q')
+
+        val newCastling = if (sb.isEmpty()) "-" else sb.toString()
+        parts[2] = newCastling
+        return parts.joinToString(" ")
     }
 
     /**

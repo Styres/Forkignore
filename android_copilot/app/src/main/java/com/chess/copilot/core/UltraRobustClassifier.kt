@@ -565,6 +565,28 @@ class UltraRobustClassifier(context: Context? = null) {
             return sb.toString()
         }
 
+        /**
+         * 纯函数：根据标准棋盘 (row 0 = rank 8, row 7 = rank 1) 动态计算合法的王车易位标识
+         * 规则：
+         * - 白短易位 (K): 白王在 e1 (r=7, c=4) 且 白车在 h1 (r=7, c=7)
+         * - 白长易位 (Q): 白王在 e1 (r=7, c=4) 且 白车在 a1 (r=7, c=0)
+         * - 黑短易位 (k): 黑王在 e8 (r=0, c=4) 且 黑车在 h8 (r=0, c=7)
+         * - 黑长易位 (q): 黑王在 e8 (r=0, c=4) 且 黑车在 a8 (r=0, c=0)
+         * - 任何条件不满足时剥离对应字母，全无时输出 "-" (避免 Stockfish 因 BAD_CASTLING_RIGHTS 拒绝解析)
+         */
+        fun computeCastlingRights(board: Array<CharArray>): String {
+            val sb = StringBuilder()
+            if (board.size >= 8 && board[7].size >= 8 && board[7][4] == 'K') {
+                if (board[7][7] == 'R') sb.append('K')
+                if (board[7][0] == 'R') sb.append('Q')
+            }
+            if (board.size >= 8 && board[0].size >= 8 && board[0][4] == 'k') {
+                if (board[0][7] == 'r') sb.append('k')
+                if (board[0][0] == 'r') sb.append('q')
+            }
+            return if (sb.isEmpty()) "-" else sb.toString()
+        }
+
         fun buildFenFromBoard(
             rawBoard: Array<CharArray>,
             isWhitePerspective: Boolean,
@@ -581,7 +603,8 @@ class UltraRobustClassifier(context: Context? = null) {
             val activeColor = if (isWhitePerspective) "w" else "b"
             val fenRows = standardBoard.map { compressRow(it) }
             val boardFen = fenRows.joinToString("/")
-            val fullFen = "$boardFen $activeColor KQkq - 0 1"
+            val castling = computeCastlingRights(standardBoard)
+            val fullFen = "$boardFen $activeColor $castling - 0 1"
 
             return DetectionResult(
                 boardFen = boardFen,
