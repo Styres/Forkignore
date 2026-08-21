@@ -7,13 +7,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 针对 ChessLocator 等差拟合在不同分辨率（400px, 1080p, 1260p, 1440p）下的尺度不变性测试用例
+ * Tests zur Skaleninvarianz der arithmetischen Ausgleichsrechnung im ChessLocator über verschiedene Auflösungen (400px, 1080p, 1260p, 1440p)
  */
 class ChessLocatorScaleTest {
 
     @Test
     fun testTwoPassFit_400pxScale_passesGate() {
-        // 400px 尺度：单格宽 50px，模拟网格线带有 1.5px 轻微噪声
+        // Skala 400px: Feldbreite 50px, die Gitterlinien tragen leichtes Rauschen von 1.5px
         val stepEst = 50.0f
         val x0Est = 0.0f
         val peaks = listOf(
@@ -27,15 +27,15 @@ class ChessLocatorScaleTest {
         )
 
         val result = ChessLocator.twoPassFit(peaks, x0Est, stepEst)
-        assertTrue("400px 尺度微小扰动应通过拟合", result.isOk)
-        assertTrue("残差应在单格 5% 容忍度内 (2.5px)", result.residual <= stepEst * 0.05f)
+        assertTrue("Kleine Störungen auf der 400px-Skala müssen die Ausgleichsrechnung bestehen", result.isOk)
+        assertTrue("Das Residuum muss innerhalb der 5%-Toleranz eines Feldes liegen (2.5px)", result.residual <= stepEst * 0.05f)
         assertEquals(7, result.lineCount)
     }
 
     @Test
     fun testTwoPassFit_1260pScale_passesRelativeGate() {
-        // 1260p 尺度（如 bug_16/bug_17）：单格宽 157.5px，拟合残差 3.5px
-        // 旧版硬编码 2.5px 门禁会直接暴毙 (99f)，新版 5% 门禁 (7.875px) 应顺利通过
+        // Skala 1260p (wie in bug_16/bug_17): Feldbreite 157.5px, Residuum der Ausgleichsrechnung 3.5px
+        // Das alte fest verdrahtete 2.5px-Gatter scheiterte hier sofort (99f), das neue relative 5%-Gatter (7.875px) muss bestehen
         val stepEst = 157.5f
         val x0Est = 0.0f
         val peaks = listOf(
@@ -49,15 +49,15 @@ class ChessLocatorScaleTest {
         )
 
         val result = ChessLocator.twoPassFit(peaks, x0Est, stepEst)
-        assertTrue("1260p 高清屏幕下的等差网格应通过 5% 相对门禁", result.isOk)
-        assertTrue("残差 3.2px 真实反映网格精度，且 <= 7.875px", result.residual <= stepEst * 0.05f)
-        assertTrue("残差不应为退化的 99f", result.residual < 10.0f)
+        assertTrue("Ein arithmetisches Gitter auf einem 1260p-Display muss das relative 5%-Gatter bestehen", result.isOk)
+        assertTrue("Das Residuum von 3.2px bildet die Gittergenauigkeit korrekt ab und ist <= 7.875px", result.residual <= stepEst * 0.05f)
+        assertTrue("Das Residuum darf nicht der Entartungswert 99f sein", result.residual < 10.0f)
         assertEquals(7, result.lineCount)
     }
 
     @Test
     fun testTwoPassFit_RandomUiPeaks_rejected() {
-        // 杂乱 UI 边缘伪峰：非等差分布，残差巨大
+        // Falsche Peaks aus unruhigen UI-Kanten: nicht arithmetisch verteilt, riesiges Residuum
         val stepEst = 157.5f
         val x0Est = 0.0f
         val peaks = listOf(
@@ -69,6 +69,6 @@ class ChessLocatorScaleTest {
         )
 
         val result = ChessLocator.twoPassFit(peaks, x0Est, stepEst)
-        assertFalse("非等差杂乱伪峰集应被门禁拦截", result.isOk)
+        assertFalse("Ein Satz nicht arithmetischer Störpeaks muss vom Gatter abgewiesen werden", result.isOk)
     }
 }

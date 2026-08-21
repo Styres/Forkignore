@@ -5,10 +5,10 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import org.junit.Ignore // 确保顶部有导入
+import org.junit.Ignore
 
 /**
- * 针对 8x8 棋盘矩阵压缩为 FEN 串、视角翻转、双王守恒、Rank 1/8 禁兵与数量约束的单元测试用例
+ * Unit-Tests für das Verdichten der 8x8-Brettmatrix zum FEN, das Spiegeln der Perspektive, die Eindeutigkeit beider Könige, das Bauernverbot auf Reihe 1/8 und die Anzahlgrenzen
  */
 class ChessFenBuilderTest {
 
@@ -61,10 +61,10 @@ class ChessFenBuilderTest {
         assertEquals("8", UltraRobustClassifier.compressRow(fullEmptyRow))
     }
 
-    @Ignore("回填机制已废除，此测试作废")
+    @Ignore("Das Nachfüllen wurde abgeschafft, dieser Test ist hinfällig")
     @Test
     fun testZeroKingRecovery() {
-        // 关键用例：测试当识别结果中白王数量为 0 时，算法自动在白方底线回填国王
+        // Schlüsselfall: erkennt die Klassifikation keinen weißen König, füllte der Algorithmus ihn früher auf der weißen Grundreihe nach
         val boardWithNoWhiteKing = arrayOf(
             charArrayOf('r', 'n', 'b', 'q', 'k', 'b', 'n', 'r'),
             charArrayOf('p', 'p', 'p', 'p', 'p', 'p', 'p', 'p'),
@@ -73,7 +73,7 @@ class ChessFenBuilderTest {
             charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
             charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
             charArrayOf('P', 'P', 'P', 'P', 'P', 'P', 'P', 'P'),
-            charArrayOf('R', 'N', 'B', 'Q', '.', 'B', 'N', 'R') // 白王位置为空格
+            charArrayOf('R', 'N', 'B', 'Q', '.', 'B', 'N', 'R') // Feld des weißen Königs ist leer
         )
 
         val sanitized = UltraRobustClassifier.sanitizeBoard(boardWithNoWhiteKing)
@@ -91,20 +91,20 @@ class ChessFenBuilderTest {
 
     @Test
     fun testRank1AndRank8IllegalPawnCleaning() {
-        // 关键用例：国际象棋中 Rank 1 和 Rank 8 绝对不能有兵（Lichess 硬性拒绝），测试清洗机制
+        // Schlüsselfall: auf Reihe 1 und Reihe 8 darf im Schach niemals ein Bauer stehen (Lichess weist das hart ab), hier wird die Bereinigung geprüft
         val boardWithIllegalPawns = arrayOf(
-            charArrayOf('r', 'n', 'b', 'P', 'k', 'b', 'n', 'r'), // Rank 8 出现白兵 P
+            charArrayOf('r', 'n', 'b', 'P', 'k', 'b', 'n', 'r'), // weißer Bauer P auf Reihe 8
             charArrayOf('p', 'p', 'p', 'p', 'p', 'p', 'p', 'p'),
             charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
             charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
             charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
             charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
             charArrayOf('P', 'P', 'P', 'P', 'P', 'P', 'P', 'P'),
-            charArrayOf('R', 'N', 'B', 'Q', 'K', 'B', 'p', 'R')  // Rank 1 出现黑兵 p
+            charArrayOf('R', 'N', 'B', 'Q', 'K', 'B', 'p', 'R')  // schwarzer Bauer p auf Reihe 1
         )
 
         val sanitized = UltraRobustClassifier.sanitizeBoard(boardWithIllegalPawns)
-        // 验证 Rank 8 (row 0) 和 Rank 1 (row 7) 无任何兵
+        // Prüfen, dass auf Reihe 8 (row 0) und Reihe 1 (row 7) kein Bauer mehr steht
         for (c in 0..7) {
             assertFalse("Rank 8 cannot have white pawn", sanitized[0][c] == 'P')
             assertFalse("Rank 8 cannot have black pawn", sanitized[0][c] == 'p')
@@ -115,11 +115,11 @@ class ChessFenBuilderTest {
 
     @Test
     fun testPieceCountMaxLimits() {
-        // 关键用例：测试某类子力（如白后超过 1 个、白兵超过 8 个）时的严格超限降级
+        // Schlüsselfall: strikte Abwertung, wenn eine Figurenart die Obergrenze überschreitet (z. B. mehr als eine weiße Dame oder mehr als acht weiße Bauern)
         val boardWithThreeQueens = arrayOf(
             charArrayOf('r', 'n', 'b', 'q', 'k', 'b', 'n', 'r'),
             charArrayOf('p', 'p', 'p', 'p', 'p', 'p', 'p', 'p'),
-            charArrayOf('.', '.', 'Q', '.', 'Q', '.', '.', '.'), // 多余的后
+            charArrayOf('.', '.', 'Q', '.', 'Q', '.', '.', '.'), // überzählige Dame
             charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
             charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
             charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
@@ -165,7 +165,7 @@ class ChessFenBuilderTest {
 
     @Test
     fun testBuildFenWithTelemetryAndPerspectiveLock() {
-        // 残局局面：白方兵子大举挺进中路，底线仅剩白王，黑后与黑车杀入白方底线 (底线黑子比白子多)
+        // Endspielstellung: die weißen Bauern sind im Zentrum weit vorgerückt, auf der Grundreihe steht nur noch der weiße König, während schwarze Dame und Turm dort eingedrungen sind (unten mehr schwarze als weiße Figuren)
         val endgameBoard = arrayOf(
             charArrayOf('r', '.', '.', '.', 'k', '.', '.', '.'),
             charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
@@ -177,10 +177,10 @@ class ChessFenBuilderTest {
             charArrayOf('q', '.', '.', '.', 'K', '.', '.', 'r')
         )
 
-        // 验证 1: 带有底层 telemetry 参数的 buildFenFromBoard
+        // Prüfung 1: buildFenFromBoard mit den Telemetrieparametern
         val result = UltraRobustClassifier.buildFenFromBoard(
             rawBoard = endgameBoard,
-            isWhitePerspective = true, // 会话视角锁定为执白
+            isWhitePerspective = true, // Perspektive der Sitzung ist auf Weiß gesperrt
             medianSim = 0.985f,
             occupiedCount = 6
         )
@@ -194,7 +194,7 @@ class ChessFenBuilderTest {
 
     @Test
     fun testResolvePerspectiveLockStateMachine() {
-        // 1. 开局自动锁定：占位 32 颗子，高置信度 -> 锁定执白 (true)
+        // 1. Automatische Sperre in der Eröffnung: 32 belegte Felder, hohe Confidence -> gesperrt auf Weiß (true)
         val lock1 = UltraRobustClassifier.resolvePerspectiveLock(
             currentLock = null,
             detectedPerspective = true,
@@ -203,7 +203,7 @@ class ChessFenBuilderTest {
         )
         assertEquals(true, lock1)
 
-        // 2. 残局底线反转防御：已锁定执白 (true)，中残局子力减少到 6 颗，底线受攻导致检测误判为黑 (false) -> 依然锁定执白 (true)
+        // 2. Schutz gegen Kippen im Endspiel: bereits auf Weiß (true) gesperrt, nur noch 6 Figuren, der Angriff auf der Grundreihe lässt die Erkennung fälschlich Schwarz (false) melden -> Sperre bleibt Weiß (true)
         val lock2 = UltraRobustClassifier.resolvePerspectiveLock(
             currentLock = lock1,
             detectedPerspective = false,
@@ -212,7 +212,7 @@ class ChessFenBuilderTest {
         )
         assertEquals(true, lock2)
 
-        // 3. 开新对局重新校准：占位恢复到 30 颗 (>=26)，换边执黑 (false) -> 强制重新校准为执黑 (false)
+        // 3. Neue Partie, Neukalibrierung: wieder 30 belegte Felder (>=26), Seitenwechsel auf Schwarz (false) -> Sperre wird zwangsweise auf Schwarz (false) gesetzt
         val lock3 = UltraRobustClassifier.resolvePerspectiveLock(
             currentLock = lock2,
             detectedPerspective = false,
@@ -221,7 +221,7 @@ class ChessFenBuilderTest {
         )
         assertEquals(false, lock3)
 
-        // 4. 初次低置信度不锁门槛：无锁状态下仅有 8 颗子且 Sim 偏低 (0.58f) -> 暂不上锁 (null)
+        // 4. Hürde bei niedriger Confidence: ohne Sperre, nur 8 Figuren und niedriger Sim (0.58f) -> es wird noch nicht gesperrt (null)
         val lock4 = UltraRobustClassifier.resolvePerspectiveLock(
             currentLock = null,
             detectedPerspective = true,

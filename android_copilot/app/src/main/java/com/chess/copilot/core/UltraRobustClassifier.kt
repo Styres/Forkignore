@@ -12,13 +12,13 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
- * 纯 Kotlin 多模态多邻国 2D 棋子识别器 (V7 语义匹配质量门禁版)
- * 核心机制：
- * 1. 棋子语义质量绝对门禁 (MedianSim >= 0.52f && occupied >= 4)，100% 拦截非棋盘画面 (主页、大厅)
- * 2. 占用门控后执行自适应垂直前景质心探测与滑动窗口原点钳制 (x0=clamp, y0=clamp)，彻底杜绝 Row 0 顶部切头与维度坍缩
- * 3. 分数级双区域余弦融合：0.65 * cos(f_body, t_body) + 0.35 * cos(f_head, t_head)，高精度区分车/后/主教/兵/马/王
- * 4. 自适应 2-Means 阵营自适应聚类与单色极差保护 (极差 < 35)
- * 5. 严格遵守 Lichess 规则规范与子力数量上限约束
+ * Rein in Kotlin geschriebener multimodaler 2D-Figurenerkenner für Duolingo-Schach (V7, semantisches Qualitätsgatter)
+ * Kernmechanik:
+ * 1. Absolutes Qualitätsgatter für die Figurensemantik (MedianSim >= 0.52f && belegt >= 4) blockt Nicht-Brett-Bilder (Startseite, Lobby) zu 100 %
+ * 2. Nach dem Belegungsgatter folgen adaptive vertikale Vordergrund-Schwerpunktsuche und Schiebefenster-Klemmung (x0=clamp, y0=clamp) gegen abgeschnittene Figurenköpfe in Reihe 0 und Dimensionskollaps
+ * 3. Score-Fusion zweier Regionen: 0.65 * cos(f_body, t_body) + 0.35 * cos(f_head, t_head) trennt Turm/Dame/Läufer/Bauer/Springer/König präzise
+ * 4. Adaptives 2-Means-Clustering der Farbzugehörigkeit inklusive Einfarbigkeitsschutz (Spannweite < 35)
+ * 5. Strikte Einhaltung der Lichess-Regelkonventionen und der Obergrenzen für die Figurenanzahl
  */
 class UltraRobustClassifier(context: Context? = null) {
 
@@ -42,7 +42,11 @@ class UltraRobustClassifier(context: Context? = null) {
             val medianSim: Float,
             val occupiedCount: Int,
             val detectedPerspective: Boolean,
-            // 逐格取证遥测 (bug_11~14 定案用): 低置信占位格与门控截断候选，供后续标定单格拒绝阈值
+            // Confidence der Perspektiverkennung in [0..1] und das dabei ausschlaggebende Signal:
+            // Der Aufrufer sperrt die Perspektive nur bei ausreichender Confidence und kann sie sonst anzeigen
+            val perspectiveConfidence: Float = 0.0f,
+            val perspectiveReason: String = "",
+            // Zellenweise Telemetrie (für die Fälle bug_11~14): unsichere belegte Felder und vom Gatter verworfene Kandidaten, Grundlage für die Kalibrierung der Einzelfeld-Schwellen
             val lowConfidenceCells: List<String> = emptyList(),
             val gateRejectedCells: List<String> = emptyList()
         ) : ClassificationResponse()
@@ -51,11 +55,23 @@ class UltraRobustClassifier(context: Context? = null) {
             val reason: String,
             val medianSim: Float,
             val occupiedCount: Int,
-            // 拦截时的逐格取证 (bug_18 与低 Sim 误拦定案用): 屏幕坐标 r{r}c{c}=类别(sim)
+            // Zellenweise Telemetrie beim Abweisen (für bug_18 und fälschlich geblockte Bretter mit niedrigem Sim): Bildschirmkoordinaten r{r}c{c}=Klasse(sim)
             val lowConfidenceCells: List<String> = emptyList(),
             val gateRejectedCells: List<String> = emptyList()
         ) : ClassificationResponse()
     }
+
+    /**
+     * Ergebnis der Perspektiverkennung
+     * @param isWhitePerspective true = Weiß sitzt unten (eigene Farbe Weiß)
+     * @param confidence Betrag der gewichteten Signalsumme in [0..1]; 0 = die Signale heben sich auf
+     * @param reason das Signal mit dem größten Beitrag, für Anzeige und Forensik
+     */
+    data class PerspectiveVerdict(
+        val isWhitePerspective: Boolean,
+        val confidence: Float,
+        val reason: String
+    )
 
     data class DetectionResult(
         val boardFen: String,
@@ -99,16 +115,16 @@ class UltraRobustClassifier(context: Context? = null) {
     }
 
     /**
-     * 详尽棋盘分类决策管道：返回带有底层置信度指标 (medianSim, occupiedCount) 与拦截原因的响应
-     * 支持传入会话锁定的 overridePerspective 防止残局视角误判
+     * Ausführliche Klassifikationspipeline: liefert die Confidence-Kennzahlen (medianSim, occupiedCount) und den Abweisungsgrund mit zurück
+     * Ein per Sitzung gesperrter overridePerspective kann übergeben werden, um Perspektivfehler im Endspiel zu verhindern
      */
     fun classifyBoardDetailed(
         bitmap: Bitmap,
         boardRect: Rect,
         overridePerspective: Boolean? = null
     ): ClassificationResponse {
-        // 防御性钳位 (与定位器 isCropped 提示契约双保险): 裁剪帧/救援候选的 rect 可能越出图像边界，
-        // 直接 createBitmap 会抛 IllegalArgumentException; 与整幅求交后若框体缩小即判不完整并拦截 (只提示不硬匹配)
+        // Defensive Klemmung (zweite Absicherung neben dem isCropped-Hinweis des Locators): Das Rect zugeschnittener Frames bzw. Rettungskandidaten kann über den Bildrand hinausragen,
+        // ein direktes createBitmap würde eine IllegalArgumentException werfen; schrumpft das Rect beim Schnitt mit dem Vollbild, gilt der Frame als unvollständig und wird abgewiesen (nur Hinweis, kein hartes Matching)
         val safeRect = Rect(boardRect)
         val fullyInside = safeRect.intersect(0, 0, bitmap.width, bitmap.height) &&
             safeRect.width() == boardRect.width() && safeRect.height() == boardRect.height()
@@ -132,7 +148,7 @@ class UltraRobustClassifier(context: Context? = null) {
             }
         }
 
-        // 1. 占用门控与模板余弦匹配
+        // 1. Belegungsgatter und Kosinus-Abgleich mit den Templates
         data class OccupiedCell(
             val r: Int,
             val c: Int,
@@ -143,13 +159,13 @@ class UltraRobustClassifier(context: Context? = null) {
             val kingSimilarity: Float
         )
         val occupiedList = mutableListOf<OccupiedCell>()
-        // 门控截断候选: 中心方差不足但边缘梯度已越线的格子，是"真实棋子被误判为空"(bug_13/14 阻隔漏检)的头号嫌疑
+        // Vom Gatter verworfene Kandidaten: Felder mit zu geringer Zentrumsvarianz, deren Kantengradient aber bereits über der Schwelle liegt - Hauptverdächtige für "echte Figur fälschlich als leer erkannt" (verdeckte Figuren, bug_13/14)
         val gateRejected = mutableListOf<String>()
 
         for (r in 0..7) {
             for (c in 0..7) {
                 val f = cellsFeats[r][c]
-                // 占用门控：空网格中心方差与边缘梯度极低 (gradMean >= 22.0 彻底过滤 2.5D 透视阴影与顶部微重叠)
+                // Belegungsgatter: leere Felder haben extrem niedrige Zentrumsvarianz und Kantengradienten (gradMean >= 22.0 filtert 2.5D-Perspektivschatten und leichte Überlappungen am oberen Rand zuverlässig heraus)
                 if (f.centerStd < 6.0f || f.gradMean < 22.0f) {
                     if (f.gradMean >= 22.0f) {
                         gateRejected.add("r${r}c${c}|std=${String.format("%.1f", f.centerStd)}|grad=${String.format("%.1f", f.gradMean)}")
@@ -185,8 +201,8 @@ class UltraRobustClassifier(context: Context? = null) {
             }
         }
 
-        // 2. 棋盘语义质量门禁 (Semantic Quality Gating)
-        // 拦截遥测: 低置信占位格按 sim 升序，供定案"真棋盘被误拦"时看单格分布 (此时视角未定，用屏幕坐标)
+        // 2. Semantisches Qualitätsgatter des Bretts (Semantic Quality Gating)
+        // Telemetrie beim Abweisen: unsichere belegte Felder aufsteigend nach sim, um bei "echtes Brett fälschlich geblockt" die Einzelfeldverteilung zu prüfen (die Perspektive steht hier noch nicht fest, daher Bildschirmkoordinaten)
         val rejectedLowConf = occupiedList
             .filter { it.bestSimilarity < 0.60f }
             .sortedBy { it.bestSimilarity }
@@ -194,7 +210,7 @@ class UltraRobustClassifier(context: Context? = null) {
 
         if (occupiedList.size < 4) {
             return ClassificationResponse.Rejected(
-                reason = "占位棋子数不足 (${occupiedList.size} < 4)",
+                reason = "Zu wenige belegte Felder (${occupiedList.size} < 4)",
                 medianSim = 0.0f,
                 occupiedCount = occupiedList.size,
                 lowConfidenceCells = rejectedLowConf,
@@ -209,10 +225,10 @@ class UltraRobustClassifier(context: Context? = null) {
             (sortedSims[sortedSims.size / 2 - 1] + sortedSims[sortedSims.size / 2]) / 2.0f
         }
 
-        // 非棋盘画面 (如路线图、大厅) 的中位数相似度极低 (实测 <= 0.378)，真实棋盘 >= 0.673
+        // Nicht-Brett-Bilder (z. B. Lernpfad, Lobby) haben eine extrem niedrige Median-Ähnlichkeit (gemessen <= 0.378), echte Bretter >= 0.673
         if (medianSim < 0.52f) {
             return ClassificationResponse.Rejected(
-                reason = "相似度过低 (MedianSim=${String.format("%.3f", medianSim)} < 0.520)",
+                reason = "Ähnlichkeit zu niedrig (MedianSim=${String.format("%.3f", medianSim)} < 0.520)",
                 medianSim = medianSim,
                 occupiedCount = occupiedList.size,
                 lowConfidenceCells = rejectedLowConf,
@@ -220,7 +236,7 @@ class UltraRobustClassifier(context: Context? = null) {
             )
         }
 
-        // 3. 自适应 2-Means 聚类区分黑白阵营
+        // 3. Adaptives 2-Means-Clustering trennt die Farben Schwarz und Weiß
         val rawBoard = Array(8) { CharArray(8) { '.' } }
         val means = FloatArray(occupiedList.size) { occupiedList[it].feat.centerMean }
         val splitThreshold = calculateTwoMeansThreshold(means)
@@ -231,31 +247,20 @@ class UltraRobustClassifier(context: Context? = null) {
             rawBoard[cell.r][cell.c] = sym
         }
 
-        // 4. 约束校验（Rank 1/8 禁兵、数量上限容量感知降级）
+        // 4. Regelprüfung (kein Bauer auf Reihe 1/8, kapazitätsbewusste Abwertung bei Überschreitung der Figurenobergrenzen)
         val sanitizedBoard = sanitizeBoard(rawBoard)
 
-        // 5. 统计顶底黑白子判定视角
-        var topWhite = 0
-        var topBlack = 0
-        var botWhite = 0
-        var botBlack = 0
-        for (r in 0..1) {
-            for (c in 0..7) {
-                val s = sanitizedBoard[r][c]
-                if (s.isUpperCase()) topWhite++ else if (s.isLowerCase()) topBlack++
-            }
-        }
-        for (r in 6..7) {
-            for (c in 0..7) {
-                val s = sanitizedBoard[r][c]
-                if (s.isUpperCase()) botWhite++ else if (s.isLowerCase()) botBlack++
-            }
-        }
-
-        val detectedPerspective = botWhite >= botBlack
+        // 5. Perspektive bestimmen: welche Farbe sitzt unten am eigenen Brettrand
+        // Früher entschied allein die Figurenmehrheit der beiden untersten Reihen darüber.
+        // Genau diese Regel kippte im Mittel- und Endspiel (eingedrungene gegnerische Figuren,
+        // geräumte eigene Grundreihe, Bauernumwandlung) und ließ die App die Figuren des
+        // Gegners statt der eigenen analysieren. detectPerspective gewichtet stattdessen
+        // mehrere unabhängige Signale gegeneinander und meldet eine Confidence mit zurück.
+        val perspectiveVerdict = detectPerspective(sanitizedBoard)
+        val detectedPerspective = perspectiveVerdict.isWhitePerspective
         val effectivePerspective = overridePerspective ?: detectedPerspective
 
-        // 5.5 逐格置信度遥测 (bug_11 教训: b4 单格 Sim 仅 0.50 余量 0.06 仍被全局中位数门禁放行，污染 FEN)
+        // 5.5 Zellenweise Confidence-Telemetrie (Lektion aus bug_11: Feld b4 hatte nur Sim 0.50 bei 0.06 Abstand und passierte trotzdem das globale Median-Gatter und verunreinigte das FEN)
         val fileChars = "abcdefgh"
         val lowConfidenceCells = occupiedList
             .filter { it.bestSimilarity < 0.60f }
@@ -282,6 +287,8 @@ class UltraRobustClassifier(context: Context? = null) {
             medianSim = medianSim,
             occupiedCount = occupiedList.size,
             detectedPerspective = detectedPerspective,
+            perspectiveConfidence = perspectiveVerdict.confidence,
+            perspectiveReason = perspectiveVerdict.reason,
             lowConfidenceCells = lowConfidenceCells,
             gateRejectedCells = gateRejected
         )
@@ -295,7 +302,7 @@ class UltraRobustClassifier(context: Context? = null) {
     }
 
     /**
-     * 提取 48x48 格子的双区域解剖特征 (30x30 身体 + 10x30 头部)
+     * Extrahiert die anatomischen Merkmale zweier Regionen eines 48x48-Feldes (30x30 Körper + 10x30 Kopf)
      */
     fun extractFeatureFromBitmap(cellBmp: Bitmap): CellFeature {
         val resized = if (cellBmp.width == 48 && cellBmp.height == 48) {
@@ -316,7 +323,7 @@ class UltraRobustClassifier(context: Context? = null) {
             gray[i] = 0.299f * r + 0.587f * g + 0.114f * b
         }
 
-        // 1. 占用门控统计 (基于 30x30 中心区: 行 9..38, 列 9..38)
+        // 1. Statistik für das Belegungsgatter (auf Basis der 30x30-Zentrumsregion: Zeilen 9..38, Spalten 9..38)
         var sumGray = 0.0f
         var sumSqGray = 0.0f
         for (r in 9..38) {
@@ -330,7 +337,7 @@ class UltraRobustClassifier(context: Context? = null) {
         val centerVariance = max(0f, (sumSqGray / 900.0f) - (centerMean * centerMean))
         val centerStd = sqrt(centerVariance)
 
-        // 2. 全图 Sobel 梯度
+        // 2. Sobel-Gradient des gesamten Feldes
         val mag = FloatArray(48 * 48)
         var sumCenterMag = 0.0f
         for (gy in 1..46) {
@@ -358,7 +365,7 @@ class UltraRobustClassifier(context: Context? = null) {
         }
         val gradMean = sumCenterMag / 900.0f
 
-        // 3. 4 角中值背景差分探测前景质心 (3x3 四角采样，共 36 点统一取中值)
+        // 3. Vordergrundschwerpunkt per Hintergrunddifferenz aus dem Median der 4 Ecken (3x3 je Ecke, 36 Punkte, gemeinsamer Median)
         val cornerVals = FloatArray(36)
         var cIdx = 0
         for (r in 0..2) {
@@ -372,7 +379,7 @@ class UltraRobustClassifier(context: Context? = null) {
         cornerVals.sort()
         val bgVal = cornerVals[18]
 
-        // 限制在 [2..45] 内部区域探测，防止外圈 2px 边界线/邻格边缘侵入拉偏质心
+        // Suche auf den Innenbereich [2..45] begrenzen, damit die 2px-Randlinien bzw. Kanten der Nachbarfelder den Schwerpunkt nicht verziehen
         var sumFgY = 0.0
         var sumFgX = 0.0
         var fgCount = 0
@@ -390,11 +397,11 @@ class UltraRobustClassifier(context: Context? = null) {
         val cy = if (fgCount > 0) (sumFgY / fgCount).toFloat() else 24.0f
         val cx = if (fgCount > 0) (sumFgX / fgCount).toFloat() else 24.0f
 
-        // 4. 滑动窗口原点钳制 (保证 ROI 恒为 36x36，绝无维度坍缩)
+        // 4. Schiebefenster-Klemmung des Ursprungs (garantiert eine ROI von exakt 36x36, kein Dimensionskollaps)
         val x0 = max(0, min(12, (cx - 18f).roundToInt()))
         val y0 = max(0, min(12, (cy - 18f).roundToInt()))
 
-        // 5. 身体特征: 30x30 (从 36x36 居中截取，共 900 维)
+        // 5. Körpermerkmal: 30x30 (zentriert aus dem 36x36-Fenster geschnitten, 900 Dimensionen)
         val bodyMag = FloatArray(900)
         var bodySumSq = 0.0f
         for (r in 0..29) {
@@ -409,7 +416,7 @@ class UltraRobustClassifier(context: Context? = null) {
         val bodyNormVal = sqrt(bodySumSq) + 1e-5f
         val bodyNorm = FloatArray(900) { bodyMag[it] / bodyNormVal }
 
-        // 6. 头部解剖特征: 10x30 (从 30x30 身体取顶端 10 行，共 300 维)
+        // 6. Anatomisches Kopfmerkmal: 10x30 (die obersten 10 Zeilen des 30x30-Körpers, 300 Dimensionen)
         val headMag = FloatArray(300)
         var headSumSq = 0.0f
         for (r in 0..9) {
@@ -474,7 +481,7 @@ class UltraRobustClassifier(context: Context? = null) {
         fun sanitizeBoard(board: Array<CharArray>): Array<CharArray> {
             val result = Array(8) { r -> CharArray(8) { c -> board[r][c] } }
 
-            // 1. Rank 1 (row 7) 与 Rank 8 (row 0) 严禁出现兵（Pawn）
+            // 1. Auf Reihe 1 (row 7) und Reihe 8 (row 0) darf niemals ein Bauer stehen
             for (c in 0..7) {
                 if (result[0][c] == 'P' || result[0][c] == 'p') {
                     result[0][c] = '.'
@@ -484,7 +491,7 @@ class UltraRobustClassifier(context: Context? = null) {
                 }
             }
 
-            // 2. 统计子力数量并执行上限约束（容量感知降级，避免二次超限）
+            // 2. Figurenanzahl zählen und Obergrenzen durchsetzen (kapazitätsbewusste Abwertung, damit die Ersatzfigur nicht selbst überläuft)
             val pieceCounts = mutableMapOf<Char, Int>()
             val maxLimits = mapOf(
                 'K' to 1, 'k' to 1,
@@ -519,7 +526,7 @@ class UltraRobustClassifier(context: Context? = null) {
                 }
             }
 
-            // 3. 双王唯一性保证（旧版回填已废除，交由下游严苛校验）
+            // 3. Eindeutigkeit beider Könige (das alte Nachfüllen wurde abgeschafft, die strenge Prüfung erfolgt stromabwärts)
             var whiteKingCount = 0
             var blackKingCount = 0
             for (r in 0..7) {
@@ -529,7 +536,7 @@ class UltraRobustClassifier(context: Context? = null) {
                 }
             }
 
-            // 4. 终极二次自检
+            // 4. Abschließende Zweitprüfung
             val finalCounts = mutableMapOf<Char, Int>()
             for (r in 0..7) {
                 for (c in 0..7) {
@@ -566,13 +573,13 @@ class UltraRobustClassifier(context: Context? = null) {
         }
 
         /**
-         * 纯函数：根据标准棋盘 (row 0 = rank 8, row 7 = rank 1) 动态计算合法的王车易位标识
-         * 规则：
-         * - 白短易位 (K): 白王在 e1 (r=7, c=4) 且 白车在 h1 (r=7, c=7)
-         * - 白长易位 (Q): 白王在 e1 (r=7, c=4) 且 白车在 a1 (r=7, c=0)
-         * - 黑短易位 (k): 黑王在 e8 (r=0, c=4) 且 黑车在 h8 (r=0, c=7)
-         * - 黑长易位 (q): 黑王在 e8 (r=0, c=4) 且 黑车在 a8 (r=0, c=0)
-         * - 任何条件不满足时剥离对应字母，全无时输出 "-" (避免 Stockfish 因 BAD_CASTLING_RIGHTS 拒绝解析)
+         * Reine Funktion: berechnet aus dem Standardbrett (row 0 = Reihe 8, row 7 = Reihe 1) die gültigen Rochaderechte
+         * Regeln:
+         * - Weiße kurze Rochade (K): weißer König auf e1 (r=7, c=4) und weißer Turm auf h1 (r=7, c=7)
+         * - Weiße lange Rochade (Q): weißer König auf e1 (r=7, c=4) und weißer Turm auf a1 (r=7, c=0)
+         * - Schwarze kurze Rochade (k): schwarzer König auf e8 (r=0, c=4) und schwarzer Turm auf h8 (r=0, c=7)
+         * - Schwarze lange Rochade (q): schwarzer König auf e8 (r=0, c=4) und schwarzer Turm auf a8 (r=0, c=0)
+         * - Nicht erfüllte Bedingungen streichen den jeweiligen Buchstaben, fällt alles weg, wird "-" ausgegeben (sonst lehnt Stockfish das FEN mit BAD_CASTLING_RIGHTS ab)
          */
         fun computeCastlingRights(board: Array<CharArray>): String {
             val sb = StringBuilder()
@@ -620,34 +627,142 @@ class UltraRobustClassifier(context: Context? = null) {
         }
 
         /**
-         * 纯函数：会话视角锁定状态机决策
-         * @param currentLock 当前会话锁定的视角 (null 表示尚未锁定)
-         * @param detectedPerspective 当前帧算法检测出的视角
-         * @param occupiedCount 当前棋盘占位棋子数
-         * @param medianSim 当前帧模板匹配相似度中位数
-         * @return 更新后的锁定视角 (null 表示置信度不足暂不锁定)
+         * Reine Funktion: bestimmt aus dem Bildschirmbrett (row 0 = oben, row 7 = unten),
+         * welche Farbe unten sitzt, also welche Figuren die eigenen sind.
+         *
+         * Fehlerbild vor dieser Funktion: gezählt wurde nur die Farbmehrheit der beiden
+         * untersten Reihen. Sobald der Gegner dort eindringt oder die eigene Grundreihe leer
+         * wird, kippte das Ergebnis, das FEN wurde gespiegelt und die App schlug Züge für
+         * die Figuren des Gegners vor.
+         *
+         * Stattdessen werden vier unabhängige Signale gewichtet addiert (positiv = Weiß unten):
+         * 1. Bauernrichtung (Gewicht bis 4.0): Bauern können nicht zurück, ihre mittlere
+         *    Bildschirmzeile ist deshalb über die ganze Partie hinweg das stabilste Signal.
+         *    Das Gewicht sinkt mit der Anzahl der noch vorhandenen Bauern.
+         * 2. Königsstand (Gewicht 2.0): der eigene König steht in aller Regel unterhalb des gegnerischen.
+         * 3. Materialschwerpunkt (Gewicht bis 2.0): alle Figuren nach Abstand zur Brettmitte gewichtet.
+         * 4. Grundreihen (Gewicht 1.0): die alte Heuristik, jetzt nur noch eine Stimme von vieren.
+         *
+         * @return Perspektive, Confidence in [0..1] und das ausschlaggebende Signal
+         */
+        fun detectPerspective(board: Array<CharArray>): PerspectiveVerdict {
+            var whitePawnRowSum = 0.0f
+            var whitePawns = 0
+            var blackPawnRowSum = 0.0f
+            var blackPawns = 0
+            var whiteKingRow = -1
+            var blackKingRow = -1
+            var massSum = 0.0f
+            var pieceCount = 0
+            var topWhite = 0
+            var topBlack = 0
+            var botWhite = 0
+            var botBlack = 0
+
+            for (r in 0..7) {
+                for (c in 0..7) {
+                    val sym = board[r][c]
+                    if (sym == '.') continue
+                    val isWhite = sym.isUpperCase()
+                    pieceCount++
+                    // Abstand zur Brettmitte, normiert auf [-1..1]: unten positiv, oben negativ
+                    massSum += (if (isWhite) 1.0f else -1.0f) * ((r - 3.5f) / 3.5f)
+                    when (sym) {
+                        'P' -> { whitePawnRowSum += r; whitePawns++ }
+                        'p' -> { blackPawnRowSum += r; blackPawns++ }
+                        'K' -> whiteKingRow = r
+                        'k' -> blackKingRow = r
+                    }
+                    if (r <= 1) { if (isWhite) topWhite++ else topBlack++ }
+                    if (r >= 6) { if (isWhite) botWhite++ else botBlack++ }
+                }
+            }
+
+            var weightedSum = 0.0f
+            var weightTotal = 0.0f
+            var strongestSignal = ""
+            var strongestContribution = 0.0f
+
+            fun addSignal(name: String, rawValue: Float, weight: Float) {
+                if (weight <= 0.0f) return
+                val contribution = rawValue.coerceIn(-1.0f, 1.0f) * weight
+                weightedSum += contribution
+                weightTotal += weight
+                if (abs(contribution) > abs(strongestContribution)) {
+                    strongestContribution = contribution
+                    strongestSignal = name
+                }
+            }
+
+            // 1. Bauernrichtung: Differenz der mittleren Bildschirmzeile beider Bauernketten
+            // (Grundstellung: Weiß 6, Schwarz 1 -> Differenz 5 -> voll ausgeschlagenes Signal)
+            if (whitePawns > 0 && blackPawns > 0) {
+                val pawnRowDiff = (whitePawnRowSum / whitePawns) - (blackPawnRowSum / blackPawns)
+                val pawnWeight = 4.0f * min(1.0f, (whitePawns + blackPawns) / 8.0f)
+                addSignal("Bauernrichtung", pawnRowDiff / 5.0f, pawnWeight)
+            }
+
+            // 2. Königsstand: nur verwertbar, wenn beide Könige erkannt wurden
+            if (whiteKingRow >= 0 && blackKingRow >= 0) {
+                addSignal("Königsstand", (whiteKingRow - blackKingRow) / 5.0f, 2.0f)
+            }
+
+            // 3. Materialschwerpunkt über alle Figuren, Gewicht sinkt mit abnehmendem Material
+            if (pieceCount > 0) {
+                addSignal("Materialschwerpunkt", massSum / pieceCount, 2.0f * min(1.0f, pieceCount / 16.0f))
+            }
+
+            // 4. Grundreihen: die alte Heuristik als schwächste Stimme
+            addSignal("Grundreihen", ((botWhite - botBlack) + (topBlack - topWhite)) / 16.0f, 1.0f)
+
+            val isWhite = when {
+                weightedSum > 0.0f -> true
+                weightedSum < 0.0f -> false
+                // Patt aller Signale (z. B. völlig symmetrisches Brett): alte Heuristik entscheidet
+                else -> botWhite >= botBlack
+            }
+            val confidence = if (weightTotal > 0.0f) {
+                (abs(weightedSum) / weightTotal).coerceIn(0.0f, 1.0f)
+            } else {
+                0.0f
+            }
+            val reason = if (strongestSignal.isEmpty()) "Grundreihen (Rückfall)" else strongestSignal
+            return PerspectiveVerdict(isWhite, confidence, reason)
+        }
+
+        /**
+         * Reine Funktion: Zustandsautomat für die Perspektivsperre der Sitzung
+         * @param currentLock aktuell gesperrte Perspektive der Sitzung (null = noch nicht gesperrt)
+         * @param detectedPerspective die im aktuellen Frame erkannte Perspektive
+         * @param occupiedCount Anzahl der belegten Felder im aktuellen Frame
+         * @param medianSim Median der Template-Ähnlichkeit im aktuellen Frame
+         * @param perspectiveConfidence Confidence der Perspektiverkennung aus detectPerspective in [0..1]
+         * @return die aktualisierte Sperre (null = Confidence reicht noch nicht zum Sperren)
          */
         fun resolvePerspectiveLock(
             currentLock: Boolean?,
             detectedPerspective: Boolean,
             occupiedCount: Int,
-            medianSim: Float
+            medianSim: Float,
+            perspectiveConfidence: Float = 1.0f
         ): Boolean? {
-            // 1. 开新局场景：占位棋子 >= 26 颗且置信度高，强制重新校准并锁定为新局视角
-            if (occupiedCount >= 26 && medianSim >= 0.60f) {
+            // 1. Neue Partie: ab 26 belegten Feldern und hoher Confidence wird die Perspektive zwangsweise neu kalibriert und gesperrt.
+            // Die Perspektiv-Confidence muss dabei ebenfalls stimmen, sonst übernimmt eine Fehlerkennung
+            // die Sperre für die gesamte Partie und die App analysiert die Figuren des Gegners.
+            if (occupiedCount >= 26 && medianSim >= 0.60f && perspectiveConfidence >= 0.30f) {
                 return detectedPerspective
             }
 
-            // 2. 初始锁定：当前无锁时，需达到高置信度门槛 (occupied >= 16 或 medianSim >= 0.70f) 才可永久上锁
+            // 2. Erstsperre: ohne bestehende Sperre muss die Confidence-Hürde (occupied >= 16 oder medianSim >= 0.70f) genommen werden
             if (currentLock == null) {
-                return if (occupiedCount >= 16 || medianSim >= 0.70f) {
+                return if ((occupiedCount >= 16 || medianSim >= 0.70f) && perspectiveConfidence >= 0.20f) {
                     detectedPerspective
                 } else {
-                    null // 低于门槛暂不上锁，本次单帧按 detectedPerspective 消费
+                    null // Unterhalb der Hürde wird noch nicht gesperrt, dieser Frame nutzt einmalig detectedPerspective
                 }
             }
 
-            // 3. 中残局场景：沿用已有锁定，防止底线出子/受攻导致视角误判翻转
+            // 3. Mittel-/Endspiel: bestehende Sperre beibehalten, damit Figurenentwicklung oder Angriff auf der Grundreihe die Perspektive nicht kippen lässt
             return currentLock
         }
     }

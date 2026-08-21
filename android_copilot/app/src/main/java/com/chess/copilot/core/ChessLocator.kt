@@ -9,24 +9,24 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * 自研高精度 2D 棋盘自适应定位器 (Fast Integral-SAT + GridLine Direct Calibration Locator)
+ * Eigenentwickelter, hochgenauer adaptiver 2D-Brettlokalisator (Fast Integral-SAT + GridLine Direct Calibration Locator)
  *
- * 架构设计 (重构方案: 格线直测定位重构):
- * 1. 粗搜索阶段 (Coarse Locator): 放宽 maxSize 上界至 sW (400px)，x 自由搜索 (不加居中偏置)，提取 top-N 候选近似框
- * 2. 精标定阶段 (Fine Grid Calibrate):
- *    契约: 粗扫在 400 空间提速, 精标定在原图全分辨率空间运行 (与 Python 对偶
- *    原型 grid_calibrate.py 同空间), 保证 RESIDUAL_GATE/SNAP_PX 等 px 级门禁语义一致。
- *    - 横向: 6行带跨带中值剖面 + 梳状波长高斯先验 + 2遍等差拟合 (x_i = x0 + i*step) + 满宽 <=2px 吸附
- *    - 纵向: 上下框行均值剖面强边 + 双侧低方差双重门禁主锚 (方约束配对 + 贴近粗框平局裁决 + 内部横线交叉检验)
- *    - 纵向退化: 内部 7 条横分割线行剖面等差拟合 + 3点平滑75分位峰检 + 相位多档试探 + 外边界强边一致性校验与边缘吸附
- *    - 横纵交替: 纵向收敛后以精标定窗口重跑横向精修，彻底剥离带外立绘/按钮杂波
- * 3. 候选选优与置信度契约: RefineResult(rect, confidence, residual, isCropped)，支持 top-N 独立精标定与候选救援
+ * Aufbau (Umbau: direkte Vermessung der Gitterlinien):
+ * 1. Grobsuche (Coarse Locator): obere Größengrenze bis sW (400px) gelockert, x wird frei durchsucht (ohne Zentrierbonus), liefert die besten N Näherungsrahmen
+ * 2. Feinkalibrierung (Fine Grid Calibrate):
+ *    Vereinbarung: die Grobsuche läuft im 400er-Raum, die Feinkalibrierung dagegen in voller Bildauflösung
+ *    (im selben Raum wie der Python-Prototyp grid_calibrate.py), damit die Pixelschwellen RESIDUAL_GATE/SNAP_PX dieselbe Bedeutung behalten.
+ *    - Waagerecht: Medianprofil über 6 Zeilenbänder + Gauß-Prior auf die Kammwellenlänge + zweifache arithmetische Ausgleichsrechnung (x_i = x0 + i*step) + Vollbreiten-Einrastung bis 2px
+ *    - Senkrecht: starke Kanten im Zeilenmittelprofil von Ober- und Unterkante + doppeltes Gatter aus beidseitig niedriger Varianz (Quadratbedingung, Stichentscheid über die Nähe zum Grobrahmen, Kreuzprüfung mit den inneren Linien)
+ *    - Senkrechter Rückfallpfad: arithmetische Ausgleichsrechnung über die 7 inneren Trennlinien + Peaksuche mit 3-Punkt-Glättung und 75-Perzentil + Phasensuche in Stufen + Konsistenzprüfung der Außenkanten samt Einrastung
+ *    - Abwechselnd waagerecht/senkrecht: nach der senkrechten Konvergenz läuft die waagerechte Feinkalibrierung im neuen Fenster erneut, das entfernt Grafiken und Schaltflächen ausserhalb des Bretts
+ * 3. Auswahl der Kandidaten und Confidence-Vereinbarung: RefineResult(rect, confidence, residual, isCropped), erlaubt getrennte Feinkalibrierung der besten N Kandidaten und die Rettung über den Zweitkandidaten
  */
 object ChessLocator {
 
-    private const val RELATIVE_RESIDUAL_GATE_RATIO = 0.05f // 5% 单格宽度相对拟合残差门禁 (全分辨率尺度自适应)
-    private const val RELATIVE_SQUARE_GATE_RATIO = 0.015f   // 1.5% 棋盘尺寸方约束门禁 (最低 4.0px)
-    private const val RELATIVE_SNAP_RATIO = 0.005f          // 0.5% 屏幕宽度满宽吸附门禁 (最低 2.0px)
+    private const val RELATIVE_RESIDUAL_GATE_RATIO = 0.05f // Gatter für das Residuum: 5 % der Feldbreite (skaliert mit der Auflösung)
+    private const val RELATIVE_SQUARE_GATE_RATIO = 0.015f   // Gatter der Quadratbedingung: 1.5 % der Brettgröße (mindestens 4.0px)
+    private const val RELATIVE_SNAP_RATIO = 0.005f          // Gatter der Vollbreiten-Einrastung: 0.5 % der Bildschirmbreite (mindestens 2.0px)
     private const val MIN_LINES = 5
     private const val OUTLIER_FRAC = 0.25f
     private const val WAVE_GATE = 0.015f
@@ -35,12 +35,12 @@ object ChessLocator {
     private const val BAR_GRAD_MIN = 3.0f
 
     /**
-     * 定位结果带置信等级、拟合残差与裁剪越界识别:
-     * @param rect 棋盘在原图坐标系下的矩形区域 (可能含越界负坐标)
-     * @param score 粗定位响应分 (用于同置信度下的细分排序)
-     * @param confidence 精标定置信等级: "high" (双轴均过门禁且未越界), "medium" (单轴精标定/退化通过/裁剪识别), "low" (退化失败保持粗框)
-     * @param residual 拟合残差 (像素)
-     * @param isCropped 是否为负边距裁剪帧 (rect 越出图像边界)
+     * Ergebnis der Lokalisierung mit Confidence-Stufe, Residuum und Erkennung zugeschnittener Frames:
+     * @param rect Bereich des Bretts im Koordinatensystem des Originalbildes (kann negative Koordinaten enthalten)
+     * @param score Antwortwert der Grobsuche (feinere Sortierung innerhalb derselben Confidence-Stufe)
+     * @param confidence Stufe der Feinkalibrierung: "high" (beide Achsen durch das Gatter, kein Überlauf), "medium" (nur eine Achse, Rückfallpfad oder zugeschnittener Frame), "low" (Rückfall gescheitert, es bleibt beim Grobrahmen)
+     * @param residual Residuum der Ausgleichsrechnung in Pixeln
+     * @param isCropped Frame mit negativem Rand, das Rect liegt teilweise ausserhalb des Bildes
      */
     data class LocateResult(
         val rect: Rect,
@@ -55,13 +55,13 @@ object ChessLocator {
     }
 
     /**
-     * 返回按综合置信度与响应分降序的 top-N 候选框 (支持候选救援链路)
+     * Liefert die besten N Rahmen, sortiert nach Confidence und Antwortwert (Grundlage der Kandidatenrettung)
      */
     fun locateTopCandidates(bitmap: Bitmap, maxCount: Int): List<LocateResult> {
         val width = bitmap.width
         val height = bitmap.height
 
-        // 1. 降采样到统一尺度 (宽度 400px)，保证跨设备尺度不变性与毫秒级计算
+        // 1. Auf eine einheitliche Breite von 400px verkleinern: geräteunabhängig und in Millisekunden zu rechnen
         val scale = 400.0f / width
         val sW = 400
         val sH = (height * scale).toInt()
@@ -78,7 +78,7 @@ object ChessLocator {
             scaledBmp.recycle()
         }
 
-        // 2. 提取灰度与 Sobel 水平+垂直梯度 (|gx| + |gy|)
+        // 2. Graustufen sowie waagerechten und senkrechten Sobel-Gradienten bestimmen (|gx| + |gy|)
         val gray = FloatArray(sW * sH)
         for (i in pixels.indices) {
             val p = pixels[i]
@@ -109,7 +109,7 @@ object ChessLocator {
             }
         }
 
-        // 3. 构建灰度与梯度的双积分图 (SAT)
+        // 3. Integralbilder (SAT) für Graustufen und Gradient aufbauen
         val satGray = DoubleArray((sW + 1) * (sH + 1))
         val satMag = DoubleArray((sW + 1) * (sH + 1))
         val satStride = sW + 1
@@ -145,7 +145,7 @@ object ChessLocator {
             return (rectSum(sat, x1, y1, x2, y2) / (w * h)).toFloat()
         }
 
-        // 4. 8x8 交替棋盘黑白模式
+        // 4. Abwechselndes 8x8-Schachbrettmuster
         val pattern = FloatArray(64) { idx ->
             val r = idx / 8
             val c = idx % 8
@@ -155,7 +155,7 @@ object ChessLocator {
         fun evaluateBox(x: Int, y: Int, size: Int): Float {
             val step = size / 8.0f
 
-            // 【重构核心：引入网格能量平衡验证，杜绝单向条纹(墓地UI等)误报】
+            // Kern des Umbaus: Prüfung der Energiebalance des Gitters, damit einseitige Streifenmuster (etwa die Figurenablage der Oberfläche) nicht mehr als Brett gelten
             var hEdgeScore = 0.0f
             var vEdgeScore = 0.0f
             for (i in 1..7) {
@@ -165,15 +165,15 @@ object ChessLocator {
                 vEdgeScore += rectMean(satMag, lx - 1, y, lx + 2, y + size)
             }
             
-            // 墓地 UI 有强烈的水平边缘，但缺乏等距垂直交叉边缘
+            // Die Figurenablage hat starke waagerechte Kanten, aber keine gleichmäßig verteilten senkrechten Kanten
             val minEdge = min(hEdgeScore, vEdgeScore)
             val maxEdge = max(hEdgeScore, vEdgeScore)
-            val edgeBalance = minEdge / max(1e-5f, maxEdge) // 真实棋盘此值应接近 1.0
+            val edgeBalance = minEdge / max(1e-5f, maxEdge) // bei einem echten Brett liegt dieser Wert nahe 1.0
             
-            // 能量乘上平衡系数，单向强边的假框得分将崩塌至十分之一
+            // Die Energie wird mit der Balance multipliziert: der Wert eines einseitig starken Rahmens bricht auf ein Zehntel ein
             val balancedEdgeScore = (hEdgeScore + vEdgeScore) * edgeBalance
 
-            // (2) 8x8 格子 4 角采样（18% 边角）避开棋子中心
+            // (2) Abtastung der 4 Ecken jedes der 8x8 Felder (18 % Randbereich), das spart die Figur in der Feldmitte aus
             val gridMeans = FloatArray(64)
             val cornerW = max(1, (step * 0.18f).toInt())
             var gridSum = 0.0f
@@ -203,22 +203,22 @@ object ChessLocator {
             }
             val corr = abs(corrSum)
 
-            // (3) 多邻国垂直合理性先验 (底部比例在 60%~99% 之间)
+            // Plausibilitätsannahme zur senkrechten Lage in Duolingo (Unterkante zwischen 60 % und 99 %)
             val bottomRatio = (y + size).toFloat() / sH.toFloat()
-            // 【修改】稍稍放宽先验限制，让十字网格算法自己去战斗
+            // Die Annahme ist bewusst locker gehalten, die Entscheidung fällt im Gitteralgorithmus
             val posPrior = if (bottomRatio in 0.55f..0.99f) 1.0f else 0.35f
 
-            // 【修改】增大 8x8 交替模式特征权重，结合平衡边缘得分
+            // Das Gewicht des 8x8-Musters ist erhöht und mit der Kantenbalance verrechnet
             return (corr * 2.5f + balancedEdgeScore * 0.5f) * posPrior
         }
 
-        // 5. 阶段一：粗扫 (step=4)，尺寸上界放宽至 sW (400px)，横向自由搜索 (全区间 [0, sW-size]，不预设居中)
+        // 5. Stufe 1: Grobsuche (step=4), Größe bis sW (400px), x frei über das gesamte Intervall [0, sW-size] ohne Zentrierannahme
         val minSize = (0.60f * sW).toInt()
         val maxSize = sW
         val topEntries = ArrayList<Pair<Float, IntArray>>() // (score, [x,y,size])
 
         fun recordCandidate(score: Float, x: Int, y: Int, size: Int) {
-            val minSep = size * 0.12f // 峰间距去重
+            val minSep = size * 0.12f // Mindestabstand der Peaks für die Entdopplung
             val idx = topEntries.indexOfFirst { (_, e) ->
                 abs(e[0] - x) < minSep && abs(e[1] - y) < minSep && abs(e[2] - size) < minSep
             }
@@ -231,16 +231,16 @@ object ChessLocator {
             while (topEntries.size > maxCount + 4) topEntries.removeAt(topEntries.size - 1)
         }
 
-        // size 步长 8 对齐 Python 基准 (间隙由精修 ±5 窗覆盖);
-        // x/y 保留 step=4 降采样是 Kotlin 逐框 evaluateBox 的性能适配
-        // (Python 基准靠 numpy 向量化做全枚举), 真机耗时差异待阶段四遥测确认
+        // Schrittweite 8 für size entspricht dem Python-Referenzlauf (die Lücken deckt die Feinsuche mit +-5 ab);
+        // x/y bleiben bei step=4 im verkleinerten Bild, weil evaluateBox in Kotlin rahmenweise läuft
+        // (die Python-Referenz zählt dank numpy vektorisiert alles auf), die Laufzeit auf dem Gerät klärt die Telemetrie
         for (size in minSize..maxSize step 8) {
             val minY = (sH * 0.15f).toInt()
             val maxY = sH - size
 
-            // 彻底放开 x 搜索范围，支持带边距与任意偏置布局
+            // Der Suchbereich in x ist völlig offen, damit auch Layouts mit Rand oder Versatz getroffen werden
             for (x in 0..(sW - size) step 4) {
-                // y 上界不含 sH-size (对齐 Python 基准 n_y = s_h-size-y_min 的半开区间)
+                // Die obere Grenze in y schließt sH-size aus (wie das halboffene Intervall n_y = s_h-size-y_min der Python-Referenz)
                 for (y in minY until maxY step 4) {
                     val score = evaluateBox(x, y, size)
                     recordCandidate(score, x, y, size)
@@ -248,7 +248,7 @@ object ChessLocator {
             }
         }
 
-        // 6. 粗候选精修 (在各候选附近 ±5 像素做 step=1 搜索, size 窗 ±5 对齐 Python 基准)
+        // 6. Feinsuche um die Grobkandidaten (+-5 Pixel mit step=1, Größenfenster +-5 wie in der Python-Referenz)
         val initialCandidates = ArrayList<Pair<Float, IntArray>>()
         for (cand in topEntries.take(maxCount + 2)) {
             val (cScore, box) = cand
@@ -272,12 +272,12 @@ object ChessLocator {
             initialCandidates.add(Pair(bestScore, intArrayOf(bestX, bestY, bestSize)))
         }
 
-        // 7. 精标定: 对 top-N 候选逐个独立进行格线剖面等差精修。
-        // 关键契约: refine 必须在原图全分辨率空间运行 (Python 对偶原型即全分辨率),
-        // 粗扫留在 400 空间只为提速。曾在 400 空间跑 refine 导致所有 px 级门禁
-        // (RESIDUAL_GATE/SNAP_PX/离群容差) 相对原图放宽 ~3.15 倍 + 峰位量化 3px,
-        // 气泡遮挡帧上幻影框低残差通过门禁反超真框 (Screenshot_20260818_225702 事故,
-        // 真机错框 L=-56,T=284,size=1266, Python 400 空间模拟同型幻影复现钉死根因)。
+        // 7. Feinkalibrierung: jeder der besten N Kandidaten wird einzeln über die Gitterlinienprofile arithmetisch nachgezogen.
+        // Entscheidende Vereinbarung: refine muss in voller Bildauflösung laufen (der Python-Prototyp tut das ebenfalls),
+        // die Grobsuche bleibt nur aus Geschwindigkeitsgründen im 400er-Raum. Lief refine dort, waren alle Pixelschwellen
+        // (RESIDUAL_GATE/SNAP_PX/Ausreißertoleranz) gegenüber dem Originalbild um etwa das 3.15-fache gelockert, dazu kam eine Peak-Quantisierung von 3px:
+        // auf einem von der Blase verdeckten Frame kam ein Phantomrahmen mit kleinem Residuum durch das Gatter und schlug den echten Rahmen
+        // (Vorfall Screenshot_20260818_225702, falscher Rahmen L=-56,T=284,size=1266; im 400er-Raum ließ sich derselbe Phantomrahmen in Python nachstellen).
         val fullGray = FloatArray(width * height)
         val fullPixels = IntArray(width * height)
         bitmap.getPixels(fullPixels, 0, width, 0, 0, width, height)
@@ -293,13 +293,13 @@ object ChessLocator {
         val refinedResults = ArrayList<LocateResult>()
 
         for ((score, coarseBox) in initialCandidates) {
-            // 粗候选映射回原图坐标后做全分辨率精修 (结果已在原图空间, 无需二次换算)
+            // Der Grobkandidat wird in Originalkoordinaten umgerechnet und dort fein nachgezogen (das Ergebnis liegt bereits im Originalraum)
             val ox = (coarseBox[0] * invScale).roundToInt()
             val oy = (coarseBox[1] * invScale).roundToInt()
             val oSize = (coarseBox[2] * invScale).roundToInt()
             val calibrated = refineByGridLines(fullGray, width, height, ox, oy, oSize)
 
-            // 满宽吸附: 与屏宽偏差 <= 0.5% (最低 2px) 时对齐为 0 和 width
+            // Vollbreiten-Einrastung: weicht der Rahmen um höchstens 0.5 % (mindestens 2px) von der Bildschirmbreite ab, wird er auf 0 und width gesetzt
             var origX = calibrated.x0.roundToInt()
             var origSize = calibrated.size.roundToInt()
             val origY = calibrated.y0.roundToInt()
@@ -309,7 +309,7 @@ object ChessLocator {
                 origSize = width
             }
 
-            // 裁剪识别契约: 不强制 clamp 破坏越界真值，而是识别并做标志与置信度降级
+            // Umgang mit zugeschnittenen Frames: der Überlauf wird nicht per clamp verfälscht, sondern gekennzeichnet und die Confidence herabgestuft
             val isCropped = origX < 0 || origY < 0 || (origX + origSize) > width || (origY + origSize) > height
             val finalConf = if (isCropped && calibrated.confidence == "high") "medium" else calibrated.confidence
 
@@ -324,7 +324,7 @@ object ChessLocator {
             )
         }
 
-        // 8. 综合排序: 置信度等级 > 综合共识得分 (全局粗评分 + 全行交替度奖励 + 满宽优先 - 残差惩罚)
+        // 8. Sortierung: zuerst die Confidence-Stufe, dann der Gesamtwert (Grobwertung + Bonus für durchgehende Abwechslung + Vorzug für volle Breite - Abzug für das Residuum)
         fun confRank(c: String): Int = when (c) {
             "high" -> 2
             "medium" -> 1
@@ -359,7 +359,7 @@ object ChessLocator {
     }
 
     // =========================================================================
-    // 阶段二: 格线直测精标定核心算子 (Kotlin 直译对偶实现)
+    // Stufe 2: Kern der direkten Gitterlinienvermessung (Kotlin-Umsetzung des Python-Prototyps)
     // =========================================================================
 
     internal data class CalibratedBox(
@@ -379,7 +379,7 @@ object ChessLocator {
     )
 
     /**
-     * 多遍等差拟合: 索引分配 -> 最小二乘拟合 -> 剔除离群峰 -> 重拟合
+     * Mehrfache arithmetische Ausgleichsrechnung: Indizes zuordnen -> Ausgleich nach kleinsten Quadraten -> Ausreißer entfernen -> erneut ausgleichen
      */
     private fun fitArithmetic(points: List<Pair<Int, Float>>): Triple<Float, Float, Float> {
         var sumX = 0.0
@@ -437,7 +437,7 @@ object ChessLocator {
         var (p0_2, step_2, resid_2) = fitArithmetic(cand2)
         var finalCand = cand2
 
-        // 第三遍: 残差超门禁时剔除残差最大点 (孤立伪线)
+        // Dritter Durchgang: liegt das Residuum über dem Gatter, wird der Punkt mit dem größten Residuum entfernt (eine einzelne Störlinie)
         if (resid_2 > maxAllowedResid && cand2.size > MIN_LINES) {
             var worstIdx = 0
             var worstResid = -1f
@@ -463,7 +463,7 @@ object ChessLocator {
     }
 
     /**
-     * 横向梳状谐振定标: 6行带跨带中值剖面 + 2遍等差拟合 + 满宽吸附
+     * Waagerechte Kalibrierung über die Kammresonanz: Medianprofil über 6 Zeilenbänder + zweifache arithmetische Ausgleichsrechnung + Vollbreiten-Einrastung
      */
     private fun refineHorizontal(
         gray: FloatArray, sW: Int, sH: Int,
@@ -473,7 +473,7 @@ object ChessLocator {
         val y2 = min(sH, (y0c + sizec + 0.05f * sizec).toInt())
         val bandH = max(1, (y2 - y1) / 8)
 
-        // 提取 6 个中央行带的垂直梯度 Sobel gx 均值剖面
+        // Mittelwertprofil des senkrechten Sobel-Gradienten gx aus 6 mittleren Zeilenbändern
         val bandProfiles = Array(6) { FloatArray(sW) }
         for (b in 0 until 6) {
             val byStart = y1 + (b + 1) * bandH
@@ -497,7 +497,7 @@ object ChessLocator {
                 max(bandProfiles[b][xi - 1], max(bandProfiles[b][xi], bandProfiles[b][xi + 1]))
             }
             vals.sort()
-            return (vals[2] + vals[3]) * 0.5f // 6 带中值
+            return (vals[2] + vals[3]) * 0.5f // Median der 6 Bänder
         }
 
         fun combScore(size: Float, x0: Float): Float {
@@ -511,8 +511,8 @@ object ChessLocator {
             return sc
         }
 
-        // 尺寸与相位扫描 (尺寸步长 0.25px 对齐 Python 基准 np.arange(s_lo, s_hi+0.25, 0.25);
-        // 计数器驱动避免浮点累加漂移)
+        // Suche über Größe und Phase (Schrittweite 0.25px wie np.arange(s_lo, s_hi+0.25, 0.25) der Python-Referenz;
+        // über einen Zähler gesteuert, damit sich keine Gleitkommafehler aufaddieren)
         val sLo = max(8f, sizec * 0.88f)
         val sHi = min(sW.toFloat(), sizec * 1.14f)
         var bestSc = -1f
@@ -538,7 +538,7 @@ object ChessLocator {
             kS++
         }
 
-        // 谐振最优相位附近峰检与两遍等差拟合
+        // Peaksuche nahe der besten Resonanzphase und zweifache arithmetische Ausgleichsrechnung
         val medProf = FloatArray(sW)
         val tmpVals = FloatArray(6)
         for (x in 0 until sW) {
@@ -573,7 +573,7 @@ object ChessLocator {
         var outSize = if (fit.isOk) fit.step * 8.0f else bestSize
         val residual = if (fit.isOk) fit.residual else 99f
 
-        // 满宽吸附: 偏差 <= 0.5% (最低 2px)
+        // Vollbreiten-Einrastung: Abweichung höchstens 0.5 % (mindestens 2px)
         val snapPx = max(2.0f, sW * RELATIVE_SNAP_RATIO)
         if (abs(outX0) <= snapPx && abs(outSize - sW) <= snapPx) {
             outX0 = 0f
@@ -584,7 +584,7 @@ object ChessLocator {
     }
 
     /**
-     * 纵向上下框主锚检测: 行均值剖面强边 + 双侧低方差双重门禁 + 贴近粗框平局裁决
+     * Hauptanker für Ober- und Unterkante: starke Kanten im Zeilenmittelprofil + doppeltes Gatter aus beidseitig niedriger Varianz + Stichentscheid über die Nähe zum Grobrahmen
      */
     private fun findVerticalBarAnchors(
         gray: FloatArray, sW: Int, sH: Int,
@@ -630,7 +630,7 @@ object ChessLocator {
                 if (g[y] < BAR_GRAD_MIN) continue
                 if (!(g[y] >= g[y - 1] && g[y] >= g[min(sH - 1, y + 1)])) continue
 
-                // 边界双侧均查 (对齐 Python 基准): 任一侧行数 >= 3 且平均 std < 16.0 即可
+                // Beide Seiten der Grenze werden geprüft (wie in der Python-Referenz): auf einer Seite genügen 3 Zeilen mit mittlerer std < 16.0
                 val bandA = if (isTop) max(0, y - 4) until y else max(0, y - 3) until min(sH, y + 1)
                 val bandB = (y + 1) until min(sH, y + 5)
 
@@ -655,7 +655,7 @@ object ChessLocator {
         val tops = findCandidates(tLo, tHi, true)
         val bots = findCandidates(bLo, bHi, false)
 
-        // 收集所有满足方约束的配对并按 (dev, 贴近粗框距离) 选优 (对齐 Python 平局裁决)
+        // Alle Paare sammeln, die die Quadratbedingung erfüllen, und nach (Abweichung, Nähe zum Grobrahmen) auswählen (Stichentscheid wie in Python)
         val squareGate = max(4.0f, expectedSize * RELATIVE_SQUARE_GATE_RATIO)
         val ties = ArrayList<Triple<Int, Int, Float>>()
         for (t in tops) {
@@ -678,14 +678,14 @@ object ChessLocator {
     }
 
     /**
-     * 1D 剖面峰检 (3 点平滑 + 75 分位自适应阈值 + 间距抑制，完全对齐 Python _detect_peaks)
+     * Peaksuche in einem 1D-Profil (3-Punkt-Glättung + adaptive Schwelle am 75-Perzentil + Abstandsunterdrückung, deckungsgleich mit Python _detect_peaks)
      */
     private fun detectPeaks1D(prof: FloatArray, minSep: Float, thrFloor: Float = 1.5f, pct: Float = 0.75f): List<Float> {
         if (prof.size < 3) return emptyList()
         val n = prof.size - 1
         val rawDiff = FloatArray(n) { i -> abs(prof[i + 1] - prof[i]) }
 
-        // 3 点卷积平滑 np.convolve(g, [1,1,1]/3, mode='same')
+        // Glättung über 3 Punkte, entspricht np.convolve(g, [1,1,1]/3, mode='same')
         val gSmooth = FloatArray(n)
         for (i in 0 until n) {
             val vPrev = if (i > 0) rawDiff[i - 1] else 0f
@@ -695,12 +695,12 @@ object ChessLocator {
             gSmooth[i] = (vPrev + vCurr + vNext) / count.toFloat()
         }
 
-        // 75 分位数阈值
+        // Schwelle am 75-Perzentil
         val sortedG = gSmooth.clone().apply { sort() }
         val pIdx = (sortedG.size * pct).toInt().coerceIn(0, sortedG.size - 1)
         val thr = max(thrFloor, sortedG[pIdx])
 
-        // 局部极大值筛选
+        // Lokale Maxima auswählen
         val cand = ArrayList<Pair<Float, Int>>() // (amp, idx)
         for (i in 1 until n - 1) {
             if (gSmooth[i] >= thr && gSmooth[i] >= gSmooth[i - 1] && gSmooth[i] > gSmooth[i + 1]) {
@@ -709,7 +709,7 @@ object ChessLocator {
         }
         cand.sortByDescending { it.first }
 
-        // 最小间距非极大值抑制
+        // Nichtmaximum-Unterdrückung über den Mindestabstand
         val keep = ArrayList<Int>()
         for ((_, idx) in cand) {
             if (keep.none { abs(it - idx) < minSep }) {
@@ -721,7 +721,7 @@ object ChessLocator {
     }
 
     /**
-     * 内部横分割线行剖面拟合 (对齐 Python _fit_horizontal_lines)
+     * Ausgleichsrechnung über die inneren waagerechten Trennlinien (entspricht Python _fit_horizontal_lines)
      */
     private fun fitHorizontalLines(
         gray: FloatArray, sW: Int, sH: Int,
@@ -747,14 +747,14 @@ object ChessLocator {
                 prof[y - yLo] = sum / width
             }
 
-            // 采用 3 点平滑 + 75 分位自适应峰检
+            // Mit 3-Punkt-Glättung und adaptiver Schwelle am 75-Perzentil
             val peaks = detectPeaks1D(prof, minSep = 0.5f * sEst, thrFloor = 1.5f, pct = 0.75f)
             for (p in peaks) {
                 rawPeaks.add(p + yLo)
             }
         }
 
-        // 跨列带聚类 (对齐 Python _cluster_lines)
+        // Clustern über die Spaltenbänder hinweg (entspricht Python _cluster_lines)
         rawPeaks.sort()
         val clustered = ArrayList<Float>()
         if (rawPeaks.isNotEmpty()) {
@@ -780,7 +780,7 @@ object ChessLocator {
     }
 
     /**
-     * 外边界强边能量检测 (返回 (topEdge, bottomEdge, yTopEdge, yBottomEdge))
+     * Energie der starken Außenkanten bestimmen (liefert (topEdge, bottomEdge, yTopEdge, yBottomEdge))
      */
     private fun outerEdgeScore(
         gray: FloatArray, sW: Int, sH: Int,
@@ -792,15 +792,15 @@ object ChessLocator {
 
         fun localMax(yTarget: Float): Pair<Float, Int> {
             val yc = yTarget.roundToInt()
-            // Sobel gy (ksize=3) 仅在内部行 [1, sH-2] 有效，搜索窗限制在内
+            // Sobel gy (ksize=3) ist nur auf den inneren Zeilen [1, sH-2] gültig, das Suchfenster bleibt darin
             val lo = max(1, yc - 5)
             val hi = min(sH - 1, yc + 6)
             var maxG = 0f
             var bestY = yc
             for (y in lo until hi) {
-                // Sobel gy 3x3: |(y+1 行 [1,2,1] 卷积) - (y-1 行 [1,2,1] 卷积)|，
-                // 对齐 Python _outer_edge_score 的 cv2.Sobel(gray, 0, 1) 量纲
-                // (边界列按反射延拓, 等价 BORDER_DEFAULT)
+                // Sobel gy 3x3: |Faltung [1,2,1] der Zeile y+1 minus Faltung [1,2,1] der Zeile y-1|,
+                // dimensionsgleich mit cv2.Sobel(gray, 0, 1) in Python _outer_edge_score
+                // (die Randspalten werden gespiegelt fortgesetzt, entspricht BORDER_DEFAULT)
                 var sum = 0f
                 val prevOff = (y - 1) * sW
                 val nextOff = (y + 1) * sW
@@ -826,20 +826,20 @@ object ChessLocator {
     }
 
     /**
-     * 格线精标定主入口 (400 宽空间)
+     * Haupteinstieg der Gitter-Feinkalibrierung (im 400px breiten Raum)
      */
     internal fun refineByGridLines(
         gray: FloatArray, sW: Int, sH: Int,
         x0c: Int, y0c: Int, sizec: Int
     ): CalibratedBox {
-        // 1. 横向精修
+        // 1. Waagerechte Feinkalibrierung
         val (hOk, hParams) = refineHorizontal(gray, sW, sH, x0c, y0c, sizec)
         var x0 = hParams[0]
         var size = hParams[1]
         val hResid = hParams[2]
         val sizeV = if (hOk) size else hParams[3]
 
-        // 2. 纵向精修: 上下框主锚 + 环形交替度双重验证 (对齐 duolingo-pgn-export 环形采样算法)
+        // 2. Senkrechte Feinkalibrierung: Hauptanker der Außenkanten + Prüfung der Abwechslung per Ringabtastung (Algorithmus aus duolingo-pgn-export)
         var y0 = y0c.toFloat()
         var vPath = "coarse"
         var vResid = 99f
@@ -850,7 +850,7 @@ object ChessLocator {
             val altRes = computeRingAlternationDetailed(gray, sW, sH, x0, barsY0, size)
             val devOk = bars.third <= max(4.0f, size * RELATIVE_SQUARE_GATE_RATIO)
             
-            // 多证据主路径：物理外框几何闭环 (devOk) + 64 格环形采样交替度全行通过 (真棋盘标志)
+            // Hauptpfad mit mehreren Belegen: geometrisch geschlossener Außenrahmen (devOk) und in allen Reihen bestandene Ringabtastung der 64 Felder (Merkmal eines echten Bretts)
             if (devOk && altRes.allRowsPass) {
                 y0 = barsY0
                 vPath = "bars"
@@ -866,7 +866,7 @@ object ChessLocator {
             }
         }
 
-        // 3. 纵向退化路径: 多档严格邻域相位试探 (严格限制在 <= 0.5 格邻域，杜绝上下跨格越狱) + 全行交替度门禁
+        // 3. Senkrechter Rückfallpfad: streng begrenzte Phasensuche in der Nachbarschaft (höchstens ein halbes Feld, damit kein Feld übersprungen wird) samt Gatter auf durchgehende Abwechslung
         if (vPath == "coarse") {
             val sEst = sizeV / 8.0f
             var bestResid = 99f
@@ -882,9 +882,9 @@ object ChessLocator {
                     val yt = edges[2]
                     if (te >= BAR_GRAD_MIN && be >= BAR_GRAD_MIN) {
                         val candAlt = computeRingAlternationDetailed(gray, sW, sH, x0, yt, sizeV)
-                        // 必须满足 8x8 黑白格全行通过 (allRowsPass)，彻底杜绝跳入 UI 纯色/非棋盘区域
+                        // Alle 8 Reihen des Schachbrettmusters müssen bestehen (allRowsPass), damit kein einfarbiger Bereich der Oberfläche getroffen wird
                         if (candAlt.allRowsPass || (candAlt.totalScore >= 0.90f && candAlt.minRowScore >= 0.75f)) {
-                            // 距离惩罚项：优先选靠近粗定位中心的微调，防止远端伪谐振
+                            // Abstandsstrafe: bevorzugt wird die Feinjustierung nahe der Mitte des Grobrahmens, das verhindert entfernte Scheinresonanzen
                             val effectiveResid = hfit.residual + abs(k) * (sEst * 0.02f)
                             if (effectiveResid < bestResid) {
                                 bestResid = effectiveResid
@@ -903,7 +903,7 @@ object ChessLocator {
             }
         }
 
-        // 4. 横纵交替二次精修: 纵向收敛后重跑横向
+        // 4. Zweiter waagerechter Durchgang nach der senkrechten Konvergenz
         if (vPath != "coarse") {
             val (hOk2, hParams2) = refineHorizontal(gray, sW, sH, x0.roundToInt(), y0.roundToInt(), size.roundToInt())
             if (hOk2) {
@@ -912,7 +912,7 @@ object ChessLocator {
             }
         }
 
-        // 5. 综合置信度评定
+        // 5. Gesamtbewertung der Confidence
         val confidence = when {
             hOk && vPath == "bars" -> "high"
             hOk && vPath == "gridlines" -> "medium"
@@ -943,11 +943,11 @@ object ChessLocator {
     )
 
     /**
-     * 纯函数：环形采样 8x8 棋盘黑白格交替度与单行完整性计算 (对齐 2-Means 双模态聚类中点)
-     * 针对 64 个格子，在格子中心以 0.42 * cell_size 半径采样 8 个方向的环形点 (避开中心棋子)，
-     * 使用 2-Means 双模态聚类计算中点阈值 (支持深色/浅色所有模式)，并验证 8 个横行是否全部具备交替方格。
-     * - 真实棋盘 (浅色/深色)：totalScore >= 0.98, minRowScore >= 0.875, allRowsPass = true
-     * - 偏移 1~2 格的伪框：minRowScore <= 0.625 (溢出到非棋盘区域的行直接破防), allRowsPass = false
+     * Reine Funktion: berechnet über eine Ringabtastung die Abwechslung heller und dunkler Felder eines 8x8-Bretts sowie die Vollständigkeit jeder Reihe (Schwelle aus dem 2-Means-Mittelpunkt)
+     * Je Feld werden 8 Punkte auf einem Ring mit dem Radius 0.42 * cell_size um die Feldmitte abgetastet (die Figur in der Mitte bleibt ausgespart),
+     * die Schwelle ergibt sich als Mittelpunkt zweier Cluster (funktioniert in hellem wie dunklem Modus), und es wird geprüft, ob alle 8 Reihen abwechselnde Felder zeigen.
+     * - Echtes Brett (hell oder dunkel): totalScore >= 0.98, minRowScore >= 0.875, allRowsPass = true
+     * - Um 1 bis 2 Felder verschobener Scheinrahmen: minRowScore <= 0.625 (Reihen ausserhalb des Bretts fallen sofort durch), allRowsPass = false
      */
     fun computeRingAlternationDetailed(
         gray: FloatArray,
@@ -976,13 +976,13 @@ object ChessLocator {
                     ringSamples[a] = gray[py * width + px]
                 }
                 ringSamples.sort()
-                // 8 点排序取中位数 (第 3 和第 4 点均值)
+                // Median der 8 Punkte (Mittel aus drittem und viertem Wert)
                 val med = (ringSamples[3] + ringSamples[4]) * 0.5f
                 cellColors[r * 8 + c] = med
             }
         }
 
-        // 2-Means 双模态聚类中点阈值 (前 32 暗格与后 32 亮格中心求中点，完全消除深浅模式量化简并)
+        // Schwelle als Mittelpunkt zweier Cluster (Mitte der 32 dunklen und der 32 hellen Felder), unabhängig von heller oder dunkler Darstellung
         val sortedCols = cellColors.clone().apply { sort() }
         var sumDark = 0f
         var sumLight = 0f
@@ -992,7 +992,7 @@ object ChessLocator {
         val cLight = sumLight / 32f
         val thr = (cDark + cLight) * 0.5f
 
-        // 计算奇偶模式对齐度
+        // Übereinstimmung mit dem Schachbrettmuster berechnen
         var p0 = 0
         var p1 = 0
         val isLight = BooleanArray(64)
@@ -1035,7 +1035,7 @@ object ChessLocator {
     }
 
     /**
-     * 退化路径相位试探步长因子列表 (严格限制在 [-0.5, 0.5] 范围内)
+     * Liste der Phasenschrittfaktoren des Rückfallpfades (streng auf [-0.5, 0.5] begrenzt)
      */
     fun getDegeneratePhaseSteps(): FloatArray {
         return floatArrayOf(0f, -0.15f, 0.15f, -0.30f, 0.30f, -0.45f, 0.45f)

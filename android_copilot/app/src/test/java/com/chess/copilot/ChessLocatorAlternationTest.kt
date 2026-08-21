@@ -11,14 +11,14 @@ import kotlin.math.sin
 class ChessLocatorAlternationTest {
 
     /**
-     * 生成一个合成的标准 8x8 棋盘灰度图 (64 格明暗交替)
-     * 每个格子内中心放置一个干扰物体 (模拟中心棋子)，验证环形采样能否成功避开中心干扰
+     * Erzeugt ein synthetisches 8x8-Standardbrett als Graustufenbild (64 abwechselnd helle und dunkle Felder)
+     * In jedem Feld liegt mittig ein Störobjekt (simulierte Figur), um zu prüfen, ob die Ringabtastung die Feldmitte zuverlässig ausspart
      */
     private fun generateSyntheticBoardWithPieces(
         boardSize: Int = 800,
         lightVal: Float = 240f,
         darkVal: Float = 180f,
-        pieceVal: Float = 50f // 深色棋子位于中心
+        pieceVal: Float = 50f // dunkle Figur in der Feldmitte
     ): Pair<FloatArray, Int> {
         val w = boardSize
         val h = boardSize
@@ -31,7 +31,7 @@ class ChessLocatorAlternationTest {
                 val bg = if (isLight) lightVal else darkVal
                 val cx = (c + 0.5f) * cs
                 val cy = (r + 0.5f) * cs
-                val pieceRadius = cs * 0.25f // 棋子占中心 25% 半径
+                val pieceRadius = cs * 0.25f // die Figur belegt 25 % des Feldradius
 
                 val x1 = (c * cs).toInt()
                 val x2 = ((c + 1) * cs).toInt()
@@ -55,29 +55,29 @@ class ChessLocatorAlternationTest {
     fun testRingAlternation_syntheticBoardWithPieces_scoresOneHundredPercent() {
         val (gray, size) = generateSyntheticBoardWithPieces(boardSize = 800)
         val score = ChessLocator.computeRingAlternationScore(gray, size, size, 0f, 0f, size.toFloat())
-        // 环形采样避开中心后，得分应为 1.0 (64/64 全中)
+        // Da die Ringabtastung die Mitte ausspart, muss der Score 1.0 betragen (64 von 64 Treffern)
         assertEquals(1.0f, score, 0.001f)
     }
 
     @Test
     fun testRingAlternation_shiftedBox_scoreCollapses() {
-        // 创建一个顶部/底部有白色背景的大图 (1200 高度, 棋盘在 y=200..1000)
+        // Großes Bild mit weißem Hintergrund oben und unten (Höhe 1200, Brett bei y=200..1000)
         val w = 800
         val h = 1200
-        val fullGray = FloatArray(w * h) { 255f } // 全白背景
+        val fullGray = FloatArray(w * h) { 255f } // komplett weißer Hintergrund
         val (boardGray, boardSize) = generateSyntheticBoardWithPieces(boardSize = 800)
 
-        // 嵌入棋盘到 y=200
+        // Brett bei y=200 einbetten
         val boardY = 200
         for (y in 0 until boardSize) {
             System.arraycopy(boardGray, y * w, fullGray, (y + boardY) * w, w)
         }
 
-        // 1. 真棋盘位置 (y=200) 得分应接近 1.0
+        // 1. An der echten Brettposition (y=200) muss der Score nahe 1.0 liegen
         val trueScore = ChessLocator.computeRingAlternationScore(fullGray, w, h, 0f, boardY.toFloat(), boardSize.toFloat())
         assertEquals(1.0f, trueScore, 0.001f)
 
-        // 2. 偏移 2 格的位置 (y=200 + 200 = 400)，底部 2 格落在白背景上，allRowsPass 必须为 false 且 minRowScore <= 0.65
+        // 2. Um 2 Felder verschoben (y=200 + 200 = 400) liegen die unteren 2 Reihen auf dem weißen Hintergrund: allRowsPass muss false und minRowScore <= 0.65 sein
         val shiftedRes = ChessLocator.computeRingAlternationDetailed(fullGray, w, h, 0f, (boardY + 200).toFloat(), boardSize.toFloat())
         assertFalse("Shifted box must fail allRowsPass", shiftedRes.allRowsPass)
         assertTrue("Shifted box minRowScore must be <= 0.65, but was ${shiftedRes.minRowScore}", shiftedRes.minRowScore <= 0.65f)
@@ -85,7 +85,7 @@ class ChessLocatorAlternationTest {
 
     @Test
     fun testPhaseSearchStep_isStrictlyBounded() {
-        // 验证退化路径的试探步长范围严格限制在 [-0.5, 0.5]
+        // Die Schrittweite des Rückfallpfades muss strikt auf [-0.5, 0.5] begrenzt bleiben
         val steps = ChessLocator.getDegeneratePhaseSteps()
         assertTrue("Max step must be <= 0.6", steps.maxOrNull()!! <= 0.6f)
         assertTrue("Min step must be >= -0.6", steps.minOrNull()!! >= -0.6f)

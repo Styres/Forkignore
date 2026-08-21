@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.provider.Settings
 import android.widget.Button
 import android.widget.TextView
+import android.widget.ToggleButton
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -34,27 +35,30 @@ import java.util.Locale
 import java.util.regex.Pattern
 
 /**
- * 主控制台与诊断界面
- * 支持 Android 14 规范的 MediaProjection 授权申请与本地截图离线诊断
+ * Hauptbildschirm mit Steuerung und Diagnose
+ * Enthält die MediaProjection-Freigabe nach den Vorgaben von Android 14 und die Diagnose einzelner Screenshots
  */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var tvResult: TextView
+    private lateinit var btnToggleFloating: ToggleButton
     private var classifier: UltraRobustClassifier? = null
 
-    // 相册选图回调（离线诊断）
+    // Rückgabe der Galerie-Auswahl (Diagnose einzelner Screenshots)
     private val pickImageLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         uri?.let { runOfflineDiagnostic(it) }
     }
 
-    // Android 14 屏幕录制/截屏授权回调
+    // Rückgabe der Bildschirmaufnahme-Freigabe (Android 14)
     private val screenCaptureLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
             startBubbleServiceWithProjection(result.resultCode, result.data!!)
         } else {
-            Toast.makeText(this, "未获得截屏授权，悬浮助手未启动", Toast.LENGTH_SHORT).show()
+            // Ohne Freigabe läuft nichts: der Umschalter darf dann nicht auf "an" stehen bleiben
+            btnToggleFloating.isChecked = false
+            Toast.makeText(this, "Ohne Aufnahmeberechtigung startet der Overlay-Assistent nicht", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -66,25 +70,33 @@ class MainActivity : AppCompatActivity() {
         classifier = UltraRobustClassifier(this)
         StockfishBridge.init(this)
 
-        findViewById<Button>(R.id.btnToggleFloating).setOnClickListener {
-            checkOverlayPermissionAndRequestCapture()
+        // Umschalter: dieselbe Schaltfläche startet und beendet den Overlay-Assistenten.
+        // Ausgewertet wird der Zustand nach dem Antippen, den ToggleButton selbst umschaltet.
+        btnToggleFloating = findViewById(R.id.btnToggleFloating)
+        btnToggleFloating.isChecked = FloatingBubbleService.isRunning
+        btnToggleFloating.setOnClickListener {
+            if (btnToggleFloating.isChecked) {
+                checkOverlayPermissionAndRequestCapture()
+            } else {
+                stopBubbleService()
+            }
         }
 
         findViewById<Button>(R.id.btnSelectImage).setOnClickListener {
             pickImageLauncher.launch("image/*")
         }
 
-        // 展示上一次投影会话与诊断落盘状态 (自取证)，标明历史记录并格式化时间
+        // Zustand der letzten Aufnahmesitzung und die letzte gespeicherte Diagnose anzeigen, als Verlauf gekennzeichnet und mit lesbarer Zeitangabe
         try {
             val sb = StringBuilder()
             val stateFile = File(filesDir, "debug/projection_state.txt")
             if (stateFile.exists() && stateFile.length() > 0) {
-                sb.append("【历史记录 - 上次投影会话状态】\n${formatHistoricalLog(stateFile.readText())}\n\n")
+                sb.append("[Verlauf - Zustand der letzten Aufnahmesitzung]\n${formatHistoricalLog(stateFile.readText())}\n\n")
             }
-            // 展示上次实机/离线诊断的逐格取证 (bug_13/14 定案用)
+            // Zellenweise Forensik der letzten Diagnose anzeigen (für die Fälle bug_13/14)
             val diagFile = File(filesDir, "debug/last_diagnostic.txt")
             if (diagFile.exists() && diagFile.length() > 0) {
-                sb.append("【历史记录 - 最近诊断取证】\n${formatHistoricalLog(diagFile.readText())}")
+                sb.append("[Verlauf - letzte Diagnose]\n${formatHistoricalLog(diagFile.readText())}")
             }
             if (sb.isNotEmpty()) {
                 tvResult.text = sb.toString().trimEnd()
@@ -101,16 +113,36 @@ class MainActivity : AppCompatActivity() {
             val millis = matcher.group(1)?.toLongOrNull()
             if (millis != null) {
                 val formatted = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(millis))
-                matcher.appendReplacement(sb, "记录时间: $formatted")
+                matcher.appendReplacement(sb, "Zeitpunkt: $formatted")
             }
         }
         matcher.appendTail(sb)
         return sb.toString()
     }
 
+    /**
+     * Der Umschalter steht beim Zurückkehren in die App immer auf dem tatsächlichen Zustand des Dienstes,
+     * auch wenn dieser zwischenzeitlich vom System oder über die Benachrichtigung beendet wurde.
+     */
+    override fun onResume() {
+        super.onResume()
+        btnToggleFloating.isChecked = FloatingBubbleService.isRunning
+    }
+
+    /** Umschalter auf "aus": den Vordergrunddienst über seine Stopp-Aktion beenden */
+    private fun stopBubbleService() {
+        val stopIntent = Intent(this, FloatingBubbleService::class.java).apply {
+            action = FloatingBubbleService.ACTION_STOP
+        }
+        startService(stopIntent)
+        Toast.makeText(this, "Der Overlay-Assistent wird beendet", Toast.LENGTH_SHORT).show()
+    }
+
     private fun checkOverlayPermissionAndRequestCapture() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
-            Toast.makeText(this, "请先授予悬浮窗权限以在多邻国上方显示走法", Toast.LENGTH_LONG).show()
+            // Ohne Overlay-Berechtigung bleibt der Umschalter aus, bis der Nutzer aus den Einstellungen zurückkommt
+            btnToggleFloating.isChecked = false
+            Toast.makeText(this, "Bitte zuerst die Overlay-Berechtigung erteilen, damit die Züge über Duolingo angezeigt werden können", Toast.LENGTH_LONG).show()
             val intent = Intent(
                 Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                 Uri.parse("package:$packageName")
@@ -119,7 +151,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // 申请 Android 14 MediaProjection 截屏授权
+        // Freigabe der Bildschirmaufnahme nach Android 14 anfordern
         val mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         screenCaptureLauncher.launch(mediaProjectionManager.createScreenCaptureIntent())
     }
@@ -130,37 +162,37 @@ class MainActivity : AppCompatActivity() {
             putExtra(FloatingBubbleService.EXTRA_RESULT_DATA, data)
         }
         ContextCompat.startForegroundService(this, serviceIntent)
-        Toast.makeText(this, "悬浮球已启动！请打开多邻国进行对战", Toast.LENGTH_SHORT).show()
-        finish() // 最小化回到桌面
+        Toast.makeText(this, "Die Blase ist gestartet. Jetzt Duolingo öffnen und spielen", Toast.LENGTH_SHORT).show()
+        finish() // Fenster schließen und zurück zum Startbildschirm
     }
 
     private fun runOfflineDiagnostic(imageUri: Uri) {
         lifecycleScope.launch {
             try {
-                tvResult.text = "正在读取图片并执行棋盘识别与算招..."
+                tvResult.text = "Bild wird gelesen, Brett wird erkannt und der Zug berechnet ..."
                 val inputStream = contentResolver.openInputStream(imageUri)
                 val bitmap = BitmapFactory.decodeStream(inputStream)
                 inputStream?.close()
 
                 if (bitmap == null) {
-                    tvResult.text = "图片加载失败！"
+                    tvResult.text = "Das Bild konnte nicht geladen werden"
                     return@launch
                 }
 
-                // 1. 梳状滤波两阶段定位棋盘 (带置信分, bug_18 遥测用)
+                // 1. Brett in zwei Stufen per Kammfilter lokalisieren (mit Confidence-Wert, Telemetrie für bug_18)
                 var locateResult = withContext(Dispatchers.Default) {
                     ChessLocator.locateBoard(bitmap)
                 }
                 var boardRect = locateResult.rect
 
-                // 2. 带取证看板的详尽决策管道 (MedianSim / 占位 / 拦截原因)
+                // 2. Ausführliche Entscheidungspipeline mit Forensiktafel (MedianSim / belegte Felder / Abweisungsgrund)
                 var detailedResp = withContext(Dispatchers.Default) {
                     classifier?.classifyBoardDetailed(bitmap, boardRect)
                 }
 
-                // 2.5 候选救援 (bug_19/superbug 定案): 主框产出"不可能局面"或整体被门禁拦截，都是定位器双峰误选
-                // 假框的实锤特征 (假框因 UI 边缘能量可反超真框 710 vs 670)，自动改用次候选框重识别
-                // 【修改】同时要求定位置信度不能为 low，残差极小
+                // 2.5 Rettung über den Zweitkandidaten (Befund aus bug_19/superbug): liefert der Hauptrahmen eine unmögliche Stellung oder wird er komplett abgewiesen,
+                // ist das ein sicheres Zeichen für einen falsch gewählten Rahmen (die Energie einer UI-Kante kann den echten Rahmen überbieten, 710 gegen 670)
+                // Zusätzlich darf die Confidence nicht "low" sein und das Residuum muss sehr klein bleiben
                 val needRescue = locateResult.confidence == "low" ||
                     (detailedResp is UltraRobustClassifier.ClassificationResponse.Success &&
                     StockfishBridge.validateFenSanity(detailedResp.result.fullFen) != null) ||
@@ -175,7 +207,7 @@ class MainActivity : AppCompatActivity() {
                         val rescueResp = withContext(Dispatchers.Default) {
                             classifier?.classifyBoardDetailed(bitmap, rescueRect)
                         }
-                        // 【修改】强制约束：次候选残差必须满足相对格宽比例 (<= 5%)
+                        // Harte Bedingung: das Residuum des Zweitkandidaten muss innerhalb von 5 % der Feldbreite liegen
                         val rescueMaxResid = (rescueRect.width() / 8.0f) * 0.05f
                         if (rescueResp is UltraRobustClassifier.ClassificationResponse.Success &&
                             StockfishBridge.validateFenSanity(rescueResp.result.fullFen) == null &&
@@ -193,33 +225,33 @@ class MainActivity : AppCompatActivity() {
                     is UltraRobustClassifier.ClassificationResponse.Success -> {
                         val res = detailedResp.result
                         
-                        // 【新增】离线诊断也将 FEN 自动复制到剪贴板
+                        // Auch die Diagnose einzelner Screenshots legt das FEN in die Zwischenablage
                         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         val clip = ClipData.newPlainText("FEN", res.fullFen)
                         clipboard.setPrimaryClip(clip)
                         
-                        // 3. Stockfish 计算最佳走法（返回封装有该次计算专属诊断信息的 EngineEvaluation）
+                        // 3. Stockfish berechnet den besten Zug (die EngineEvaluation enthält die Diagnose genau dieser Berechnung)
                         val eval = StockfishBridge.evaluateFen(res.fullFen)
 
                         val sb = StringBuilder()
-                        sb.append("【离线诊断结果】\n")
-                        val cropTag = if (locateResult.isCropped) " [裁剪帧]" else ""
-                        sb.append("棋盘坐标: [L=${boardRect.left}, T=${boardRect.top}, R=${boardRect.right}, B=${boardRect.bottom}] 定位分=${String.format("%.0f", locateResult.score)} | 置信度=${locateResult.confidence} | 残差=${String.format("%.2f", locateResult.residual)}px$cropTag\n")
-                        sb.append("视角方向: ${if (res.isWhitePerspective) "执白 (White)" else "执黑 (Black)"}\n")
-                        sb.append("取证看板: MedianSim=${String.format("%.3f", detailedResp.medianSim)} | 占位=${detailedResp.occupiedCount}\n")
-                        // 逐格取证 (bug_11~14 定案用): 低置信格 = 误分类嫌疑; 门控截断候选 = 漏子嫌疑 (std=中心方差 grad=边缘梯度)
+                        sb.append("[Diagnose eines einzelnen Screenshots]\n")
+                        val cropTag = if (locateResult.isCropped) " [zugeschnittener Frame]" else ""
+                        sb.append("Brettkoordinaten: [L=${boardRect.left}, T=${boardRect.top}, R=${boardRect.right}, B=${boardRect.bottom}] Locator-Score=${String.format("%.0f", locateResult.score)} | Confidence=${locateResult.confidence} | Residuum=${String.format("%.2f", locateResult.residual)}px$cropTag\n")
+                        sb.append("Perspektive: ${if (res.isWhitePerspective) "Weiß (White)" else "Schwarz (Black)"} | Signal: ${detailedResp.perspectiveReason} (${String.format("%.0f", detailedResp.perspectiveConfidence * 100)}%)\n")
+                        sb.append("Forensiktafel: MedianSim=${String.format("%.3f", detailedResp.medianSim)} | belegte Felder=${detailedResp.occupiedCount}\n")
+                        // Zellenweise Forensik (für die Fälle bug_11~14): unsichere Felder deuten auf Fehlklassifikation, vom Gatter verworfene Kandidaten auf übersehene Figuren (std=Zentrumsvarianz, grad=Kantengradient)
                         if (detailedResp.lowConfidenceCells.isNotEmpty()) {
-                            sb.append("低置信格: ${detailedResp.lowConfidenceCells.joinToString(" ")}\n")
+                            sb.append("Unsichere Felder: ${detailedResp.lowConfidenceCells.joinToString(" ")}\n")
                         }
                         if (detailedResp.gateRejectedCells.isNotEmpty()) {
-                            sb.append("门控截断候选: ${detailedResp.gateRejectedCells.joinToString(" ")}\n")
+                            sb.append("Vom Gatter verworfen: ${detailedResp.gateRejectedCells.joinToString(" ")}\n")
                         }
-                        sb.append("局面 FEN: ${res.boardFen}\n")
-                        sb.append("完整 FEN: ${res.fullFen}\n")
-                        sb.append("（✅ FEN 已自动复制到剪贴板）\n")
+                        sb.append("Stellung (FEN): ${res.boardFen}\n")
+                        sb.append("Vollständiges FEN: ${res.fullFen}\n")
+                        sb.append("(FEN wurde in die Zwischenablage kopiert)\n")
                         sb.append("-----------------------------\n")
                         
-                        // 【新增】拼接带有棋子类型的走法字符串
+                        // Zugtext mit vorangestelltem Figurentyp zusammensetzen
                         var displayMoveStr = eval.bestMove
                         if (eval.bestMove.length >= 4 && eval.bestMove[0] in 'a'..'h') {
                             val fileIdx = eval.bestMove[0] - 'a'
@@ -231,48 +263,48 @@ class MainActivity : AppCompatActivity() {
                         }
                         
                         val displayMove = when (eval.bestMove) {
-                            "(checkmate)" -> "无合法走法 (胜负已分/将杀)"
-                            "(stalemate)" -> "无合法走法 (和棋/逼和)"
-                            "(none)" -> "无合法走法"
-                            "(invalid)" -> "已拒绝: 识别出不可能局面 (非引擎故障，见下方诊断)"
+                            "(checkmate)" -> "Kein legaler Zug (Partie entschieden, Schachmatt)"
+                            "(stalemate)" -> "Kein legaler Zug (Remis durch Patt)"
+                            "(none)" -> "Kein legaler Zug"
+                            "(invalid)" -> "Abgewiesen: unmögliche Stellung erkannt (kein Engine-Fehler, siehe Diagnose unten)"
                             else -> displayMoveStr
                         }
-                        sb.append("推荐走法: $displayMove\n")
-                        sb.append("局势评估分: ${if (eval.evalScore >= 0) "+" else ""}${String.format("%.2f", eval.evalScore)}\n")
-                        sb.append("搜索深度: ${if (eval.depth <= 0) "0 层 ${if (eval.bestMove == "(invalid)") "[FEN预校验拦截]" else "[兜底生成器]"}" else "${eval.depth} 层"}\n")
+                        sb.append("Empfohlener Zug: $displayMove\n")
+                        sb.append("Bewertung: ${if (eval.evalScore >= 0) "+" else ""}${String.format("%.2f", eval.evalScore)}\n")
+                        sb.append("Suchtiefe: ${if (eval.depth <= 0) "0 ${if (eval.bestMove == "(invalid)") "[von der FEN-Vorprüfung abgefangen]" else "[Fallback-Generator]"}" else "${eval.depth}"}\n")
                         if (eval.isMate) {
-                            sb.append("杀棋状态: 胜势已锁定\n")
+                            sb.append("Mattstatus: Gewinn ist erzwungen\n")
                         }
                         sb.append("-----------------------------\n")
                         sb.append("${eval.diagnosticInfo}\n")
 
                         tvResult.text = sb.toString()
-                        Toast.makeText(this@MainActivity, "FEN 已复制到剪贴板", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this@MainActivity, "FEN in die Zwischenablage kopiert", Toast.LENGTH_SHORT).show()
 
-                        // 同步持久化诊断日志，供下次启动展示最近一次诊断
+                        // Diagnose speichern, damit sie beim nächsten Start wieder angezeigt werden kann
                         saveOfflineDiagnosticArtifact(boardRect, locateResult, res.fullFen, detailedResp, eval)
                     }
                     is UltraRobustClassifier.ClassificationResponse.Rejected -> {
                         val sb = StringBuilder()
-                        sb.append("【门禁拦截】\n")
-                        sb.append("原因: ${detailedResp.reason}\n")
-                        val cropTag = if (locateResult.isCropped) " [裁剪帧]" else ""
-                        sb.append("取证看板: MedianSim=${String.format("%.3f", detailedResp.medianSim)} | 占位=${detailedResp.occupiedCount} | 定位分=${String.format("%.0f", locateResult.score)} | 置信度=${locateResult.confidence} | 残差=${String.format("%.2f", locateResult.residual)}px$cropTag\n")
-                        sb.append("棋盘坐标: [L=${boardRect.left}, T=${boardRect.top}, R=${boardRect.right}, B=${boardRect.bottom}]\n")
+                        sb.append("[Vom Gatter abgewiesen]\n")
+                        sb.append("Grund: ${detailedResp.reason}\n")
+                        val cropTag = if (locateResult.isCropped) " [zugeschnittener Frame]" else ""
+                        sb.append("Forensiktafel: MedianSim=${String.format("%.3f", detailedResp.medianSim)} | belegte Felder=${detailedResp.occupiedCount} | Locator-Score=${String.format("%.0f", locateResult.score)} | Confidence=${locateResult.confidence} | Residuum=${String.format("%.2f", locateResult.residual)}px$cropTag\n")
+                        sb.append("Brettkoordinaten: [L=${boardRect.left}, T=${boardRect.top}, R=${boardRect.right}, B=${boardRect.bottom}]\n")
                         if (detailedResp.lowConfidenceCells.isNotEmpty()) {
-                            sb.append("低置信格: ${detailedResp.lowConfidenceCells.joinToString(" ")}\n")
+                            sb.append("Unsichere Felder: ${detailedResp.lowConfidenceCells.joinToString(" ")}\n")
                         }
                         if (detailedResp.gateRejectedCells.isNotEmpty()) {
-                            sb.append("门控截断候选: ${detailedResp.gateRejectedCells.joinToString(" ")}\n")
+                            sb.append("Vom Gatter verworfen: ${detailedResp.gateRejectedCells.joinToString(" ")}\n")
                         }
                         tvResult.text = sb.toString()
                     }
                     null -> {
-                        tvResult.text = "分类器未初始化"
+                        tvResult.text = "Der Klassifikator ist nicht initialisiert"
                     }
                 }
             } catch (e: Exception) {
-                tvResult.text = "诊断报错: ${e.message}"
+                tvResult.text = "Fehler bei der Diagnose: ${e.message}"
             }
         }
     }
@@ -292,7 +324,7 @@ class MainActivity : AppCompatActivity() {
             val lowConf = if (detailedResp.lowConfidenceCells.isNotEmpty()) "LowConf: ${detailedResp.lowConfidenceCells.joinToString(" ")}\n" else ""
             val gate = if (detailedResp.gateRejectedCells.isNotEmpty()) "GateRejected: ${detailedResp.gateRejectedCells.joinToString(" ")}\n" else ""
             txtFile.writeText(
-                "来源: [离线单步诊断]\n" +
+                "Quelle: [Diagnose eines einzelnen Screenshots]\n" +
                 "BoardRect: $boardRect\n" +
                 "LocateScore: ${String.format("%.1f", locateResult.score)}\n" +
                 "Confidence: ${locateResult.confidence}\n" +
@@ -301,13 +333,13 @@ class MainActivity : AppCompatActivity() {
                 "FEN: $fen\n" +
                 "Move: ${eval.bestMove} (Score: ${eval.evalScore}, Depth: ${eval.depth})\n" +
                 "$lowConf$gate" +
-                "记录时间: $timeStr\n"
+                "Zeitpunkt: $timeStr\n"
             )
         } catch (_: Exception) {}
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        // 保持 Stockfish 引擎常驻供 FloatingBubbleService 持续调用，不在此处 release
+        // Die Stockfish-Engine bleibt für den FloatingBubbleService bestehen und wird hier nicht freigegeben
     }
 }

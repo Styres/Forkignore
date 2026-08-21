@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- 悬浮窗权限 (在其他应用上方绘制) -->
+    <!-- Overlay-Berechtigung (Zeichnen ueber anderen Apps) -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     
-    <!-- 前台服务权限 (Android 14 截屏必须) -->
+    <!-- Berechtigungen fuer den Vordergrunddienst (ab Android 14 fuer die Bildschirmaufnahme noetig) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     
-    <!-- 存储读取权限 (离线测试从相册选图) -->
+    <!-- Lesezugriff auf Medien (Screenshots aus der Galerie fuer die Diagnose) -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
@@ -20,7 +20,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.AppCompat.DayNight.NoActionBar">
 
-        <!-- 主控制台与诊断 Activity -->
+        <!-- Hauptbildschirm mit Steuerung und Diagnose -->
         <activity
             android:name=".ui.MainActivity"
             android:exported="true">
@@ -30,7 +30,7 @@
             </intent-filter>
         </activity>
 
-        <!-- 悬浮球与截屏分析前台服务 (Android 14 mediaProjection 类型) -->
+        <!-- Vordergrunddienst fuer Blase und Bildschirmanalyse (Typ mediaProjection ab Android 14) -->
         <service
             android:name=".service.FloatingBubbleService"
             android:enabled="true"

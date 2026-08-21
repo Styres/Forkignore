@@ -23,8 +23,8 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 /**
- * 全透明穿透悬浮 Canvas (FLAG_NOT_TOUCHABLE)
- * 在多邻国棋盘上实时绘制发光走子路径、高亮起点/终点光圈与箭头，4 秒后自动淡出隐藏
+ * Vollständig transparentes Overlay-Canvas, das Berührungen durchreicht (FLAG_NOT_TOUCHABLE)
+ * Zeichnet den empfohlenen Zug direkt auf das Duolingo-Brett: leuchtender Pfad, hervorgehobenes Start- und Zielfeld sowie Pfeilspitze; blendet sich nach wenigen Sekunden selbst aus
  */
 class TransparentCanvasOverlay(private val context: Context) {
 
@@ -42,14 +42,14 @@ class TransparentCanvasOverlay(private val context: Context) {
         var occupiedCount: Int = 0
         var detectedPerspective: Boolean? = null
         
-        // 【新增】用于接收格式化后的人类可读着法 (如 R-d4d5)
+        // Menschenlesbarer Zugtext, z. B. R-d4d5
         var displayMoveStr: String = ""
-        // 【新增】用于显示大屏故障看板
+        // Text der grossflächigen Fehlertafel
         var errorMessage: String? = null 
-        // 【新增】用于在屏幕显示当前计算出的FEN，固化证据
+        // Aktuell berechnetes FEN, damit der Befund auf dem Bildschirm belegt ist
         var fenString: String = "" 
 
-        // 【新增】棋盘调试红框画笔，让假框和偏移无所遁形
+        // Roter Rahmen um das erkannte Brett, damit ein falscher Rahmen oder ein Versatz sofort auffällt
         private val boardDebugPaint = Paint().apply {
             color = Color.RED
             style = Paint.Style.STROKE
@@ -57,27 +57,27 @@ class TransparentCanvasOverlay(private val context: Context) {
             isAntiAlias = true
         }
 
-        // 【新增】故障看板底色画笔
+        // Hintergrund der Fehlertafel
         private val errorBgPaint = Paint().apply {
-            color = Color.argb(230, 180, 0, 0) // 半透明深红
+            color = Color.argb(230, 180, 0, 0) // halbtransparentes Dunkelrot
             style = Paint.Style.FILL
             isAntiAlias = true
         }
 
         private val startPaint = Paint().apply {
-            color = Color.argb(130, 0, 230, 115) // 半透明青绿
+            color = Color.argb(130, 0, 230, 115) // halbtransparentes Blaugrün
             style = Paint.Style.FILL
             isAntiAlias = true
         }
 
         private val targetPaint = Paint().apply {
-            color = Color.argb(140, 255, 215, 0) // 半透明金黄
+            color = Color.argb(140, 255, 215, 0) // halbtransparentes Goldgelb
             style = Paint.Style.FILL
             isAntiAlias = true
         }
 
         private val arrowPaint = Paint().apply {
-            color = Color.rgb(0, 255, 128) // 荧光亮绿
+            color = Color.rgb(0, 255, 128) // leuchtendes Grün
             strokeWidth = 14f
             strokeCap = Paint.Cap.ROUND
             strokeJoin = Paint.Join.ROUND
@@ -123,12 +123,12 @@ class TransparentCanvasOverlay(private val context: Context) {
             val paddingX = 24f
             val maxAvailableW = screenW - 48f
 
-            // 【新增】优先绘制故障看板
+            // Die Fehlertafel hat Vorrang vor allem anderen
             val errMsg = errorMessage
             if (errMsg != null) {
                 val cx = width / 2f
                 val cy = height / 2f
-                val line1 = "❌ $errMsg"
+                val line1 = "Fehler: $errMsg"
                 val line2 = if (fenString.isNotEmpty()) "FEN: $fenString" else ""
                 
                 val w1 = textPaint.measureText(line1)
@@ -151,7 +151,7 @@ class TransparentCanvasOverlay(private val context: Context) {
                     canvas.drawText(line2, pillX + paddingX, cy + 30f, fenTextPaint)
                 }
                 
-                // 如果有假框坐标，也一并画出来让它暴露
+                // Liegt ein (falscher) Brettrahmen vor, wird er mitgezeichnet, damit er sichtbar wird
                 boardRect?.let { canvas.drawRect(it, boardDebugPaint) }
                 return
             }
@@ -159,28 +159,28 @@ class TransparentCanvasOverlay(private val context: Context) {
             val rect = boardRect ?: return
             val move = moveInfo ?: return
 
-            // 【新增】画出 AI 认为的棋盘边界
+            // Vom Erkenner angenommene Brettgrenze einzeichnen
             canvas.drawRect(rect, boardDebugPaint)
 
             val step = (rect.right - rect.left) / 8.0f
             val uci = move.bestMove
             val conflictStr = if (detectedPerspective != null && detectedPerspective != isWhitePerspective) {
-                "(探测:${if (detectedPerspective == true) "白" else "黑"})"
+                "(erkannt: ${if (detectedPerspective == true) "Weiß" else "Schwarz"})"
             } else ""
-            val perspectiveStr = "${if (isWhitePerspective) "执白" else "执黑"}$conflictStr"
+            val perspectiveStr = "${if (isWhitePerspective) "Weiß" else "Schwarz"}$conflictStr"
 
             if (uci.length < 4 || uci == "(none)" || uci == "(checkmate)" || uci == "(stalemate)" || uci == "(invalid)") {
                 val statusStr = when {
-                    uci == "(invalid)" -> "识别异常 (局面非法)"
-                    move.isMate || uci == "(checkmate)" -> "胜负已分 (将杀)"
-                    uci == "(stalemate)" -> "和棋 (逼和)"
-                    else -> "无合法走法"
+                    uci == "(invalid)" -> "Erkennungsfehler (unmögliche Stellung)"
+                    move.isMate || uci == "(checkmate)" -> "Partie entschieden (Schachmatt)"
+                    uci == "(stalemate)" -> "Remis (Patt)"
+                    else -> "Kein legaler Zug"
                 }
-                val line1 = "局面: $statusStr"
-                val line2 = "视角: $perspectiveStr | Sim: ${String.format("%.3f", medianSim)} | 占位: $occupiedCount"
+                val line1 = "Stellung: $statusStr"
+                val line2 = "Perspektive: $perspectiveStr | Sim: ${String.format("%.3f", medianSim)} | belegt: $occupiedCount"
                 val line3 = if (fenString.isNotEmpty()) "FEN: $fenString" else ""
 
-                // 紧凑包裹内容宽度 (Wrap Content)
+                // Breite eng am Inhalt ausrichten (Wrap Content)
                 val w1 = textPaint.measureText(line1)
                 val w2 = subTextPaint.measureText(line2)
                 var fenSize = 22f
@@ -221,25 +221,25 @@ class TransparentCanvasOverlay(private val context: Context) {
             val x2 = rect.left + (c2 + 0.5f) * step
             val y2 = rect.top + (r2 + 0.5f) * step
 
-            // 1. 绘制起点和终点高亮格子
+            // 1. Start- und Zielfeld hervorheben
             val startBox = RectF(rect.left + c1 * step, rect.top + r1 * step, rect.left + (c1 + 1) * step, rect.top + (r1 + 1) * step)
             val targetBox = RectF(rect.left + c2 * step, rect.top + r2 * step, rect.left + (c2 + 1) * step, rect.top + (r2 + 1) * step)
             canvas.drawRoundRect(startBox, 16f, 16f, startPaint)
             canvas.drawRoundRect(targetBox, 16f, 16f, targetPaint)
 
-            // 2. 绘制指示箭头干身与箭头三角形头部
+            // 2. Pfeilschaft und Pfeilspitze zeichnen
             canvas.drawLine(x1, y1, x2, y2, arrowPaint)
             drawArrowHead(canvas, x1, y1, x2, y2)
 
-            // 3. 绘制上方局势胶囊 (招法评估 + 底层取证遥测 + FEN)
+            // 3. Infofeld darüber zeichnen (Zug, Bewertung, Telemetrie und FEN)
             val scoreStr = if (move.isMate) "MATE" else "${if (move.evalScore >= 0) "+" else ""}${String.format("%.2f", move.evalScore)}"
-            val depthStr = if (move.depth <= 0) "[兜底]" else "深${move.depth}"
-            // 【修改】使用传入的带有棋子类型的 displayMoveStr
-            val line1 = "招法: $displayMoveStr | 评估: $scoreStr ($depthStr)"
-            val line2 = "视角: $perspectiveStr | Sim: ${String.format("%.3f", medianSim)} | 占位: $occupiedCount"
+            val depthStr = if (move.depth <= 0) "[Fallback]" else "Tiefe ${move.depth}"
+            // Zugtext mit vorangestelltem Figurentyp verwenden
+            val line1 = "Zug: $displayMoveStr | Bewertung: $scoreStr ($depthStr)"
+            val line2 = "Perspektive: $perspectiveStr | Sim: ${String.format("%.3f", medianSim)} | belegt: $occupiedCount"
             val line3 = if (fenString.isNotEmpty()) "FEN: $fenString" else ""
 
-            // 紧凑包裹内容宽度 (Wrap Content)
+            // Breite eng am Inhalt ausrichten (Wrap Content)
             val w1 = textPaint.measureText(line1)
             val w2 = subTextPaint.measureText(line2)
             var fenSize = 22f
@@ -284,7 +284,7 @@ class TransparentCanvasOverlay(private val context: Context) {
         }
     }
 
-    // 【修改】增加 displayMoveStr 和 fenString 参数
+    // Anzeige des empfohlenen Zuges inklusive displayMoveStr und fenString
     fun showSuggestion(
         boardRect: Rect,
         moveInfo: StockfishBridge.EngineEvaluation,
@@ -312,7 +312,7 @@ class TransparentCanvasOverlay(private val context: Context) {
             postInvalidate()
         }
 
-        // 【修改】延长至 5 秒方便用户查看或截图 FEN
+        // 5 Sekunden Standzeit, damit das FEN in Ruhe gelesen oder abfotografiert werden kann
         autoDismissJob?.cancel()
         autoDismissJob = scope.launch {
             delay(5000) 
@@ -320,7 +320,7 @@ class TransparentCanvasOverlay(private val context: Context) {
         }
     }
 
-    // 【新增】红牌警告弹窗，用于大屏展示各种拦截与非法局面
+    // Rote Warntafel für abgewiesene Rahmen und unmögliche Stellungen
     fun showError(reason: String, errorRect: Rect? = null, fenString: String = "") {
         if (overlayView == null) {
             initOverlayView()

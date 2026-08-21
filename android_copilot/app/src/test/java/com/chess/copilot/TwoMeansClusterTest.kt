@@ -39,7 +39,7 @@ class TwoMeansClusterTest {
 
     @Test
     fun testLightMode_syntheticBoard_perfectAlternationAndAllRowsPass() {
-        // 浅色模式: 亮格 240, 暗格 180
+        // Heller Modus: helle Felder 240, dunkle Felder 180
         val (gray, size) = generateSyntheticBoard(boardSize = 800, lightVal = 240f, darkVal = 180f)
         val res = ChessLocator.computeRingAlternationDetailed(gray, size, size, 0f, 0f, size.toFloat())
         assertEquals(1.0f, res.totalScore, 0.001f)
@@ -49,7 +49,7 @@ class TwoMeansClusterTest {
 
     @Test
     fun testDarkMode_syntheticBoard_perfectAlternationAndAllRowsPass() {
-        // 深色模式: 亮格 48, 暗格 28 (量化低对比度)
+        // Dunkler Modus: helle Felder 48, dunkle Felder 28 (quantisiert, geringer Kontrast)
         val (gray, size) = generateSyntheticBoard(boardSize = 800, lightVal = 48f, darkVal = 28f)
         val res = ChessLocator.computeRingAlternationDetailed(gray, size, size, 0f, 0f, size.toFloat())
         assertEquals(1.0f, res.totalScore, 0.001f)
@@ -59,10 +59,10 @@ class TwoMeansClusterTest {
 
     @Test
     fun testDarkMode_shiftedBoard_minRowScoreRejectsShiftedBox() {
-        // 创建深色模式背景 (高度 1200, 背景色 20, 棋盘在 y=200..1000)
+        // Hintergrund im dunklen Modus erzeugen (Höhe 1200, Hintergrundwert 20, Brett bei y=200..1000)
         val w = 800
         val h = 1200
-        val fullGray = FloatArray(w * h) { 20f } // 深色背景
+        val fullGray = FloatArray(w * h) { 20f } // dunkler Hintergrund
         val (boardGray, boardSize) = generateSyntheticBoard(boardSize = 800, lightVal = 48f, darkVal = 28f)
 
         val boardY = 200
@@ -70,17 +70,17 @@ class TwoMeansClusterTest {
             System.arraycopy(boardGray, y * w, fullGray, (y + boardY) * w, w)
         }
 
-        // 1. 真棋盘位置: 必须全行通过
+        // 1. Echte Brettposition: alle Reihen müssen bestehen
         val trueRes = ChessLocator.computeRingAlternationDetailed(fullGray, w, h, 0f, boardY.toFloat(), boardSize.toFloat())
         assertTrue("True board in dark mode must pass all rows", trueRes.allRowsPass)
         assertEquals(1.0f, trueRes.totalScore, 0.001f)
 
-        // 2. 向上偏移 1 格 (y = 100): 顶行溢出到背景色，必须被 allRowsPass 拦截
+        // 2. Um 1 Feld nach oben verschoben (y = 100): die oberste Reihe läuft in den Hintergrund, allRowsPass muss das abweisen
         val shiftedUpRes = ChessLocator.computeRingAlternationDetailed(fullGray, w, h, 0f, (boardY - 100).toFloat(), boardSize.toFloat())
         assertFalse("Shifted-up box must fail allRowsPass", shiftedUpRes.allRowsPass)
         assertTrue("Shifted-up box minRowScore must be <= 0.65", shiftedUpRes.minRowScore <= 0.65f)
 
-        // 3. 向下偏移 1 格 (y = 300): 底行溢出到背景色，必须被 allRowsPass 拦截
+        // 3. Um 1 Feld nach unten verschoben (y = 300): die unterste Reihe läuft in den Hintergrund, allRowsPass muss das abweisen
         val shiftedDownRes = ChessLocator.computeRingAlternationDetailed(fullGray, w, h, 0f, (boardY + 100).toFloat(), boardSize.toFloat())
         assertFalse("Shifted-down box must fail allRowsPass", shiftedDownRes.allRowsPass)
         assertTrue("Shifted-down box minRowScore must be <= 0.65", shiftedDownRes.minRowScore <= 0.65f)

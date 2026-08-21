@@ -9,7 +9,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 针对 UCI 引擎输出行正则与状态机解析的单元测试用例
+ * Unit-Tests für die regulären Ausdrücke und den Zustandsautomaten zum Parsen der UCI-Ausgabezeilen
  */
 class UciProtocolParserTest {
 
@@ -30,7 +30,7 @@ class UciProtocolParserTest {
 
     @Test
     fun testParseBestMovePromotion() {
-        // 关键用例：兵升变 (Promotion)
+        // Schlüsselfall: Bauernumwandlung (Promotion)
         val lineQueen = "bestmove e7e8q ponder d8d7"
         assertEquals("e7e8q", StockfishBridge.parseBestMoveLine(lineQueen))
 
@@ -65,14 +65,14 @@ class UciProtocolParserTest {
 
     @Test
     fun testParseInfoScoreMate() {
-        // 白方即将 2 步杀王
+        // Weiß setzt in 2 Zügen matt
         val mateLinePositive = "info depth 16 score mate 2 pv f7f8q"
         val evalPos = StockfishBridge.parseInfoLine(mateLinePositive)
 
         assertTrue(evalPos?.isMate ?: false)
         assertEquals(100.0f, evalPos?.evalScore ?: 0f, 0.001f)
 
-        // 黑方将被杀棋
+        // Schwarz wird mattgesetzt
         val mateLineNegative = "info depth 16 score mate -3 pv g8h8"
         val evalNeg = StockfishBridge.parseInfoLine(mateLineNegative)
 
@@ -82,7 +82,7 @@ class UciProtocolParserTest {
 
     @Test
     fun testFallbackEvaluatorFindsExistingPieceMove() {
-        // 测试降级评估器在真实盘面上绝不指向空格
+        // Der Fallback-Bewerter darf auf einem echten Brett niemals auf ein leeres Feld zeigen
         val fen = "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3"
         val eval = StockfishBridge.evaluateFallback(fen)
         assertNotNull(eval.bestMove)
@@ -90,7 +90,7 @@ class UciProtocolParserTest {
         
         val fromCol = eval.bestMove[0] - 'a'
         val fromRank = eval.bestMove[1] - '1'
-        // 验证移动的起点必须存在己方棋子
+        // Das Startfeld des Zuges muss eine eigene Figur tragen
         val rows = fen.split(" ")[0].split("/")
         val board = Array(8) { r ->
             val rowStr = rows[r]
@@ -107,7 +107,7 @@ class UciProtocolParserTest {
 
     @Test
     fun testFallbackBishopMovesDiagonally() {
-        // 白方只有一个主教在 g5，验证走法必须为斜向 (绝对不能出现 g5g6 等直冲走法)
+        // Weiß hat nur einen Läufer auf g5: der Zug muss diagonal sein (ein gerader Zug wie g5g6 ist ausgeschlossen)
         val fen = "8/8/8/6B1/8/8/8/4K2k w - - 0 1"
         val eval = StockfishBridge.evaluateFallback(fen)
         assertEquals(0, eval.depth)
@@ -130,7 +130,7 @@ class UciProtocolParserTest {
 
     @Test
     fun testEngineEvaluationDiagnosticInfoPreservation() {
-        val diag = "【Stockfish 计算成功】\n耗时: 120ms | 深度: 12 层 | 评分: +0.45 | 走法: e2e4"
+        val diag = "[Stockfish-Berechnung erfolgreich]\nDauer: 120ms | Tiefe: 12 | Bewertung: +0.45 | Zug: e2e4"
         val eval = StockfishBridge.EngineEvaluation(
             bestMove = "e2e4",
             evalScore = 0.45f,
@@ -146,12 +146,12 @@ class UciProtocolParserTest {
     fun testFallbackReturnsDiagnosticInfo() {
         val fen = "8/8/8/6B1/8/8/8/4K2k w - - 0 1"
         val eval = StockfishBridge.evaluateFallback(fen)
-        assertTrue("Fallback result must contain diagnosticInfo", eval.diagnosticInfo.contains("【Kotlin 纯算法规则兜底】"))
+        assertTrue("Fallback result must contain diagnosticInfo", eval.diagnosticInfo.contains("[Fallback: reine Kotlin-Regeln]"))
     }
 
     @Test
     fun testSanityCheckRejectsInvalidFen() {
-        // 无双王局面应被拦截
+        // Eine Stellung ohne beide Könige muss abgewiesen werden
         val invalidFen = "8/8/8/8/8/8/8/8 w - - 0 1"
         val problem = StockfishBridge.validateFenSanity(invalidFen)
         assertNotNull("validateFenSanity should reject kingless board", problem)
@@ -159,7 +159,7 @@ class UciProtocolParserTest {
 
     @Test
     fun testSanityCheckAllowsActiveKingInCheck() {
-        // 白方王在 e1，黑王在 e7，黑车在 e8 处于将军状态，白兵在 a2：这是正常合法对局，绝不可被判定为不可能局面
+        // Weißer König auf e1, schwarzer König auf e7, schwarzer Turm auf e8 gibt Schach, weißer Bauer auf a2: eine völlig normale legale Partie, die niemals als unmögliche Stellung gelten darf
         val inCheckFen = "4r3/4k3/8/8/8/8/P7/4K3 w - - 0 1"
         val problem = StockfishBridge.validateFenSanity(inCheckFen)
         assertNull("validateFenSanity must allow active king in check position", problem)

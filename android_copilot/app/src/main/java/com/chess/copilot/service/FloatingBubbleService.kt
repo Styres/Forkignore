@@ -47,21 +47,34 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * 屏幕边缘悬浮球服务 (Floating Bubble)
- * 符合 Android 14 规范的前台服务
- * 核心机制：
- * 1. 消除 Overlay 自污染：截帧前瞬间隐藏悬浮球与透明图层，捕获纯净屏幕后恢复
- * 2. 常驻长连接 VirtualDisplay + 持续消费丢弃过渡帧，彻底消除单次点击注销会话与首帧残留
- * 3. 跨机型通用 pixelStride 像素拷贝
- * 4. 真机落盘诊断功能 (filesDir/debug/)
+ * Dienst für die Blase am Bildschirmrand (Floating Bubble)
+ * Vordergrunddienst nach den Vorgaben von Android 14
+ * Kernmechanik:
+ * 1. Keine Selbstverschmutzung durch das Overlay: Blase und transparente Ebene werden vor der Aufnahme kurz ausgeblendet und danach wieder eingeblendet
+ * 2. Dauerhaft geöffnetes VirtualDisplay, dessen Übergangsframes fortlaufend verworfen werden - so entfällt das Abmelden der Sitzung pro Klick und der erste Frame ist nie veraltet
+ * 3. Geräteunabhängiges Kopieren der Pixel über pixelStride
+ * 4. Diagnosedateien direkt auf dem Gerät (filesDir/debug/)
  */
 class FloatingBubbleService : Service() {
 
     companion object {
         const val EXTRA_RESULT_CODE = "extra_result_code"
         const val EXTRA_RESULT_DATA = "extra_result_data"
+
+        // Der Umschalter in der MainActivity beendet den Dienst über diese Aktion
+        const val ACTION_STOP = "com.chess.copilot.action.STOP_BUBBLE"
+
+        // Laufzustand für den Umschalter: der Dienst läuft im selben Prozess wie die Oberfläche,
+        // ein Flag genügt hier und kommt ohne Binder oder Broadcast aus.
+        @Volatile
+        var isRunning: Boolean = false
+            private set
+
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "chess_copilot_service"
+
+        // Ab dieser Druckdauer gilt eine Berührung der Blase als langer Druck (Perspektive umschalten)
+        private const val LONG_PRESS_MS = 500L
     }
 
     private lateinit var windowManager: WindowManager
@@ -84,9 +97,13 @@ class FloatingBubbleService : Service() {
     private var isCapturingFrame = false
     @Volatile
     private var sessionLockedPerspective: Boolean? = null
-    // 识别稳定性遥测 (bug_19 教训): 静止盘面两次点击 FEN 不同 = 识别层抖动，是"同局面不同建议"的直接证据
+    // Wurde die Perspektive per langem Druck auf die Blase von Hand gesetzt, bleibt sie stehen:
+    // die automatische Erkennung darf eine ausdrückliche Ansage des Nutzers nicht überschreiben.
+    @Volatile
+    private var manualPerspectiveLock = false
+    // Telemetrie zur Stabilität der Erkennung (Lektion aus bug_19): unterschiedliche FEN bei zwei Klicks auf ein unverändertes Brett belegen ein Flackern der Erkennung und damit die Ursache wechselnder Empfehlungen
     private var lastFen: String? = null
-    // 视角锁定冲突计数 (bug_19 教训): 锁定后每帧检测视角持续与锁定矛盾时撤销重锁，防误锁锁死整个会话
+    // Zähler für Konflikte mit der Perspektivsperre (Lektion aus bug_19): widerspricht die Erkennung der Sperre dauerhaft, wird neu gesperrt, damit eine Fehlsperre nicht die ganze Sitzung blockiert
     private var perspectiveConflictStreak = 0
 
     private val serviceJob = Job()
@@ -94,6 +111,7 @@ class FloatingBubbleService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        isRunning = true
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         transparentOverlay = TransparentCanvasOverlay(this)
@@ -108,6 +126,13 @@ class FloatingBubbleService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Der Umschalter in der Oberfläche hat "aus" gewählt: Dienst geordnet beenden
+        if (intent?.action == ACTION_STOP) {
+            Toast.makeText(this, "Overlay-Assistent beendet", Toast.LENGTH_SHORT).show()
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         startForegroundNotification()
 
         if (intent != null) {
@@ -117,14 +142,14 @@ class FloatingBubbleService : Service() {
             if (resultCode == Activity.RESULT_OK && resultData != null && mediaProjection == null) {
                 setupMediaProjection(resultCode, resultData)
             } else if (mediaProjection == null) {
-                // 响亮失败：授权数据异常必须现场可见并落盘，杜绝静默跳过导致的"气泡假活"
-                val reason = "授权 Intent 异常 (resultCode=$resultCode, dataPresent=${resultData != null})"
-                recordProjectionState("初始化失败: $reason")
-                Toast.makeText(this, "截屏授权数据异常: $reason，请点击悬浮球重新授权", Toast.LENGTH_LONG).show()
+                // Lautes Scheitern: fehlerhafte Berechtigungsdaten müssen sofort sichtbar und protokolliert sein, sonst wirkt die Blase fälschlich funktionsfähig
+                val reason = "Fehlerhafter Berechtigungs-Intent (resultCode=$resultCode, dataPresent=${resultData != null})"
+                recordProjectionState("Initialisierung fehlgeschlagen: $reason")
+                Toast.makeText(this, "Fehlerhafte Daten der Bildschirmaufnahme-Berechtigung: $reason. Bitte auf die Blase tippen und erneut freigeben", Toast.LENGTH_LONG).show()
             }
         } else {
-            recordProjectionState("初始化失败: 服务被系统重启 (intent=null)，Token 已失效")
-            Toast.makeText(this, "服务被系统重启，截屏授权已失效，请点击悬浮球重新授权", Toast.LENGTH_LONG).show()
+            recordProjectionState("Initialisierung fehlgeschlagen: Dienst vom System neu gestartet (intent=null), das Token ist ungültig")
+            Toast.makeText(this, "Der Dienst wurde vom System neu gestartet, die Aufnahmeberechtigung ist abgelaufen. Bitte auf die Blase tippen und erneut freigeben", Toast.LENGTH_LONG).show()
         }
 
         return START_NOT_STICKY
@@ -134,10 +159,10 @@ class FloatingBubbleService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "多邻国国象助手",
+                "Duolingo-Schachassistent",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "屏幕悬浮辅助服务"
+                description = "Overlay-Dienst am Bildschirmrand"
                 setShowBadge(false)
             }
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -145,8 +170,8 @@ class FloatingBubbleService : Service() {
         }
 
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("多邻国国际象棋助手正在运行")
-            .setContentText("点击屏幕悬浮球即可获取 Stockfish 实时最佳走法")
+            .setContentTitle("Der Duolingo-Schachassistent läuft")
+            .setContentText("Auf die Blase tippen, um den besten Zug von Stockfish zu erhalten")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -180,12 +205,12 @@ class FloatingBubbleService : Service() {
         try {
             mediaProjection = mediaProjectionManager?.getMediaProjection(resultCode, resultData)
             if (mediaProjection == null) {
-                recordProjectionState("初始化失败: getMediaProjection 返回 null (Token 无效或已被消费)")
-                Toast.makeText(this, "MediaProjection 初始化失败", Toast.LENGTH_SHORT).show()
+                recordProjectionState("Initialisierung fehlgeschlagen: getMediaProjection lieferte null (Token ungültig oder bereits verbraucht)")
+                Toast.makeText(this, "MediaProjection konnte nicht initialisiert werden", Toast.LENGTH_SHORT).show()
                 return
             }
 
-            // 会话生命周期监听：系统终止共享时立即回收引用并大声告知，避免僵尸态 (引用非 null 但会话已死)
+            // Lebenszyklus der Sitzung beobachten: beendet das System die Freigabe, werden die Referenzen sofort freigegeben und der Nutzer informiert, damit kein Zombie-Zustand entsteht (Referenz vorhanden, Sitzung tot)
             mediaProjection?.registerCallback(projectionCallback, captureHandler)
 
             imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 3)
@@ -208,25 +233,25 @@ class FloatingBubbleService : Service() {
                 }
             }, captureHandler)
 
-            recordProjectionState("投影会话建立成功 (${screenWidth}x${screenHeight}, dpi=$screenDensity)")
-            Toast.makeText(this, "悬浮助手已就绪", Toast.LENGTH_SHORT).show()
+            recordProjectionState("Aufnahmesitzung erfolgreich aufgebaut (${screenWidth}x${screenHeight}, dpi=$screenDensity)")
+            Toast.makeText(this, "Der Overlay-Assistent ist bereit", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             e.printStackTrace()
-            // 半初始化回滚：任何一步失败都清掉已创建的资源，保证三引用状态一致，杜绝脏状态
-            recordProjectionState("投影会话启动异常: ${e.javaClass.simpleName}: ${e.message}")
+            // Rücknahme einer halben Initialisierung: scheitert ein Schritt, werden alle bereits angelegten Ressourcen verworfen, damit die drei Referenzen konsistent bleiben
+            recordProjectionState("Ausnahme beim Start der Aufnahmesitzung: ${e.javaClass.simpleName}: ${e.message}")
             rollbackProjection()
-            Toast.makeText(this, "启动截屏会话异常: ${e.message}", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Ausnahme beim Start der Bildschirmaufnahme: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
-            recordProjectionState("系统终止了屏幕共享会话 (MediaProjection.Callback#onStop)")
+            recordProjectionState("Das System hat die Bildschirmfreigabe beendet (MediaProjection.Callback#onStop)")
             rollbackProjection()
             serviceScope.launch(Dispatchers.Main) {
                 Toast.makeText(
                     this@FloatingBubbleService,
-                    "屏幕共享会话已被系统终止，请点击悬浮球重新授权",
+                    "Die Bildschirmfreigabe wurde vom System beendet. Bitte auf die Blase tippen und erneut freigeben",
                     Toast.LENGTH_LONG
                 ).show()
             }
@@ -234,7 +259,7 @@ class FloatingBubbleService : Service() {
     }
 
     /**
-     * 回滚/回收投影资源但不主动 stop() (onStop 回调中会话已由系统终止)
+     * Projektionsressourcen zurücknehmen, ohne selbst stop() aufzurufen (im onStop-Callback hat das System die Sitzung bereits beendet)
      */
     private fun rollbackProjection() {
         try { virtualDisplay?.release() } catch (_: Exception) {}
@@ -245,14 +270,14 @@ class FloatingBubbleService : Service() {
     }
 
     /**
-     * 投影会话状态落盘自取证 (filesDir/debug/projection_state.txt)，供 MainActivity 诊断页展示
+     * Zustand der Aufnahmesitzung zur Selbstforensik speichern (filesDir/debug/projection_state.txt), wird auf der Diagnoseseite der MainActivity angezeigt
      */
     private fun recordProjectionState(desc: String) {
         try {
             val debugDir = File(filesDir, "debug")
             if (!debugDir.exists()) debugDir.mkdirs()
             val timeStr = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
-            File(debugDir, "projection_state.txt").writeText("$desc\n记录时间: $timeStr\n")
+            File(debugDir, "projection_state.txt").writeText("$desc\nZeitpunkt: $timeStr\n")
         } catch (_: Exception) {}
     }
 
@@ -289,6 +314,7 @@ class FloatingBubbleService : Service() {
             private var initialTouchX = 0f
             private var initialTouchY = 0f
             private var isClick = false
+            private var touchDownTime = 0L
 
             override fun onTouch(v: View, event: MotionEvent): Boolean {
                 when (event.action) {
@@ -298,6 +324,7 @@ class FloatingBubbleService : Service() {
                         initialTouchX = event.rawX
                         initialTouchY = event.rawY
                         isClick = true
+                        touchDownTime = System.currentTimeMillis()
                         return true
                     }
                     MotionEvent.ACTION_MOVE -> {
@@ -313,7 +340,12 @@ class FloatingBubbleService : Service() {
                     }
                     MotionEvent.ACTION_UP -> {
                         if (isClick) {
-                            onBubbleClicked()
+                            if (System.currentTimeMillis() - touchDownTime >= LONG_PRESS_MS) {
+                                // Langer Druck: eigene Farbe von Hand umschalten
+                                togglePerspectiveManually()
+                            } else {
+                                onBubbleClicked()
+                            }
                         }
                         return true
                     }
@@ -325,11 +357,31 @@ class FloatingBubbleService : Service() {
         windowManager.addView(bubbleView, params)
     }
 
+    /**
+     * Langer Druck auf die Blase: die eigene Farbe von Hand umschalten.
+     * Notausstieg für den Fall, dass die automatische Erkennung die Seiten vertauscht - der Pfeil
+     * zeigte dann Züge für die Figuren des Gegners. Ab hier gilt die gesetzte Perspektive fest,
+     * bis erneut lang gedrückt wird oder der Dienst neu startet.
+     */
+    private fun togglePerspectiveManually() {
+        val current = sessionLockedPerspective ?: true
+        val flipped = !current
+        sessionLockedPerspective = flipped
+        manualPerspectiveLock = true
+        perspectiveConflictStreak = 0
+        lastFen = null
+        Toast.makeText(
+            this,
+            "Eigene Farbe von Hand auf ${if (flipped) "Weiß" else "Schwarz"} gesetzt (erneut lange drücken zum Zurücksetzen)",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
     private fun onBubbleClicked() {
         if (isAnalyzing) return
 
         if (mediaProjection == null || imageReader == null || virtualDisplay == null) {
-            Toast.makeText(this, "截屏授权已失效，请重新开启悬浮助手", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Die Aufnahmeberechtigung ist abgelaufen, bitte den Overlay-Assistenten neu starten", Toast.LENGTH_LONG).show()
             val reAuthIntent = Intent(this, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             }
@@ -344,8 +396,8 @@ class FloatingBubbleService : Service() {
             try {
                 transparentOverlay?.hide()
                 bubbleView?.visibility = View.INVISIBLE
-                // 150ms 而非 60ms (bug_13/14 嫌疑): VirtualDisplay 从窗口移除到干净帧入缓冲区存在合成延迟，
-                // 等待不足时截到的仍是带建议黑框/箭头的旧帧，第 8 横线被盖住即产生"阻隔子漏检"假象
+                // 150 ms statt 60 ms (Verdacht aus bug_13/14): zwischen dem Entfernen der Fenster und dem Eintreffen eines sauberen Frames im Puffer liegt eine Kompositionsverzögerung.
+                // Wartet man zu kurz, enthält die Aufnahme noch den alten Frame mit Rahmen und Pfeil; verdeckt der die 8. Linie, sieht es nach einer übersehenen Figur aus
                 delay(150)
 
                 screenBitmap = captureCurrentScreenBitmap()
@@ -353,7 +405,7 @@ class FloatingBubbleService : Service() {
                 bubbleView?.visibility = View.VISIBLE
 
                 if (screenBitmap == null) {
-                    Toast.makeText(this@FloatingBubbleService, "画面截取中，请稍后重试", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@FloatingBubbleService, "Bild wird noch aufgenommen, bitte kurz danach erneut versuchen", Toast.LENGTH_SHORT).show()
                     return@launch
                 }
 
@@ -362,15 +414,15 @@ class FloatingBubbleService : Service() {
                 }
                 var boardRect = locateResult.rect
 
-                // 裁剪帧识别契约 (负边距/越界): 只提示不硬匹配——rect 越界直接进分类裁图会抛异常崩溃，
-                // 且画面不完整本就无法可靠识别; 【修改】触发故障大屏看板并曝光红框
+                // Umgang mit zugeschnittenen Frames (negative Ränder bzw. Überlauf): nur melden, nicht erzwingen - ein Rect außerhalb des Bildes würde beim Zuschneiden eine Ausnahme werfen,
+                // und ein unvollständiges Bild ist ohnehin nicht zuverlässig erkennbar; stattdessen erscheinen die Fehlertafel und der rote Rahmen
                 if (locateResult.isCropped) {
                     val croppedCopy = try {
                         screenBitmap.copy(screenBitmap.config ?: Bitmap.Config.ARGB_8888, false)
                     } catch (_: Exception) { null }
                     saveDebugArtifactsAsync(croppedCopy, boardRect, locateResult, "CROPPED_FRAME_NO_FEN")
                     withContext(Dispatchers.Main) {
-                        transparentOverlay?.showError("定位越界: 棋盘不完整，请居中棋盘", boardRect)
+                        transparentOverlay?.showError("Außerhalb des Bildes: das Brett ist unvollständig, bitte mittig ausrichten", boardRect)
                     }
                     return@launch
                 }
@@ -383,9 +435,9 @@ class FloatingBubbleService : Service() {
                     )
                 }
 
-                // 候选救援 (bug_19/superbug 定案): 主框产出"不可能局面"或整体被门禁拦截，都是定位器双峰误选假框的
-                // 实锤特征 (假框因 UI 边缘能量可反超真框 710 vs 670，单峰 argmax 不可靠)，自动改用次候选框重识别
-                // 【修改】同时要求定位置信度不能为 low，强制避开墓地 UI 等残缺定位
+                // Rettung über den Zweitkandidaten (Befund aus bug_19/superbug): liefert der Hauptrahmen eine unmögliche Stellung oder wird er komplett abgewiesen,
+                // ist das ein sicheres Zeichen für einen falsch gewählten Rahmen des Locators (die Energie einer UI-Kante kann den echten Rahmen überbieten, 710 gegen 670, ein einzelnes Maximum ist also nicht verlässlich)
+                // Zusätzlich darf die Confidence des Locators nicht "low" sein, damit unvollständige Rahmen wie Randbereiche der Oberfläche ausscheiden
                 val primaryNeedsRescue = locateResult.confidence == "low" ||
                     (detailedResp is UltraRobustClassifier.ClassificationResponse.Success &&
                     StockfishBridge.validateFenSanity(detailedResp.result.fullFen) != null) ||
@@ -404,7 +456,7 @@ class FloatingBubbleService : Service() {
                                 overridePerspective = sessionLockedPerspective
                             )
                         }
-                        // 【修改】绝对硬性约束：次候选的残差必须足够低 (相对单格 <= 5%)，且不能是退化定位，避免救援错上加错
+                        // Harte Bedingung: das Residuum des Zweitkandidaten muss klein genug sein (höchstens 5 % eines Feldes) und darf nicht aus einem entarteten Fit stammen, sonst ersetzt ein Fehler nur den nächsten
                         val rescueMaxResid = (rescueRect.width() / 8.0f) * 0.05f
                         if (rescueResp is UltraRobustClassifier.ClassificationResponse.Success &&
                             StockfishBridge.validateFenSanity(rescueResp.result.fullFen) == null &&
@@ -424,37 +476,60 @@ class FloatingBubbleService : Service() {
 
                 when (detailedResp) {
                     is UltraRobustClassifier.ClassificationResponse.Success -> {
-                        val res = detailedResp.result
-                        
-                        // 【新增】只要获得合法的 FEN，立刻静默复制到系统剪贴板，方便溯源假框证据
+                        var res = detailedResp.result
+
+                        // Perspektivsperre der Sitzung über den reinen Zustandsautomaten aktualisieren (neue Partie ab 26 Figuren kalibriert zwangsweise auf detectedPerspective, im Mittel- und Endspiel bleibt die Sperre stehen).
+                        // Eine per langem Druck auf die Blase gesetzte Sperre gilt als Ansage des Nutzers und wird nicht automatisch überschrieben.
+                        if (!manualPerspectiveLock) {
+                            sessionLockedPerspective = UltraRobustClassifier.resolvePerspectiveLock(
+                                currentLock = sessionLockedPerspective,
+                                detectedPerspective = detailedResp.detectedPerspective,
+                                occupiedCount = detailedResp.occupiedCount,
+                                medianSim = detailedResp.medianSim,
+                                perspectiveConfidence = detailedResp.perspectiveConfidence
+                            )
+
+                            // Selbstheilung bei Fehlsperre (Lektion aus bug_19): früher war die Sperre unwiderruflich, eine Fehlsperre lieferte danach in jedem Frame ein gespiegeltes FEN.
+                            // Widerspricht die Erkennung in 2 aufeinanderfolgenden verlässlichen Frames der Sperre, wird neu gesperrt (in einer normalen Partie wechselt die Perspektive nicht mitten im Spiel).
+                            // Zusätzlich muss die Perspektive selbst belastbar sein, sonst hebt ein einzelner Zufallstreffer eine korrekte Sperre auf.
+                            if (sessionLockedPerspective != null && sessionLockedPerspective != detailedResp.detectedPerspective &&
+                                detailedResp.medianSim >= 0.70f && detailedResp.occupiedCount >= 16 &&
+                                detailedResp.perspectiveConfidence >= 0.35f
+                            ) {
+                                perspectiveConflictStreak++
+                                if (perspectiveConflictStreak >= 2) {
+                                    sessionLockedPerspective = detailedResp.detectedPerspective
+                                    perspectiveConflictStreak = 0
+                                }
+                            } else {
+                                perspectiveConflictStreak = 0
+                            }
+                        }
+
+                        // Fehlerbild "es werden die Figuren des Gegners analysiert": das FEN entstand oben
+                        // mit der Sperre, wie sie vor diesem Frame galt. Ändert der Zustandsautomat die Sperre
+                        // gerade jetzt (Neukalibrierung, Aufhebung einer Fehlsperre, manuelle Umschaltung), passte
+                        // das eben berechnete FEN noch zur alten Perspektive - Pfeil und Bewertung galten dann der
+                        // falschen Seite. Deshalb wird das FEN vor der Analyse mit der endgültigen Perspektive neu
+                        // aufgebaut; rawBoard ist die Bildschirmansicht, das ist reines Rechnen ohne neue Bildanalyse.
+                        val finalPerspective = sessionLockedPerspective ?: detailedResp.detectedPerspective
+                        if (finalPerspective != res.isWhitePerspective) {
+                            res = UltraRobustClassifier.buildFenFromBoard(
+                                rawBoard = res.rawBoard,
+                                isWhitePerspective = finalPerspective,
+                                boardRect = res.boardRect,
+                                medianSim = res.medianSim,
+                                occupiedCount = res.occupiedCount
+                            )
+                        }
+
+                        // Sobald ein gültiges FEN vorliegt, wandert es still in die Zwischenablage - so lässt sich ein falscher Rahmen später belegen
                         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         val clip = ClipData.newPlainText("FEN", res.fullFen)
                         clipboard.setPrimaryClip(clip)
 
-                        // 方案 A: 使用纯函数状态机更新会话锁定视角 (新局>=26颗子强制校准为 detectedPerspective, 中残局锁定不漂移)
-                        sessionLockedPerspective = UltraRobustClassifier.resolvePerspectiveLock(
-                            currentLock = sessionLockedPerspective,
-                            detectedPerspective = detailedResp.detectedPerspective,
-                            occupiedCount = detailedResp.occupiedCount,
-                            medianSim = detailedResp.medianSim
-                        )
-
-                        // 视角误锁自愈 (bug_19 教训): 原锁定"永不撤销"，一旦误锁后每帧都产出翻转的错误 FEN。
-                        // 高置信帧连续 2 次检测视角与锁定矛盾即撤销重锁 (正常对局视角不会中途翻转)
-                        if (sessionLockedPerspective != null && sessionLockedPerspective != detailedResp.detectedPerspective &&
-                            detailedResp.medianSim >= 0.70f && detailedResp.occupiedCount >= 16
-                        ) {
-                            perspectiveConflictStreak++
-                            if (perspectiveConflictStreak >= 2) {
-                                sessionLockedPerspective = detailedResp.detectedPerspective
-                                perspectiveConflictStreak = 0
-                            }
-                        } else {
-                            perspectiveConflictStreak = 0
-                        }
-
-                        // 逐格取证落盘 (bug_11~14 定案用): 低置信格与门控截断候选写入 cells_forensics.txt
-                        // LocateScore/Confidence/Residual (阶段二精标定定案用): 定位器置信分与残差遥测落盘
+                        // Zellenweise Forensik speichern (für die Fälle bug_11~14): unsichere Felder und vom Gatter verworfene Kandidaten landen in cells_forensics.txt
+                        // LocateScore/Confidence/Residual: Telemetrie des Locators für die Feinkalibrierung
                         val cellForensics = buildString {
                             appendLine("LocateScore: ${String.format("%.1f", locateResult.score)}")
                             appendLine("Confidence: ${locateResult.confidence}")
@@ -465,49 +540,50 @@ class FloatingBubbleService : Service() {
                         }
                         saveDebugArtifactsAsync(copyForDebug, boardRect, locateResult, res.fullFen, cellForensics)
                         
-                        val eval = StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = 200)
+                        // Vorgegebene Bedenkzeit: go movetime 2000
+                        val eval = StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = StockfishBridge.DEFAULT_MOVE_TIME_MS)
 
-                        // 识别异常哨兵 (bug_19/superbug 定案): FEN 预校验拦截的不可能局面不是引擎故障更不是兜底场景，
-                        // 【修改】隐藏建议箭头避免误导，直接弹大红框并曝光错误的 FEN
+                        // Sentinel der Erkennung (Befund aus bug_19/superbug): eine von der FEN-Vorprüfung abgefangene unmögliche Stellung ist weder ein Engine-Fehler noch ein Fall für den Fallback,
+                        // deshalb wird kein Pfeil gezeichnet, sondern die rote Fehlertafel mit dem fehlerhaften FEN angezeigt
                         if (eval.bestMove == "(invalid)") {
                             withContext(Dispatchers.Main) {
-                                transparentOverlay?.showError("识别出不可能局面 (双王相邻或棋子异常)", boardRect, res.fullFen)
+                                transparentOverlay?.showError("Unmögliche Stellung erkannt (Könige nebeneinander oder Figuren fehlerhaft)", boardRect, res.fullFen)
                             }
                             lastFen = res.fullFen
                             return@launch
                         }
 
-                        // 【新增】提取起点棋子类型，构建如 R-d4d5 的展示字符串 (UCI -> SAN)
+                        // Figurentyp des Startfeldes voranstellen, ergibt eine Anzeige wie R-d4d5 (UCI -> SAN)
                         var displayMoveStr = eval.bestMove
                         if (eval.bestMove.length >= 4 && eval.bestMove[0] in 'a'..'h') {
                             val fileIdx = eval.bestMove[0] - 'a'
-                            val rankIdx = 8 - (eval.bestMove[1] - '0') // standardBoard 的 r=0 是 rank 8
+                            val rankIdx = 8 - (eval.bestMove[1] - '0') // in standardBoard entspricht r=0 der Reihe 8
                             val pieceChar = res.standardBoard[rankIdx][fileIdx]
                             
-                            // 规则：兵不加前缀，其他棋子加首字母大写
+                            // Regel: Bauern ohne Präfix, alle anderen Figuren mit ihrem Großbuchstaben
                             if (!pieceChar.equals('p', ignoreCase = true) && pieceChar != '.') {
                                 displayMoveStr = "${pieceChar.uppercaseChar()}-${eval.bestMove}"
                             }
                         }
 
-                        // 识别抖动警示: 棋盘未动但 FEN 变化 = 分类/视角层抖动，两次建议不同的直接证据
-                        val fenFlickerWarn = if (lastFen != null && lastFen != res.fullFen) " | ⚠识别抖动" else ""
+                        // Warnung vor flackernder Erkennung: unverändertes Brett bei geändertem FEN belegt ein Flackern in Klassifikation oder Perspektive und damit wechselnde Empfehlungen
+                        val fenFlickerWarn = if (lastFen != null && lastFen != res.fullFen) " | Erkennung flackert" else ""
                         lastFen = res.fullFen
 
-                        // 兜底大声告知 (bug_15 教训): 悬浮层出现 [兜] 时现场即给出引擎诊断首行，详情已落盘 engine_fallback_log.txt
-                        // 引擎确认的终局 (将杀/逼和) 虽 depth=0 但不是兜底，不得误报 (bug_19 教训)
+                        // Fallback deutlich anzeigen (Lektion aus bug_15): erscheint im Overlay der Fallback-Hinweis, steht die erste Diagnosezeile sofort daneben, alle Details liegen in engine_fallback_log.txt
+                        // Ein von der Engine bestätigtes Partieende (Matt/Patt) hat zwar depth=0, ist aber kein Fallback und darf nicht so gemeldet werden (Lektion aus bug_19)
                         val isTrueFallback = eval.depth <= 0 &&
                             eval.bestMove != "(checkmate)" && eval.bestMove != "(stalemate)"
                         val engineWarn = if (isTrueFallback) {
-                            " | 【引擎兜底】"
+                            " | [Engine-Fallback]"
                         } else ""
                         
-                        // 低置信格徽标 (bug_11 教训): 单格误分类嫌疑现场可见，全量详情在 cells_forensics.txt
+                        // Kennzeichnung unsicherer Felder (Lektion aus bug_11): ein Verdacht auf Fehlklassifikation ist sofort sichtbar, alle Details stehen in cells_forensics.txt
                         val lowConfWarn = if (detailedResp.lowConfidenceCells.isNotEmpty()) {
-                            " | ⚠疑格:${detailedResp.lowConfidenceCells.take(3).joinToString(",")}"
+                            " | unsichere Felder: ${detailedResp.lowConfidenceCells.take(3).joinToString(",")}"
                         } else ""
 
-                        // 【修改】增加 displayMoveStr 和 fenString
+                        // Übergabe an das Overlay inklusive displayMoveStr und fenString
                         transparentOverlay?.showSuggestion(
                             boardRect = res.boardRect,
                             moveInfo = eval,
@@ -520,15 +596,19 @@ class FloatingBubbleService : Service() {
                         )
 
                         val conflictDesc = if (sessionLockedPerspective != null && detailedResp.detectedPerspective != res.isWhitePerspective) {
-                            ", 探测:${if (detailedResp.detectedPerspective) "白" else "黑"}"
+                            ", erkannt: ${if (detailedResp.detectedPerspective) "Weiß" else "Schwarz"}"
                         } else ""
-                        val lockedStateDesc = if (sessionLockedPerspective != null) "(锁定$conflictDesc)" else ""
-                        val perspectiveName = if (res.isWhitePerspective) "执白$lockedStateDesc" else "执黑$lockedStateDesc"
+                        val lockedStateDesc = when {
+                            manualPerspectiveLock -> "(von Hand$conflictDesc)"
+                            sessionLockedPerspective != null -> "(gesperrt$conflictDesc)"
+                            else -> ""
+                        }
+                        val perspectiveName = if (res.isWhitePerspective) "Weiß$lockedStateDesc" else "Schwarz$lockedStateDesc"
 
                         withContext(Dispatchers.Main) {
                             Toast.makeText(
                                 this@FloatingBubbleService,
-                                "【FEN 已复制】视角: $perspectiveName | Sim: ${String.format("%.3f", detailedResp.medianSim)}$engineWarn$lowConfWarn$fenFlickerWarn",
+                                "[FEN kopiert] Perspektive: $perspectiveName (${detailedResp.perspectiveReason}, ${String.format("%.0f", detailedResp.perspectiveConfidence * 100)}%) | Sim: ${String.format("%.3f", detailedResp.medianSim)}$engineWarn$lowConfWarn$fenFlickerWarn",
                                 if (isTrueFallback) Toast.LENGTH_LONG else Toast.LENGTH_SHORT
                             ).show()
                         }
@@ -544,19 +624,19 @@ class FloatingBubbleService : Service() {
                         }
                         saveDebugArtifactsAsync(copyForDebug, boardRect, locateResult, "REJECTED_${detailedResp.reason}", rejectedForensics)
                         
-                        // 【修改】弹出大红框与故障原因，让假框无所遁形
+                        // Rote Fehlertafel mit dem Grund anzeigen, damit ein falscher Rahmen sichtbar wird
                         withContext(Dispatchers.Main) {
                             transparentOverlay?.showError(detailedResp.reason, boardRect)
                             Toast.makeText(
                                 this@FloatingBubbleService,
-                                "【门禁拦截】原因: ${detailedResp.reason} (Sim=${String.format("%.3f", detailedResp.medianSim)}, 占位=${detailedResp.occupiedCount}, 定位分=${String.format("%.0f", locateResult.score)})",
+                                "[Vom Gatter abgewiesen] Grund: ${detailedResp.reason} (Sim=${String.format("%.3f", detailedResp.medianSim)}, belegt=${detailedResp.occupiedCount}, Locator-Score=${String.format("%.0f", locateResult.score)})",
                                 Toast.LENGTH_LONG
                             ).show()
                         }
                     }
                     null -> {
                         withContext(Dispatchers.Main) {
-                            transparentOverlay?.showError("分类器未初始化")
+                            transparentOverlay?.showError("Der Klassifikator ist nicht initialisiert")
                         }
                     }
                 }
@@ -571,8 +651,8 @@ class FloatingBubbleService : Service() {
     }
 
     /**
-     * 从常驻 ImageReader 中提取当前最新鲜一帧 Bitmap
-     * 优雅排空：保留当前可获取到的最后一帧有效 Image，若无则等待新帧到达，杜绝静态画面全排空导致的空指针回归
+     * Holt den aktuellsten Frame als Bitmap aus dem dauerhaft geöffneten ImageReader
+     * Sauberes Leeren: das letzte erreichbare gültige Image bleibt erhalten, sonst wird auf einen neuen Frame gewartet - so entsteht bei stehendem Bild kein Nullwert
      */
     private suspend fun captureCurrentScreenBitmap(): Bitmap? = withContext(Dispatchers.IO) {
         val reader = imageReader ?: return@withContext null
@@ -650,14 +730,14 @@ class FloatingBubbleService : Service() {
                 val txtFile = File(debugDir, "last_diagnostic.txt")
                 val timeStr = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
                 txtFile.writeText(
-                    "来源: [实机悬浮窗]\n" +
+                    "Quelle: [Overlay auf dem Gerät]\n" +
                     "BoardRect: $rect\n" +
                     "LocateScore: ${String.format("%.1f", locateResult.score)}\n" +
                     "Confidence: ${locateResult.confidence}\n" +
                     "Residual: ${String.format("%.2f", locateResult.residual)}\n" +
                     "IsCropped: ${locateResult.isCropped}\n" +
                     "FEN: $fen\n" +
-                    "${cellForensics}记录时间: $timeStr\n"
+                    "${cellForensics}Zeitpunkt: $timeStr\n"
                 )
             } catch (_: Exception) {
             } finally {
@@ -677,6 +757,7 @@ class FloatingBubbleService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        isRunning = false
         serviceScope.cancel()
         bubbleView?.let { windowManager.removeView(it) }
         transparentOverlay?.hide()
