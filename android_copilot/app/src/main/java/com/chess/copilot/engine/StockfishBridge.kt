@@ -75,10 +75,13 @@ object StockfishBridge {
     const val LOCAL_MOVE_OVERHEAD_MS = 10
 
     /**
-     * Reine Funktion: Threads = logische Kerne minus 2 (z. B. 14 bei 16 Kernen), mindestens 1.
-     * Die zwei freigehaltenen Kerne bleiben für Bildschirmaufnahme, Erkennung und Oberfläche.
+     * Reine Funktion: Threads = logische Kerne minus 1, mindestens 1.
+     *
+     * Ausgelegt auf höchste Spielstärke: es bleibt genau ein Kern für Oberfläche und
+     * Bildschirmaufnahme frei. Während die Engine rechnet, ruht die Beobachtung ohnehin,
+     * die Suche bekommt also praktisch das ganze Gerät.
      */
-    fun computeThreads(logicalCores: Int): Int = (logicalCores - 2).coerceAtLeast(1)
+    fun computeThreads(logicalCores: Int): Int = (logicalCores - 1).coerceAtLeast(1)
 
     /**
      * Reine Funktion: Hash-Größe nach Vorgabe.
@@ -236,8 +239,9 @@ object StockfishBridge {
     // LRU-Cache: hält die echten Analyseergebnisse der letzten 32 Stellungen
     private val evalCache = LruCache<String, EngineEvaluation>(32)
 
-    // Vorgegebene Bedenkzeit pro Zug: "go movetime 2000"
-    const val DEFAULT_MOVE_TIME_MS = 2000L
+    // Bedenkzeit pro Zug: "go movetime 4000". Mehr Zeit ist der wirksamste Hebel für Spielstärke -
+    // je Verdopplung der Bedenkzeit gewinnt Stockfish grob 50 bis 70 Elo hinzu.
+    const val DEFAULT_MOVE_TIME_MS = 4000L
 
     // Von der laufenden Engine per "option name ..." gemeldete Optionsnamen.
     // Gesetzt wird nur, was die Engine auch kennt (ältere Versionen kennen z. B. kein NumaPolicy).
@@ -693,10 +697,16 @@ object StockfishBridge {
             // Restzeilen aus früheren Ausgaben verwerfen
             while (lineChannel?.tryReceive()?.getOrNull() != null) {}
 
-            // Vorgabe: vor jeder neuen, unabhängigen Stellung ucinewgame senden.
-            // Jeder Klick auf die Blase analysiert eine eigenständige Stellung, keine Fortsetzung
-            // einer laufenden Partie, deshalb steht das hier vor jeder Suche.
-            sendCommand("ucinewgame")
+            // ucinewgame nur bei einer wirklich neuen Partie senden.
+            //
+            // Der Befehl leert die Transpositionstabelle. Innerhalb einer laufenden Partie ist die
+            // nächste Stellung aber keine unabhängige, sondern die Fortsetzung der vorherigen: die
+            // gespeicherten Bewertungen passen weiterhin und ersparen der Suche einen großen Teil
+            // der Arbeit. Sie bei jedem Zug wegzuwerfen kostet spürbar Spielstärke.
+            if (isNewGamePosition(fen)) {
+                Log.i(TAG, "Neue Partie erkannt, Transpositionstabelle wird geleert")
+                sendCommand("ucinewgame")
+            }
             sendCommand("isready")
             val readyOk = waitForResponse("readyok", timeoutMs = 3000)
             if (!readyOk) {
@@ -802,6 +812,19 @@ object StockfishBridge {
             destroyProcessLocked()
             return null
         }
+    }
+
+    /**
+     * Reine Funktion: Ist diese Stellung der Beginn einer neuen Partie?
+     *
+     * Entscheidend ist die Zahl der Figuren: mit 28 oder mehr steht praktisch noch die
+     * Ausgangsstellung, dann lohnt das Leeren der Tabelle. In jeder anderen Lage ist die Stellung
+     * die Fortsetzung der bisherigen Partie.
+     */
+    fun isNewGamePosition(fen: String): Boolean {
+        val boardPart = fen.substringBefore(' ')
+        val pieces = boardPart.count { it.isLetter() }
+        return pieces >= 28
     }
 
     /**

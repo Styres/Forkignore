@@ -62,6 +62,13 @@ class UltraRobustClassifier(context: Context? = null) {
     }
 
     /**
+     * Ergebnis der Zugerkennung über den Feldvergleich.
+     * @param fromCell Feldindex (Zeile * 8 + Spalte) im Bildschirmraster, das leer geworden ist
+     * @param toCell Feldindex, auf dem die Figur jetzt steht
+     */
+    data class DetectedMove(val fromCell: Int, val toCell: Int)
+
+    /**
      * Ergebnis der Perspektiverkennung
      * @param isWhitePerspective true = Weiß sitzt unten (eigene Farbe Weiß)
      * @param confidence Betrag der gewichteten Signalsumme in [0..1]; 0 = die Signale heben sich auf
@@ -810,6 +817,75 @@ class UltraRobustClassifier(context: Context? = null) {
          */
         fun opponentMovedSince(previousSquares: Set<String>, currentSquares: Set<String>): Boolean {
             return currentSquares.any { it !in previousSquares }
+        }
+
+        /**
+         * Reine Funktion: liest aus zwei Aufnahmen den gespielten Zug ab.
+         *
+         * Ein gewöhnlicher Zug verändert genau zwei Felder: das Startfeld wird leer, das Zielfeld
+         * wird besetzt (oder wechselt bei einem Schlagfall seinen Inhalt). Genau dieses Muster wird
+         * hier gesucht - damit steht fest, welche Figur gezogen ist, ohne das ganze Brett neu zu
+         * erkennen.
+         *
+         * Alles andere (Rochade mit vier veränderten Feldern, en passant, Umwandlung, mehrere
+         * gleichzeitige Änderungen durch Animationen) liefert bewusst null: dann muss die vollständige
+         * Erkennung ran, statt auf gut Glück zu raten.
+         *
+         * Ob ein Feld besetzt ist, verrät die Streuung: ein leeres Feld ist eine gleichmäßige Fläche,
+         * eine Figur bringt Kanten und damit Streuung mit sich.
+         *
+         * @param occupiedLimit Streuung, ab der ein Feld als besetzt gilt
+         */
+        fun detectMove(
+            previousMeans: FloatArray,
+            previousStds: FloatArray,
+            currentMeans: FloatArray,
+            currentStds: FloatArray,
+            ignoredCells: Set<Int> = emptySet(),
+            occupiedLimit: Float = 12.0f,
+            meanTolerance: Float = 14.0f,
+            stdTolerance: Float = 10.0f
+        ): DetectedMove? {
+            if (previousMeans.size != currentMeans.size || previousStds.size != currentStds.size) return null
+
+            val emptied = mutableListOf<Int>()
+            val occupied = mutableListOf<Int>()
+
+            for (i in currentMeans.indices) {
+                if (i in ignoredCells) continue
+                val wasOccupied = previousStds[i] >= occupiedLimit
+                val isOccupied = currentStds[i] >= occupiedLimit
+                val contentChanged = abs(previousMeans[i] - currentMeans[i]) > meanTolerance ||
+                    abs(previousStds[i] - currentStds[i]) > stdTolerance
+
+                when {
+                    wasOccupied && !isOccupied -> emptied.add(i)
+                    !wasOccupied && isOccupied -> occupied.add(i)
+                    // Schlagfall: vorher und nachher besetzt, aber der Inhalt ist ein anderer
+                    wasOccupied && isOccupied && contentChanged -> occupied.add(i)
+                    // Ein leeres Feld, dessen Helligkeit sich merklich ändert, ist eine Störung
+                    !wasOccupied && !isOccupied && contentChanged -> return null
+                }
+            }
+
+            if (emptied.size != 1 || occupied.size != 1) return null
+            return DetectedMove(emptied[0], occupied[0])
+        }
+
+        /**
+         * Reine Funktion: wendet einen erkannten Zug auf das Bildschirmbrett an.
+         * Die Figur vom Startfeld steht danach auf dem Zielfeld, das Startfeld ist leer.
+         */
+        fun applyMoveToScreenBoard(screenBoard: Array<CharArray>, move: DetectedMove): Array<CharArray> {
+            val result = Array(8) { r -> CharArray(8) { c -> screenBoard[r][c] } }
+            val fromRow = move.fromCell / 8
+            val fromCol = move.fromCell % 8
+            val toRow = move.toCell / 8
+            val toCol = move.toCell % 8
+            if (fromRow !in 0..7 || fromCol !in 0..7 || toRow !in 0..7 || toCol !in 0..7) return result
+            result[toRow][toCol] = result[fromRow][fromCol]
+            result[fromRow][fromCol] = '.'
+            return result
         }
 
         /**

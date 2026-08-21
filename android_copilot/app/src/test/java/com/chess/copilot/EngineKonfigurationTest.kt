@@ -2,6 +2,7 @@ package com.chess.copilot
 
 import com.chess.copilot.engine.StockfishBridge
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -13,13 +14,31 @@ import org.junit.Test
 class EngineKonfigurationTest {
 
     @Test
-    fun testThreadsSindKerneMinusZwei() {
-        assertEquals(14, StockfishBridge.computeThreads(16))
-        assertEquals(10, StockfishBridge.computeThreads(12))
-        assertEquals(6, StockfishBridge.computeThreads(8))
+    fun testThreadsLassenGenauEinenKernFrei() {
+        // Auf höchste Spielstärke ausgelegt: nur ein Kern bleibt für Oberfläche und Aufnahme frei
+        assertEquals(15, StockfishBridge.computeThreads(16))
+        assertEquals(11, StockfishBridge.computeThreads(12))
+        assertEquals(7, StockfishBridge.computeThreads(8))
         // Untergrenze: auf einem Ein- oder Zweikerner bleibt mindestens ein Suchthread übrig
         assertEquals(1, StockfishBridge.computeThreads(2))
         assertEquals(1, StockfishBridge.computeThreads(1))
+    }
+
+    @Test
+    fun testBedenkzeitBetraegtVierSekunden() {
+        assertEquals(4000L, StockfishBridge.DEFAULT_MOVE_TIME_MS)
+    }
+
+    @Test
+    fun testNeuePartieNurBeiVollemBrett() {
+        // Ausgangsstellung: 32 Figuren
+        assertTrue(StockfishBridge.isNewGamePosition("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"))
+        // Eröffnung nach ein paar Zügen: immer noch praktisch alles da
+        assertTrue(StockfishBridge.isNewGamePosition("rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2"))
+        // Mittelspiel: die Tabelle bleibt stehen, ihre Bewertungen gelten weiter
+        assertFalse(StockfishBridge.isNewGamePosition("r3k2r/pp3ppp/8/8/8/8/PP3PPP/R3K2R w KQkq - 0 20"))
+        // Endspiel erst recht
+        assertFalse(StockfishBridge.isNewGamePosition("8/8/4k3/8/8/4K3/4P3/8 w - - 0 40"))
     }
 
     @Test
@@ -50,13 +69,13 @@ class EngineKonfigurationTest {
     @Test
     fun testVollstaendigeOptionslisteOhneTablebases() {
         val config = StockfishBridge.buildEngineConfig(logicalCores = 16, deviceRamMb = 16384)
-        assertEquals(14, config.threads)
+        assertEquals(15, config.threads)
         assertEquals(1024, config.hashMb)
         assertEquals(10, config.moveOverheadMs)
         assertNull(config.syzygyPath)
 
         val options = StockfishBridge.buildUciOptions(config).toMap()
-        assertEquals("14", options["Threads"])
+        assertEquals("15", options["Threads"])
         assertEquals("1024", options["Hash"])
         assertEquals("1", options["MultiPV"])
         assertEquals("false", options["Ponder"])

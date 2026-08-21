@@ -33,6 +33,11 @@ class TransparentCanvasOverlay(private val context: Context) {
         const val TAG = "DuLoOverlay"
         // Einheitlicher Text für alle Störungen: fehlgeschlagene Erkennung, abgewiesene Rahmen, Ausnahmen
         const val ERROR_TEXT = "Something went wrong :("
+
+        // Störungsmeldung: einblenden, 5 Sekunden stehen lassen, ausblenden
+        const val FADE_IN_MS = 220L
+        const val STATUS_HOLD_MS = 5000L
+        const val FADE_OUT_MS = 450L
     }
 
 
@@ -49,6 +54,9 @@ class TransparentCanvasOverlay(private val context: Context) {
 
         // Gesetzt, solange eine Störung angezeigt wird
         var errorMessage: String? = null
+
+        // Deckkraft der Störungsmeldung zwischen 0 (unsichtbar) und 1 (voll sichtbar)
+        var statusAlpha: Float = 1f
 
         private val startPaint = Paint().apply {
             color = Color.argb(130, 0, 230, 115) // halbtransparentes Blaugrün
@@ -140,8 +148,10 @@ class TransparentCanvasOverlay(private val context: Context) {
             drawArrowHead(canvas, x1, y1, x2, y2)
         }
 
-        /** Kurze Meldung mittig auf dem Bildschirm, sonst nichts */
+        /** Kurze Meldung mittig auf dem Bildschirm, sanft ein- und ausgeblendet */
         private fun drawStatusPill(canvas: Canvas, text: String) {
+            val alpha = statusAlpha.coerceIn(0f, 1f)
+            if (alpha <= 0.01f) return
             val cx = width / 2f
             val cy = height / 2f
             val textWidth = textPaint.measureText(text)
@@ -149,8 +159,15 @@ class TransparentCanvasOverlay(private val context: Context) {
             val pillH = 108f
             val pillX = cx - pillW / 2f
             val pillY = cy - pillH / 2f
+
+            val bgAlpha = textBgPaint.alpha
+            val textAlpha = textPaint.alpha
+            textBgPaint.alpha = (bgAlpha * alpha).toInt()
+            textPaint.alpha = (textAlpha * alpha).toInt()
             canvas.drawRoundRect(RectF(pillX, pillY, pillX + pillW, pillY + pillH), 28f, 28f, textBgPaint)
             canvas.drawText(text, cx - textWidth / 2f, cy + 12f, textPaint)
+            textBgPaint.alpha = bgAlpha
+            textPaint.alpha = textAlpha
         }
 
         private fun drawArrowHead(canvas: Canvas, x1: Float, y1: Float, x2: Float, y2: Float) {
@@ -187,11 +204,13 @@ class TransparentCanvasOverlay(private val context: Context) {
 
         overlayView?.apply {
             this.errorMessage = null
+            this.statusAlpha = 1f
             this.boardRect = boardRect
             this.moveInfo = moveInfo
             this.isWhitePerspective = isWhitePerspective
             postInvalidate()
         }
+        setContentVisible(true)
 
         autoDismissJob?.cancel()
         autoDismissJob = if (autoDismiss) {
@@ -205,25 +224,54 @@ class TransparentCanvasOverlay(private val context: Context) {
     }
 
     /**
-     * Störung anzeigen. Auf dem Bildschirm steht immer derselbe kurze Satz; der übergebene Grund
-     * dient nur dem Protokoll, damit die Anzeige ruhig bleibt.
+     * Störung anzeigen: die Meldung blendet sich weich ein, steht 5 Sekunden und blendet sich
+     * wieder aus. Auf dem Bildschirm steht immer derselbe kurze Satz; der übergebene Grund dient
+     * nur dem Protokoll, damit die Anzeige ruhig bleibt.
      */
     fun showError(reason: String) {
         Log.i(TAG, "Overlay meldet Störung: $reason")
         if (overlayView == null) {
             initOverlayView()
         }
-        overlayView?.apply {
-            this.errorMessage = reason
-            this.boardRect = null
-            this.moveInfo = null
-            postInvalidate()
-        }
+        val view = overlayView ?: return
+        view.errorMessage = reason
+        view.boardRect = null
+        view.moveInfo = null
+        view.statusAlpha = 0f
+        view.postInvalidate()
+        setContentVisible(true)
+
         autoDismissJob?.cancel()
         autoDismissJob = scope.launch {
-            delay(4000)
+            animateStatusAlpha(view, from = 0f, to = 1f, durationMs = FADE_IN_MS)
+            delay(STATUS_HOLD_MS)
+            animateStatusAlpha(view, from = 1f, to = 0f, durationMs = FADE_OUT_MS)
             hide()
         }
+    }
+
+    /** Deckkraft der Meldung schrittweise verändern (rund 60 Bilder je Sekunde) */
+    private suspend fun animateStatusAlpha(view: OverlayDrawView, from: Float, to: Float, durationMs: Long) {
+        val frameMs = 16L
+        val steps = (durationMs / frameMs).toInt().coerceAtLeast(1)
+        for (step in 0..steps) {
+            view.statusAlpha = from + (to - from) * (step / steps.toFloat())
+            view.postInvalidate()
+            delay(frameMs)
+        }
+        view.statusAlpha = to
+        view.postInvalidate()
+    }
+
+    /**
+     * Inhalt vorübergehend unsichtbar schalten, ohne das Fenster abzureißen.
+     *
+     * Für jede Aufnahme muss der Pfeil kurz weg, sonst verfälscht er die Erkennung. Würde dafür das
+     * Fenster entfernt und gleich wieder angelegt, blitzt der Bildschirm sichtbar auf - das war die
+     * Ursache des Flackerns. Ein Umschalten der Sichtbarkeit bleibt ruhig.
+     */
+    fun setContentVisible(visible: Boolean) {
+        overlayView?.visibility = if (visible) View.VISIBLE else View.INVISIBLE
     }
 
     private fun initOverlayView() {

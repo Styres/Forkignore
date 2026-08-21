@@ -162,6 +162,12 @@ class FloatingBubbleService : Service() {
     private var lastOwnSquares: Set<String>? = null
     // Beim Einschalten wird die eigene Farbe aus der Ausgangsstellung bestimmt und für die Sitzung festgehalten
     private var sideEstablished = false
+    /**
+     * Brett aus der letzten vollständigen Erkennung, so wie es auf dem Bildschirm steht.
+     * Damit lässt sich zu einem erkannten Zug sofort sagen, wessen Figur gezogen ist - ohne dafür
+     * das ganze Brett erneut zu erkennen.
+     */
+    private var trackedScreenBoard: Array<CharArray>? = null
     /** Helligkeit und Streuung der 64 Felder eines Frames */
     private class BoardCells(val means: FloatArray, val stds: FloatArray)
 
@@ -599,6 +605,7 @@ class FloatingBubbleService : Service() {
         lastOpponentSquares = null
         lastOwnSquares = null
         sideEstablished = false
+        trackedScreenBoard = null
         resetMonitorState()
         Toast.makeText(this, "Analyse an", Toast.LENGTH_SHORT).show()
         startAnalysis(force = true)
@@ -661,14 +668,52 @@ class FloatingBubbleService : Service() {
                 val analyseNow = (changedSinceAnalysis && standsStill) ||
                     changePendingTicks >= MAX_PENDING_TICKS ||
                     ticksSinceAnalysis >= SWEEP_TICKS
-                if (analyseNow) {
+                if (!analyseNow) continue
+
+                // Neue Erkennungsmethode: erst nachsehen, ob sich der Zug direkt ablesen lässt.
+                // Ein gewöhnlicher Zug verändert genau zwei Felder - Startfeld leer, Zielfeld besetzt.
+                // Steht auf dem Startfeld eine eigene Figur, war es der eigene Zug: dann ist die
+                // Empfehlung erledigt, der Pfeil kommt weg und die Engine bleibt außen vor.
+                // Erst der Zug des Gegners löst die vollständige Erkennung samt Berechnung aus.
+                val detected = UltraRobustClassifier.detectMove(
+                    reference.means, reference.stds, cells.means, cells.stds, arrowCells
+                )
+                val board = trackedScreenBoard
+                val mover = if (detected != null && board != null) {
+                    board[detected.fromCell / 8][detected.fromCell % 8]
+                } else {
+                    '.'
+                }
+
+                if (detected != null && mover != '.' && sessionLockedPerspective != null) {
+                    val movedByMe = mover.isUpperCase() == sessionLockedPerspective
                     Log.i(
                         TAG,
-                        "Analyse ausgelöst (verändert=$changedSinceAnalysis, ruhige Takte=$stillTicks," +
-                            " wartende Takte=$changePendingTicks, Takte seit Analyse=$ticksSinceAnalysis)"
+                        "Zug abgelesen: Feld ${detected.fromCell} -> ${detected.toCell}, Figur '$mover'," +
+                            " eigener Zug=$movedByMe"
                     )
-                    startAnalysis(force = false)
+                    if (movedByMe) {
+                        // Eigener Zug: Brett fortschreiben, Pfeil ausblenden, keine Berechnung
+                        trackedScreenBoard = UltraRobustClassifier.applyMoveToScreenBoard(board!!, detected)
+                        lastArrow = null
+                        arrowCells = emptySet()
+                        transparentOverlay?.hide()
+                        referenceCells = cells
+                        lastTickCells = cells
+                        changePendingTicks = 0
+                        stillTicks = 0
+                        ticksSinceAnalysis = 0
+                        continue
+                    }
                 }
+
+                Log.i(
+                    TAG,
+                    "Analyse ausgelöst (verändert=$changedSinceAnalysis, ruhige Takte=$stillTicks," +
+                        " wartende Takte=$changePendingTicks, Takte seit Analyse=$ticksSinceAnalysis," +
+                        " Zug ablesbar=${detected != null})"
+                )
+                startAnalysis(force = false)
             }
         }
     }
@@ -686,6 +731,43 @@ class FloatingBubbleService : Service() {
         monitorJob?.cancel()
         monitorJob = null
         resetMonitorState()
+    }
+
+    /**
+     * Nimmt den ersten Frame auf, der nach dem Ausblenden von Pfeil und Blase entsteht.
+     *
+     * Alle bereits gepufferten Frames stammen noch aus der Zeit davor und werden verworfen. Das
+     * Ausblenden selbst löst eine neue Bildkomposition aus, der nächste Frame ist also sauber.
+     */
+    private suspend fun captureFrameAfterHiding(): Bitmap? = withContext(Dispatchers.IO) {
+        val reader = imageReader ?: return@withContext null
+        isCapturingFrame = true
+        try {
+            // Alles verwerfen, was vor dem Ausblenden entstanden ist
+            while (true) {
+                val stale = reader.acquireLatestImage() ?: break
+                stale.close()
+            }
+            val deadline = System.currentTimeMillis() + 400L
+            while (System.currentTimeMillis() < deadline) {
+                val image = reader.acquireLatestImage()
+                if (image != null) {
+                    try {
+                        return@withContext bitmapFromImage(image)
+                    } finally {
+                        image.close()
+                    }
+                }
+                delay(10)
+            }
+            Log.i(TAG, "Nach dem Ausblenden kam kein neuer Frame")
+            null
+        } catch (e: Exception) {
+            Log.w(TAG, "captureFrameAfterHiding fehlgeschlagen: ${e.message}")
+            null
+        } finally {
+            isCapturingFrame = false
+        }
     }
 
     /**
@@ -873,15 +955,18 @@ class FloatingBubbleService : Service() {
         serviceScope.launch {
             var screenBitmap: Bitmap? = null
             try {
-                transparentOverlay?.hide()
+                // Pfeil und Blase kurz unsichtbar schalten - das Fenster bleibt bestehen, sonst
+                // blitzt der Bildschirm bei jedem Anlegen sichtbar auf (Ursache des Flackerns)
+                transparentOverlay?.setContentVisible(false)
                 bubbleView?.visibility = View.INVISIBLE
                 menuView?.visibility = View.INVISIBLE
-                // 150 ms statt 60 ms (Verdacht aus bug_13/14): zwischen dem Entfernen der Fenster und dem Eintreffen eines sauberen Frames im Puffer liegt eine Kompositionsverzögerung.
-                // Wartet man zu kurz, enthält die Aufnahme noch den alten Frame mit Rahmen und Pfeil; verdeckt der die 8. Linie, sieht es nach einer übersehenen Figur aus
-                delay(150)
 
-                screenBitmap = captureCurrentScreenBitmap()
+                // Statt fest zu warten: alle noch gepufferten Frames verwerfen und den ersten Frame
+                // nehmen, der nach dem Ausblenden entsteht. Der ist garantiert sauber und kommt in
+                // der Regel schon nach wenigen Millisekunden - die Anzeige ist also kürzer weg.
+                screenBitmap = captureFrameAfterHiding()
 
+                transparentOverlay?.setContentVisible(true)
                 bubbleView?.visibility = View.VISIBLE
                 menuView?.visibility = View.VISIBLE
 
@@ -1012,6 +1097,7 @@ class FloatingBubbleService : Service() {
 
                         // Brett merken, damit die Beobachtungsschleife weiß, welchen Ausschnitt sie vergleichen muss
                         lastBoardRect = Rect(res.boardRect)
+                        trackedScreenBoard = res.rawBoard
 
                         // Kern der Dauerbeobachtung: gerechnet wird erst, wenn man wieder am Zug ist.
                         //
@@ -1111,6 +1197,7 @@ class FloatingBubbleService : Service() {
                     transparentOverlay?.showError("Ausnahme in der Analyse: ${e.javaClass.simpleName}")
                 }
             } finally {
+                transparentOverlay?.setContentVisible(true)
                 bubbleView?.visibility = View.VISIBLE
                 menuView?.visibility = View.VISIBLE
                 screenBitmap?.recycle()
@@ -1123,61 +1210,25 @@ class FloatingBubbleService : Service() {
         }
     }
 
-    /**
-     * Holt den aktuellsten Frame als Bitmap aus dem dauerhaft geöffneten ImageReader
-     * Sauberes Leeren: das letzte erreichbare gültige Image bleibt erhalten, sonst wird auf einen neuen Frame gewartet - so entsteht bei stehendem Bild kein Nullwert
-     */
-    private suspend fun captureCurrentScreenBitmap(): Bitmap? = withContext(Dispatchers.IO) {
-        val reader = imageReader ?: return@withContext null
-        isCapturingFrame = true
-        try {
-            var latestImage: android.media.Image? = null
-            while (true) {
-                val next = reader.acquireLatestImage() ?: break
-                latestImage?.close()
-                latestImage = next
-            }
+    /** Wandelt einen Frame in ein Bitmap um (geräteunabhängig über pixelStride und rowStride) */
+    private fun bitmapFromImage(image: android.media.Image): Bitmap {
+        val planes = image.planes
+        val buffer = planes[0].buffer
+        val pixelStride = planes[0].pixelStride
+        val rowStride = planes[0].rowStride
+        val rowPadding = rowStride - pixelStride * screenWidth
 
-            if (latestImage == null) {
-                val start = System.currentTimeMillis()
-                while (System.currentTimeMillis() - start < 350L) {
-                    val image = reader.acquireLatestImage()
-                    if (image != null) {
-                        latestImage = image
-                        break
-                    }
-                    delay(15)
-                }
-            }
-
-            val image = latestImage ?: return@withContext null
-            try {
-                val planes = image.planes
-                val buffer = planes[0].buffer
-                val pixelStride = planes[0].pixelStride
-                val rowStride = planes[0].rowStride
-                val rowPadding = rowStride - pixelStride * screenWidth
-
-                return@withContext if (pixelStride == 4 && rowPadding == 0) {
-                    val b = Bitmap.createBitmap(screenWidth, screenHeight, Bitmap.Config.ARGB_8888)
-                    b.copyPixelsFromBuffer(buffer)
-                    b
-                } else {
-                    val paddedW = screenWidth + rowPadding / pixelStride
-                    val temp = Bitmap.createBitmap(paddedW, screenHeight, Bitmap.Config.ARGB_8888)
-                    temp.copyPixelsFromBuffer(buffer)
-                    val cropped = Bitmap.createBitmap(temp, 0, 0, screenWidth, screenHeight)
-                    temp.recycle()
-                    cropped
-                }
-            } finally {
-                image.close()
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            return@withContext null
-        } finally {
-            isCapturingFrame = false
+        return if (pixelStride == 4 && rowPadding == 0) {
+            val bitmap = Bitmap.createBitmap(screenWidth, screenHeight, Bitmap.Config.ARGB_8888)
+            bitmap.copyPixelsFromBuffer(buffer)
+            bitmap
+        } else {
+            val paddedWidth = screenWidth + rowPadding / pixelStride
+            val temp = Bitmap.createBitmap(paddedWidth, screenHeight, Bitmap.Config.ARGB_8888)
+            temp.copyPixelsFromBuffer(buffer)
+            val cropped = Bitmap.createBitmap(temp, 0, 0, screenWidth, screenHeight)
+            temp.recycle()
+            cropped
         }
     }
 

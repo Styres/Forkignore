@@ -86,13 +86,13 @@ flowchart TD
 
 ## ♟️ Konfiguration der Engine
 
-Die Engine wird beim Handshake auf maximale Spielstärke bei 2 Sekunden Bedenkzeit pro Zug
+Die Engine wird beim Handshake auf maximale Spielstärke bei 4 Sekunden Bedenkzeit pro Zug
 eingestellt (siehe `StockfishBridge`). Gesetzt wird nur, was die Engine im Handshake als
 unterstützte Option meldet; alles andere wird übersprungen und in der Diagnose vermerkt.
 
 | Option              | Wert                                                                            |
 |---------------------|---------------------------------------------------------------------------------|
-| Threads             | logische Kerne minus 2 (z. B. 14 bei 16 Kernen), mindestens 1                    |
+| Threads             | logische Kerne minus 1 (z. B. 15 bei 16 Kernen), mindestens 1                    |
 | Hash                | 256 MB bei 4-6, 512 MB bei 8-12, 1024 MB ab 16 logischen Kernen                   |
 | MultiPV             | 1                                                                                |
 | Ponder              | false                                                                            |
@@ -106,7 +106,7 @@ unterstützte Option meldet; alles andere wird übersprungen und in der Diagnose
 | SyzygyProbeDepth    | 1 (nur mit Tablebases)                                                            |
 | SyzygyProbeLimit    | 5 (nur mit Tablebases)                                                            |
 | Syzygy50MoveRule    | true (nur mit Tablebases)                                                         |
-| Suchbefehl          | `go movetime 2000`, davor `ucinewgame` für jede neue, unabhängige Stellung        |
+| Suchbefehl          | `go movetime 4000`; `ucinewgame` nur zu Beginn einer neuen Partie                 |
 
 Weitere Punkte der Vorgabe:
 
@@ -117,6 +117,10 @@ Weitere Punkte der Vorgabe:
   unter diesen Namen dazulegen.
 - **Hash-Nachregelung**: Meldet die Engine über mehrere Suchen im Mittel mehr als 30 Prozent
   `hashfull`, verdoppelt die App den Hash (höchstens auf das Vierfache des Ausgangswerts).
+- **Transpositionstabelle bleibt warm**: `ucinewgame` läuft nur beim Beginn einer neuen Partie
+  (ab 28 Figuren auf dem Brett). Innerhalb einer Partie ist die nächste Stellung die Fortsetzung der
+  vorherigen; die gespeicherten Bewertungen passen weiter und ersparen der Suche viel Arbeit. Sie bei
+  jedem Zug wegzuwerfen kostet spürbar Spielstärke.
 - **Speichergrenze des Geräts**: Der Tabellenwert wird auf ein Viertel des physischen
   Arbeitsspeichers gedeckelt. Ohne diese Grenze beendet Android den Engine-Prozess auf Telefonen
   mit wenig Speicher, was mehr Spielstärke kostet als der kleinere Hash.

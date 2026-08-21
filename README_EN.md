@@ -116,13 +116,13 @@ cd android_copilot
 
 ## ♟️ Engine Configuration
 
-The engine is configured during the UCI handshake for maximum strength at 2 seconds per move (see
+The engine is configured during the UCI handshake for maximum strength at 4 seconds per move (see
 `StockfishBridge`). Only options the engine advertises during the handshake are sent; anything else
 is skipped and noted in the diagnostics.
 
 | Option              | Value                                                                       |
 |---------------------|-----------------------------------------------------------------------------|
-| Threads             | logical cores minus 2 (e.g. 14 on 16 cores), at least 1                      |
+| Threads             | logical cores minus 1 (e.g. 15 on 16 cores), at least 1                      |
 | Hash                | 256 MB on 4-6, 512 MB on 8-12, 1024 MB from 16 logical cores                 |
 | MultiPV             | 1                                                                            |
 | Ponder              | false                                                                        |
@@ -136,7 +136,7 @@ is skipped and noted in the diagnostics.
 | SyzygyProbeDepth    | 1 (only with tablebases)                                                     |
 | SyzygyProbeLimit    | 5 (only with tablebases)                                                     |
 | Syzygy50MoveRule    | true (only with tablebases)                                                  |
-| Search command      | `go movetime 2000`, preceded by `ucinewgame` for every new position          |
+| Search command      | `go movetime 4000`; `ucinewgame` only at the start of a new game             |
 
 - **Binary variant**: if variants such as `libstockfish-vnni512.so`, `-bmi2`, `-avx2`,
   `-armv8-i8mm` or `-armv8-dotprod` ship alongside the generic `libstockfish.so`, the app picks the
