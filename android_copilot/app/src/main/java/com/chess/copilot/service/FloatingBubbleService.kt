@@ -25,6 +25,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.util.DisplayMetrics
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -66,6 +67,8 @@ import java.io.File
 class FloatingBubbleService : Service() {
 
     companion object {
+        private const val TAG = "FloatingBubbleService"
+
         const val EXTRA_RESULT_CODE = "extra_result_code"
         const val EXTRA_RESULT_DATA = "extra_result_data"
 
