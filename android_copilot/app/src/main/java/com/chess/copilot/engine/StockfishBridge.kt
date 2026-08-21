@@ -468,6 +468,9 @@ object StockfishBridge {
             }
 
             // Absicherung 3: strenge UCI-Handshake-Sequenz mit 5000 ms Karenz (uci -> uciok -> ucinewgame -> isready -> readyok)
+            // Die Optionsliste gehört zum gerade gestarteten Prozess: vor dem Handshake leeren,
+            // damit nach einem Neustart keine Namen aus der vorherigen Instanz stehen bleiben.
+            supportedOptions.clear()
             val uciStart = System.currentTimeMillis()
             sendCommand("uci")
             val uciOk = waitForResponse("uciok", timeoutMs = 5000)
