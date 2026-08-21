@@ -89,21 +89,25 @@ class FloatingBubbleService : Service() {
         // Ab dieser Druckdauer gilt eine Berührung der Blase als langer Druck (Perspektive umschalten)
         private const val LONG_PRESS_MS = 500L
 
-        // Takt der Dauerbeobachtung: so oft wird das Brett auf Veränderung abgeklopft
-        private const val POLL_INTERVAL_MS = 700L
+        // Takt der Dauerbeobachtung: fünfmal pro Sekunde wird jede Figurenposition nachgesehen
+        private const val POLL_INTERVAL_MS = 200L
+
+        // So viele Takte am Stück müssen die Figuren stillstehen, bevor die volle Erkennung startet.
+        // Zwei Takte sind 0,4 Sekunden - lang genug, damit eine Zuganimation durch ist.
+        private const val STILL_TICKS_REQUIRED = 2
 
         // Ab dieser mittleren Helligkeitsdifferenz je Kachel gilt das Brett als verändert.
         // Darunter liegen Kompressionsrauschen und leichte Animationen der Oberfläche.
         private const val BOARD_CHANGE_THRESHOLD = 1.8f
 
-        // Bewegt sich das Bild so lange ohne Ruhepause, wird trotzdem analysiert.
+        // Bewegt sich das Bild so lange ohne Ruhepause, wird trotzdem analysiert (rund 3 Sekunden).
         // Duolingo animiert nach einem Zug gern weiter (Hervorhebungen, Maskottchen).
-        private const val MAX_PENDING_TICKS = 4
+        private const val MAX_PENDING_TICKS = 15
 
         // Sicherheitsnetz: spätestens nach so vielen Takten wird ohnehin nachgesehen,
         // auch wenn der Bildvergleich nichts gemeldet hat. Die Engine läuft dabei nur,
         // wenn der Gegner tatsächlich gezogen hat - der Durchlauf kostet also wenig.
-        private const val SWEEP_TICKS = 8
+        private const val SWEEP_TICKS = 25
 
         // Kantenlänge des Rasters, auf das der Brettausschnitt zum Vergleich eingedampft wird
         private const val FINGERPRINT_GRID = 12
@@ -154,6 +158,10 @@ class FloatingBubbleService : Service() {
     // Felder der gegnerischen Figuren aus der letzten Analyse. Steht dort später eine gegnerische
     // Figur auf einem neuen Feld, hat der Gegner gezogen und man ist selbst wieder am Zug.
     private var lastOpponentSquares: Set<String>? = null
+    // Felder der eigenen Figuren aus der letzten Analyse: daran wird der eigene Zug erkannt
+    private var lastOwnSquares: Set<String>? = null
+    // Beim Einschalten wird die eigene Farbe aus der Ausgangsstellung bestimmt und für die Sitzung festgehalten
+    private var sideEstablished = false
     /** Helligkeit und Streuung der 64 Felder eines Frames */
     private class BoardCells(val means: FloatArray, val stds: FloatArray)
 
@@ -178,6 +186,8 @@ class FloatingBubbleService : Service() {
     private var arrowCells: Set<Int> = emptySet()
     // Wie viele Takte am Stück weichen die Felder schon von der Vergleichsbasis ab
     private var changePendingTicks = 0
+    // Wie viele Takte am Stück stehen die Figuren schon still
+    private var stillTicks = 0
     // Takte seit der letzten Analyse (für das Sicherheitsnetz)
     private var ticksSinceAnalysis = 0
 
@@ -585,8 +595,10 @@ class FloatingBubbleService : Service() {
             return
         }
 
-        // Beim Einschalten immer rechnen, egal wie die Stellung zur letzten Analyse steht
+        // Beim Einschalten immer rechnen und die eigene Farbe aus der Ausgangsstellung neu bestimmen
         lastOpponentSquares = null
+        lastOwnSquares = null
+        sideEstablished = false
         resetMonitorState()
         Toast.makeText(this, "Analyse an", Toast.LENGTH_SHORT).show()
         startAnalysis(force = true)
@@ -637,20 +649,22 @@ class FloatingBubbleService : Service() {
                     reference.means, reference.stds, cells.means, cells.stds, arrowCells
                 )
                 // Und stehen die Figuren gerade still, ist die Zuganimation also durch?
-                val standsStill = lastTickCells?.let {
+                val sameAsLastTick = lastTickCells?.let {
                     !UltraRobustClassifier.boardCellsChanged(it.means, it.stds, cells.means, cells.stds, arrowCells)
                 } ?: false
                 lastTickCells = cells
 
+                stillTicks = if (sameAsLastTick) stillTicks + 1 else 0
                 changePendingTicks = if (changedSinceAnalysis) changePendingTicks + 1 else 0
 
+                val standsStill = stillTicks >= STILL_TICKS_REQUIRED
                 val analyseNow = (changedSinceAnalysis && standsStill) ||
                     changePendingTicks >= MAX_PENDING_TICKS ||
                     ticksSinceAnalysis >= SWEEP_TICKS
                 if (analyseNow) {
                     Log.i(
                         TAG,
-                        "Analyse ausgelöst (verändert=$changedSinceAnalysis, steht still=$standsStill," +
+                        "Analyse ausgelöst (verändert=$changedSinceAnalysis, ruhige Takte=$stillTicks," +
                             " wartende Takte=$changePendingTicks, Takte seit Analyse=$ticksSinceAnalysis)"
                     )
                     startAnalysis(force = false)
@@ -675,67 +689,89 @@ class FloatingBubbleService : Service() {
     }
 
     /**
-     * Liest für jedes der 64 Felder mittlere Helligkeit und Streuung aus dem aktuellen Frame.
+     * Liest für jedes der 64 Felder mittlere Helligkeit und Streuung direkt aus dem Frame-Puffer.
+     *
+     * Bewusst ohne den Umweg über ein Vollbild-Bitmap: bei fünf Aufnahmen pro Sekunde wären das
+     * zweistellige Megabyte an Zwischenspeicher je Sekunde. Gelesen werden nur die Abtastpunkte
+     * selbst, gut zweitausend Bildpunkte je Takt.
      *
      * Abgetastet wird nur der mittlere Bereich eines Feldes, damit die Gitterlinien nicht mitzählen.
      * Die Streuung verrät, ob eine Figur auf dem Feld steht, die Helligkeit unterscheidet helle von
-     * dunklen Figuren - zusammen ergibt das ein Abbild der Figurenstellung, ohne die volle Erkennung
-     * zu starten.
+     * dunklen Figuren - zusammen ergibt das ein Abbild der Figurenstellung.
      *
-     * Bewusst ohne Ausblenden von Blase und Pfeil: die Felder unter dem Pfeil werden beim Vergleich
-     * ohnehin übersprungen, und so bleibt die Anzeige ruhig.
+     * Blase und Pfeil werden dafür nicht ausgeblendet: die Felder unter dem Pfeil überspringt der
+     * Vergleich ohnehin, und so bleibt die Anzeige ruhig.
+     *
+     * @return null, wenn gerade kein neuer Frame vorliegt - dann hat sich auf dem Bildschirm nichts bewegt
      */
-    private suspend fun captureBoardCells(rect: Rect): BoardCells? {
-        val bitmap = captureCurrentScreenBitmap() ?: return null
-        return try {
-            withContext(Dispatchers.Default) {
-                val safe = Rect(rect)
-                if (!safe.intersect(0, 0, bitmap.width, bitmap.height) || safe.width() < 32 || safe.height() < 32) {
-                    return@withContext null
-                }
-                val step = safe.width() / 8.0f
-                val stepY = safe.height() / 8.0f
-                val means = FloatArray(64)
-                val stds = FloatArray(64)
-                val samples = 6
+    private suspend fun captureBoardCells(rect: Rect): BoardCells? = withContext(Dispatchers.IO) {
+        val reader = imageReader ?: return@withContext null
+        isCapturingFrame = true
+        var image: android.media.Image? = null
+        try {
+            // Nur den neuesten Frame nehmen und ältere verwerfen
+            while (true) {
+                val next = reader.acquireLatestImage() ?: break
+                image?.close()
+                image = next
+            }
+            val frame = image ?: return@withContext null
 
-                for (r in 0..7) {
-                    for (c in 0..7) {
-                        var sum = 0.0f
-                        var sumSq = 0.0f
-                        var count = 0
-                        for (sy in 0 until samples) {
-                            // Nur die mittleren 60 Prozent des Feldes abtasten
-                            val y = (safe.top + (r + 0.2f + 0.6f * (sy + 0.5f) / samples) * stepY).toInt()
-                            if (y < 0 || y >= bitmap.height) continue
-                            for (sx in 0 until samples) {
-                                val x = (safe.left + (c + 0.2f + 0.6f * (sx + 0.5f) / samples) * step).toInt()
-                                if (x < 0 || x >= bitmap.width) continue
-                                val pixel = bitmap.getPixel(x, y)
-                                val red = (pixel shr 16) and 0xFF
-                                val green = (pixel shr 8) and 0xFF
-                                val blue = pixel and 0xFF
-                                val luminance = 0.299f * red + 0.587f * green + 0.114f * blue
-                                sum += luminance
-                                sumSq += luminance * luminance
-                                count++
-                            }
-                        }
-                        val index = r * 8 + c
-                        if (count > 0) {
-                            val mean = sum / count
-                            means[index] = mean
-                            stds[index] = kotlin.math.sqrt(kotlin.math.max(0f, sumSq / count - mean * mean))
+            val plane = frame.planes[0]
+            val buffer = plane.buffer
+            val pixelStride = plane.pixelStride
+            val rowStride = plane.rowStride
+
+            val left = rect.left.coerceAtLeast(0)
+            val top = rect.top.coerceAtLeast(0)
+            val right = rect.right.coerceAtMost(screenWidth)
+            val bottom = rect.bottom.coerceAtMost(screenHeight)
+            if (right - left < 32 || bottom - top < 32) return@withContext null
+
+            val stepX = (right - left) / 8.0f
+            val stepY = (bottom - top) / 8.0f
+            val means = FloatArray(64)
+            val stds = FloatArray(64)
+            val samples = 6
+
+            for (r in 0..7) {
+                for (c in 0..7) {
+                    var sum = 0.0f
+                    var sumSq = 0.0f
+                    var count = 0
+                    for (sy in 0 until samples) {
+                        // Nur die mittleren 60 Prozent des Feldes abtasten
+                        val y = (top + (r + 0.2f + 0.6f * (sy + 0.5f) / samples) * stepY).toInt()
+                        if (y < 0 || y >= screenHeight) continue
+                        for (sx in 0 until samples) {
+                            val x = (left + (c + 0.2f + 0.6f * (sx + 0.5f) / samples) * stepX).toInt()
+                            if (x < 0 || x >= screenWidth) continue
+                            val offset = y * rowStride + x * pixelStride
+                            if (offset < 0 || offset + 2 >= buffer.capacity()) continue
+                            val red = buffer.get(offset).toInt() and 0xFF
+                            val green = buffer.get(offset + 1).toInt() and 0xFF
+                            val blue = buffer.get(offset + 2).toInt() and 0xFF
+                            val luminance = 0.299f * red + 0.587f * green + 0.114f * blue
+                            sum += luminance
+                            sumSq += luminance * luminance
+                            count++
                         }
                     }
+                    val index = r * 8 + c
+                    if (count > 0) {
+                        val mean = sum / count
+                        means[index] = mean
+                        stds[index] = kotlin.math.sqrt(kotlin.math.max(0f, sumSq / count - mean * mean))
+                    }
                 }
-                BoardCells(means, stds)
             }
+            BoardCells(means, stds)
         } catch (e: Exception) {
             Log.w(TAG, "captureBoardCells fehlgeschlagen: ${e.message}")
             null
         } finally {
-            bitmap.recycle()
+            try { image?.close() } catch (_: Exception) {}
+            isCapturingFrame = false
         }
     }
 
@@ -917,7 +953,7 @@ class FloatingBubbleService : Service() {
 
                         // Perspektivsperre der Sitzung über den reinen Zustandsautomaten aktualisieren (neue Partie ab 26 Figuren kalibriert zwangsweise auf detectedPerspective, im Mittel- und Endspiel bleibt die Sperre stehen).
                         // Eine per langem Druck auf die Blase gesetzte Sperre gilt als Ansage des Nutzers und wird nicht automatisch überschrieben.
-                        if (!manualPerspectiveLock) {
+                        if (!manualPerspectiveLock && !sideEstablished) {
                             sessionLockedPerspective = UltraRobustClassifier.resolvePerspectiveLock(
                                 currentLock = sessionLockedPerspective,
                                 detectedPerspective = detailedResp.detectedPerspective,
@@ -949,6 +985,20 @@ class FloatingBubbleService : Service() {
                         // das eben berechnete FEN noch zur alten Perspektive - Pfeil und Bewertung galten dann der
                         // falschen Seite. Deshalb wird das FEN vor der Analyse mit der endgültigen Perspektive neu
                         // aufgebaut; rawBoard ist die Bildschirmansicht, das ist reines Rechnen ohne neue Bildanalyse.
+                        // Eigene Farbe beim Einschalten aus der Ausgangsstellung festlegen: was unten auf den
+                        // beiden Reihen steht, sind die eigenen Figuren, oben stehen die des Gegners. Ob die
+                        // eigenen hell oder dunkel sind, hat die Helligkeitsclusterung entschieden.
+                        // Danach bleibt die Farbe für die ganze Sitzung stehen und kann nur per langem
+                        // Druck auf die Blase von Hand geändert werden.
+                        if (!sideEstablished && !manualPerspectiveLock) {
+                            val sideFromRows = UltraRobustClassifier.sideFromStartingRows(res.rawBoard)
+                            if (sideFromRows != null) {
+                                sessionLockedPerspective = sideFromRows
+                                sideEstablished = true
+                                Log.i(TAG, "Eigene Farbe aus der Ausgangsstellung: ${if (sideFromRows) "Weiß" else "Schwarz"}")
+                            }
+                        }
+
                         val finalPerspective = sessionLockedPerspective ?: detailedResp.detectedPerspective
                         if (finalPerspective != res.isWhitePerspective) {
                             res = UltraRobustClassifier.buildFenFromBoard(
@@ -963,26 +1013,44 @@ class FloatingBubbleService : Service() {
                         // Brett merken, damit die Beobachtungsschleife weiß, welchen Ausschnitt sie vergleichen muss
                         lastBoardRect = Rect(res.boardRect)
 
-                        // Kern der Dauerbeobachtung: gerechnet wird, sobald man wieder am Zug ist.
-                        // Das ist genau dann der Fall, wenn seit der letzten Analyse eine gegnerische
-                        // Figur auf einem Feld steht, das vorher nicht ihr gehörte - also nachdem der
-                        // Gegner gezogen hat. Der eigene Zug allein löst nichts aus, denn danach ist
-                        // der Gegner am Zug und eine Empfehlung wäre verfrüht.
-                        val opponentSquares = UltraRobustClassifier.opponentSquares(res.standardBoard, res.isWhitePerspective)
+                        // Kern der Dauerbeobachtung: gerechnet wird erst, wenn man wieder am Zug ist.
+                        //
+                        // Ablauf einer Partie: DuLo zeigt den besten Zug, man führt ihn aus - dabei ändern sich
+                        // nur die eigenen Felder, und genau dieser Zwischenstand wird übersprungen. Erst wenn
+                        // danach eine gegnerische Figur auf einem Feld auftaucht, das vorher nicht ihr gehörte,
+                        // ist der Gegner fertig und die nächste Empfehlung wird berechnet.
+                        val ownSquares = UltraRobustClassifier.sideSquares(res.standardBoard, res.isWhitePerspective)
+                        val opponentSquares = UltraRobustClassifier.sideSquares(res.standardBoard, !res.isWhitePerspective)
                         val previousOpponentSquares = lastOpponentSquares
-                        val myTurn = force || previousOpponentSquares == null ||
+                        val previousOwnSquares = lastOwnSquares
+
+                        val opponentMoved = previousOpponentSquares == null ||
                             UltraRobustClassifier.opponentMovedSince(previousOpponentSquares, opponentSquares)
+                        val ownMoved = previousOwnSquares != null && previousOwnSquares != ownSquares
+                        val myTurn = force || opponentMoved
+
                         Log.i(
                             TAG,
-                            "Am Zug? $myTurn (force=$force, gegnerische Felder vorher=${previousOpponentSquares?.size ?: -1}," +
-                                " jetzt=${opponentSquares.size}, neu=${opponentSquares.count { previousOpponentSquares?.contains(it) != true }})"
+                            "Am Zug? $myTurn (force=$force, Gegner zog=$opponentMoved, ich zog=$ownMoved," +
+                                " gegnerische Felder vorher=${previousOpponentSquares?.size ?: -1}, jetzt=${opponentSquares.size})"
                         )
+
                         if (!myTurn) {
-                            // Der Gegner ist noch dran: Engine sparen und den bisherigen Pfeil wieder einblenden
-                            restoreLastArrow()
+                            if (ownMoved) {
+                                // Der eigene Zug ist ausgeführt: die Empfehlung ist erledigt. Pfeil weg und
+                                // warten, bis der Gegner gezogen hat.
+                                lastOwnSquares = ownSquares
+                                lastArrow = null
+                                arrowCells = emptySet()
+                                withContext(Dispatchers.Main) { transparentOverlay?.hide() }
+                            } else {
+                                // Es hat sich nichts Entscheidendes getan: den bisherigen Pfeil wieder zeigen
+                                restoreLastArrow()
+                            }
                             return@launch
                         }
                         lastOpponentSquares = opponentSquares
+                        lastOwnSquares = ownSquares
 
                         // Vorgegebene Bedenkzeit: go movetime 2000
                         val eval = StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = StockfishBridge.DEFAULT_MOVE_TIME_MS)

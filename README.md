@@ -48,12 +48,22 @@
   - `TransparentCanvasOverlay` zeichnet nur den Pfeil und die beiden hervorgehobenen Felder über das Duolingo-Brett, Berührungen gehen hindurch;
   - geht etwas schief, steht dort schlicht **Something went wrong :(** statt einer technischen Fehlertafel.
 - 🔁 **Dauerbeobachtung statt Antippen**
-  - Steht der Schalter auf **On**, fragt DuLo die Engine sofort und danach automatisch erneut, sobald **der Gegner gezogen hat** und man selbst wieder am Zug ist;
-  - erkannt wird das daran, dass eine gegnerische Figur auf einem Feld auftaucht, das vorher nicht ihr gehörte; ein eigener Schlagfall zählt dabei bewusst nicht;
-  - dazwischen prüft DuLo im Takt von 700 ms Feld für Feld, ob dort noch dasselbe steht (Streuung zeigt eine Figur an, Helligkeit ihre Farbe) - das kostet kaum Rechenzeit und braucht kein Ausblenden des Pfeils;
-  - die Felder unter dem gezeichneten Pfeil bleiben beim Vergleich außen vor, sonst würde die Zeichnung selbst als Veränderung zählen;
-  - die volle Erkennung läuft an, sobald der Zug fertig animiert ist - spätestens aber nach wenigen Takten, damit dauerhafte Animationen der Oberfläche sie nicht aufhalten;
-  - zusätzlich sieht ein Sicherheitsnetz regelmäßig von sich aus nach. Die Engine läuft dabei nur, wenn der Gegner wirklich gezogen hat.
+  - Beim Einschalten legt DuLo die Seiten fest: was unten auf den beiden Reihen steht, sind die eigenen
+    Figuren, oben steht der Gegner. Ob die eigenen hell oder dunkel sind, entscheidet die
+    Helligkeitsclusterung - daraus ergibt sich die eigene Farbe, und die bleibt für die Sitzung stehen.
+  - Danach zeigt DuLo den besten Zug für die eigene Farbe und wartet;
+  - **der eigene Zug wird übersprungen**: führt man die Empfehlung aus, verschwindet der Pfeil und es
+    passiert nichts weiter - erst wenn danach eine gegnerische Figur auf einem Feld auftaucht, das
+    vorher nicht ihr gehörte, wird die nächste Empfehlung berechnet;
+  - dafür verfolgt DuLo **fünfmal pro Sekunde jede Figurenposition**: je Feld werden Streuung (steht
+    dort eine Figur?) und Helligkeit (hell oder dunkel?) gelesen, direkt aus dem Frame-Puffer und ohne
+    Vollbild-Kopie;
+  - die Felder unter dem gezeichneten Pfeil bleiben beim Vergleich außen vor, sonst würde die Zeichnung
+    selbst als Veränderung zählen;
+  - die volle Erkennung läuft an, sobald die Figuren zwei Takte lang stillstehen - spätestens aber nach
+    rund drei Sekunden, damit dauerhafte Animationen der Oberfläche sie nicht aufhalten;
+  - zusätzlich sieht ein Sicherheitsnetz alle paar Sekunden von sich aus nach. Die Engine läuft dabei
+    nur, wenn der Gegner wirklich gezogen hat.
 - 🔒 **Vollständig offline**
   - Bildverarbeitung und Engine laufen ausschließlich auf dem Gerät, es gibt keine Netzwerkanfragen und keine Datenübertragung.
 

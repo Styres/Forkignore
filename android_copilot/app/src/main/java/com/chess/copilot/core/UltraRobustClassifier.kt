@@ -731,12 +731,12 @@ class UltraRobustClassifier(context: Context? = null) {
         }
 
         /**
-         * Reine Funktion: alle Felder, auf denen gegnerische Figuren stehen (z. B. "e7").
+         * Reine Funktion: alle Felder, auf denen Figuren einer Farbe stehen (z. B. "e7").
          *
          * @param standardBoard Brett in Standardausrichtung (row 0 = Reihe 8, row 7 = Reihe 1)
-         * @param isWhitePerspective true = die eigenen Figuren sind die weißen, gegnerisch ist alles Kleingeschriebene
+         * @param whitePieces true = die weißen Figuren (Großbuchstaben), false = die schwarzen
          */
-        fun opponentSquares(standardBoard: Array<CharArray>, isWhitePerspective: Boolean): Set<String> {
+        fun sideSquares(standardBoard: Array<CharArray>, whitePieces: Boolean): Set<String> {
             val fileChars = "abcdefgh"
             val squares = mutableSetOf<String>()
             for (r in standardBoard.indices) {
@@ -744,13 +744,58 @@ class UltraRobustClassifier(context: Context? = null) {
                 for (c in row.indices) {
                     val sym = row[c]
                     if (sym == '.') continue
-                    val isWhitePiece = sym.isUpperCase()
-                    if (isWhitePiece == isWhitePerspective) continue
+                    if (sym.isUpperCase() != whitePieces) continue
                     val file = if (c in fileChars.indices) fileChars[c] else '?'
                     squares.add("$file${8 - r}")
                 }
             }
             return squares
+        }
+
+        /** Reine Funktion: die Felder der gegnerischen Figuren */
+        fun opponentSquares(standardBoard: Array<CharArray>, isWhitePerspective: Boolean): Set<String> =
+            sideSquares(standardBoard, whitePieces = !isWhitePerspective)
+
+        /**
+         * Reine Funktion: eigene Farbe aus der Ausgangsstellung bestimmen.
+         *
+         * Regel: Was zu Beginn auf den beiden untersten Bildschirmreihen steht, sind die eigenen
+         * Figuren; was oben steht, gehört dem Gegner. Ob die eigenen Figuren hell oder dunkel sind,
+         * hat die Helligkeitsclusterung bereits entschieden - Großbuchstaben stehen für die hellen
+         * (weißen), Kleinbuchstaben für die dunklen (schwarzen) Figuren.
+         *
+         * @param screenBoard Brett so, wie es auf dem Bildschirm steht (row 0 = oben, row 7 = unten)
+         * @return true = eigene Farbe ist Weiß, false = Schwarz, null = die Reihen sind nicht eindeutig
+         */
+        fun sideFromStartingRows(screenBoard: Array<CharArray>): Boolean? {
+            var bottomWhite = 0
+            var bottomBlack = 0
+            var topWhite = 0
+            var topBlack = 0
+            for (r in screenBoard.indices) {
+                val row = screenBoard[r]
+                for (c in row.indices) {
+                    val sym = row[c]
+                    if (sym == '.') continue
+                    val isWhitePiece = sym.isUpperCase()
+                    if (r >= 6) {
+                        if (isWhitePiece) bottomWhite++ else bottomBlack++
+                    } else if (r <= 1) {
+                        if (isWhitePiece) topWhite++ else topBlack++
+                    }
+                }
+            }
+
+            // Unten muss eine Farbe klar überwiegen, sonst steht die Partie nicht am Anfang
+            if (bottomWhite == bottomBlack) return null
+            val mineAreWhite = bottomWhite > bottomBlack
+
+            // Gegenprobe: oben sollte die andere Farbe stehen. Fällt sie aus, gilt trotzdem die Mehrheit unten.
+            if (topWhite > 0 || topBlack > 0) {
+                val opponentIsWhite = topWhite > topBlack
+                if (opponentIsWhite == mineAreWhite) return null
+            }
+            return mineAreWhite
         }
 
         /**
