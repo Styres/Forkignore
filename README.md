@@ -1,4 +1,4 @@
-# ♟️ Duolingo Chess Copilot (Overlay-Schachassistent für Duolingo)
+# ♟️ DuLo (Overlay-Schachassistent für Duolingo)
 
 <p align="center">
   <a href="README.md">
@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  <strong>Ein Android-Assistent, der die Stellung im Schachmodus von Duolingo direkt auf dem Bildschirm auswertet.</strong><br>
+  <strong>DuLo ist ein Android-Assistent, der die Stellung im Schachmodus von Duolingo direkt auf dem Bildschirm auswertet.</strong><br>
   Er verbindet eine genaue Vermessung des Bretts per Bildverarbeitung, die eingebettete Stockfish-16-Engine mit NNUE-Netz und ein transparentes Overlay, das den besten Zug als Pfeil über das Brett zeichnet.
 </p>
 
@@ -166,8 +166,9 @@ cd android_copilot
 
 1. **Berechtigungen erteilen**: Beim ersten Start die **Overlay-Berechtigung**
    (`SYSTEM_ALERT_WINDOW`) und die **Bildschirmaufnahme** (`MediaProjection`) freigeben.
-2. **Assistenten einschalten**: Der Umschalter auf dem Hauptbildschirm startet den Dienst; dieselbe
-   Schaltfläche beendet ihn wieder ("Overlay-Assistent starten" / "Overlay-Assistent stoppen").
+2. **Assistenten einschalten**: Der Umschalter auf dem Hauptbildschirm ist das Foto von DuLo. Ein Tippen
+   startet den Dienst, das Bild leuchtet dann mit grünem Rahmen; ein weiteres Tippen beendet ihn wieder
+   (dann liegt ein dunkler Schleier über dem Bild).
 3. **Duolingo öffnen** und ein Schachlevel starten.
 4. **Analysieren**: Kurz auf die Blase tippen, dann erscheinen der Pfeil des besten Zuges und die
    Bewertung direkt auf dem Brett.

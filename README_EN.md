@@ -157,7 +157,7 @@ same recommendation.
 ## 📱 Permissions & Usage
 
 1. **Grant Permissions**: Grant **Overlay Permission** (`SYSTEM_ALERT_WINDOW`) and **Screen Capture Permission** (`MediaProjection`) on first launch.
-2. **Toggle the Copilot**: The toggle button on the main screen starts the service and stops it again ("Overlay-Assistent starten" / "Overlay-Assistent stoppen"). The app's user interface is German.
+2. **Toggle the Copilot**: The toggle button on the main screen is a photo of DuLo (the app is named after the dog). Tapping it starts the service, the picture then lights up with a green frame; tapping again stops it and the picture is dimmed. The app's user interface is German.
 3. **Open Duolingo**: Launch Duolingo and enter any chess lesson or game.
 4. **Instant Analysis**: Tap the floating bubble to instantly view best moves and evaluation arrows.
 5. **Flip your side**: If the arrow ever suggests moves for the opponent's pieces, long-press the bubble to switch your own colour. The manual choice stays in effect until you long-press again or restart the service.

@@ -42,6 +42,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var tvResult: TextView
     private lateinit var btnToggleFloating: ToggleButton
+    private lateinit var tvToggleStatus: TextView
     private var classifier: UltraRobustClassifier? = null
 
     // Rückgabe der Galerie-Auswahl (Diagnose einzelner Screenshots)
@@ -58,6 +59,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             // Ohne Freigabe läuft nichts: der Umschalter darf dann nicht auf "an" stehen bleiben
             btnToggleFloating.isChecked = false
+            updateToggleState()
             Toast.makeText(this, "Ohne Aufnahmeberechtigung startet der Overlay-Assistent nicht", Toast.LENGTH_SHORT).show()
         }
     }
@@ -73,11 +75,16 @@ class MainActivity : AppCompatActivity() {
         // Umschalter: dieselbe Schaltfläche startet und beendet den Overlay-Assistenten.
         // Ausgewertet wird der Zustand nach dem Antippen, den ToggleButton selbst umschaltet.
         btnToggleFloating = findViewById(R.id.btnToggleFloating)
-        btnToggleFloating.isChecked = FloatingBubbleService.isRunning
+        tvToggleStatus = findViewById(R.id.tvToggleStatus)
+        updateToggleState()
         btnToggleFloating.setOnClickListener {
+            // Start und Stopp laufen beide asynchron: hier wird nur die Statuszeile gesetzt.
+            // Den tatsächlichen Zustand gleicht updateToggleState() in onResume wieder ab.
             if (btnToggleFloating.isChecked) {
+                tvToggleStatus.text = "DuLo wird gestartet ..."
                 checkOverlayPermissionAndRequestCapture()
             } else {
+                tvToggleStatus.text = "Assistent aus – auf DuLo tippen zum Starten"
                 stopBubbleService()
             }
         }
@@ -126,7 +133,18 @@ class MainActivity : AppCompatActivity() {
      */
     override fun onResume() {
         super.onResume()
-        btnToggleFloating.isChecked = FloatingBubbleService.isRunning
+        updateToggleState()
+    }
+
+    /** Umschalter und Statuszeile auf den tatsächlichen Zustand des Dienstes bringen */
+    private fun updateToggleState() {
+        val running = FloatingBubbleService.isRunning
+        btnToggleFloating.isChecked = running
+        tvToggleStatus.text = if (running) {
+            "Assistent läuft – auf DuLo tippen zum Stoppen"
+        } else {
+            "Assistent aus – auf DuLo tippen zum Starten"
+        }
     }
 
     /** Umschalter auf "aus": den Vordergrunddienst über seine Stopp-Aktion beenden */
@@ -142,6 +160,7 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
             // Ohne Overlay-Berechtigung bleibt der Umschalter aus, bis der Nutzer aus den Einstellungen zurückkommt
             btnToggleFloating.isChecked = false
+            updateToggleState()
             Toast.makeText(this, "Bitte zuerst die Overlay-Berechtigung erteilen, damit die Züge über Duolingo angezeigt werden können", Toast.LENGTH_LONG).show()
             val intent = Intent(
                 Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -162,7 +181,7 @@ class MainActivity : AppCompatActivity() {
             putExtra(FloatingBubbleService.EXTRA_RESULT_DATA, data)
         }
         ContextCompat.startForegroundService(this, serviceIntent)
-        Toast.makeText(this, "Die Blase ist gestartet. Jetzt Duolingo öffnen und spielen", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "DuLo ist gestartet. Jetzt Duolingo öffnen und spielen", Toast.LENGTH_SHORT).show()
         finish() // Fenster schließen und zurück zum Startbildschirm
     }
 

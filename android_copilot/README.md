@@ -1,4 +1,4 @@
-# 🦉 Duolingo Chess Copilot (Overlay-Schachassistent für Duolingo)
+# 🦉 DuLo (Overlay-Schachassistent für Duolingo)
 
 Eigenständige Android-App, die im Schachmodus von Duolingo den besten Zug direkt auf dem Bildschirm anzeigt.
 

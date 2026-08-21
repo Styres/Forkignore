@@ -128,7 +128,7 @@ class FloatingBubbleService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Der Umschalter in der Oberfläche hat "aus" gewählt: Dienst geordnet beenden
         if (intent?.action == ACTION_STOP) {
-            Toast.makeText(this, "Overlay-Assistent beendet", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "DuLo beendet", Toast.LENGTH_SHORT).show()
             stopSelf()
             return START_NOT_STICKY
         }
@@ -159,7 +159,7 @@ class FloatingBubbleService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Duolingo-Schachassistent",
+                "DuLo",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "Overlay-Dienst am Bildschirmrand"
@@ -170,7 +170,7 @@ class FloatingBubbleService : Service() {
         }
 
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Der Duolingo-Schachassistent läuft")
+            .setContentTitle("DuLo läuft")
             .setContentText("Auf die Blase tippen, um den besten Zug von Stockfish zu erhalten")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setOngoing(true)
@@ -234,7 +234,7 @@ class FloatingBubbleService : Service() {
             }, captureHandler)
 
             recordProjectionState("Aufnahmesitzung erfolgreich aufgebaut (${screenWidth}x${screenHeight}, dpi=$screenDensity)")
-            Toast.makeText(this, "Der Overlay-Assistent ist bereit", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "DuLo ist bereit", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             e.printStackTrace()
             // Rücknahme einer halben Initialisierung: scheitert ein Schritt, werden alle bereits angelegten Ressourcen verworfen, damit die drei Referenzen konsistent bleiben
