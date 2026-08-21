@@ -31,10 +31,8 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewOutlineProvider
 import android.view.WindowManager
-import android.widget.Button
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
@@ -43,6 +41,7 @@ import com.chess.copilot.R
 import com.chess.copilot.core.ChessLocator
 import com.chess.copilot.core.UltraRobustClassifier
 import com.chess.copilot.engine.StockfishBridge
+import com.chess.copilot.ui.DuloToggleView
 import com.chess.copilot.ui.MainActivity
 import com.chess.copilot.ui.TransparentCanvasOverlay
 import kotlinx.coroutines.CoroutineScope
@@ -131,7 +130,7 @@ class FloatingBubbleService : Service() {
     // Kleines Menü an der Blase: Schalter für die Dauerbeobachtung und Beenden-Knopf
     private var menuView: View? = null
     private var menuParams: WindowManager.LayoutParams? = null
-    private var analyseSwitch: Switch? = null
+    private var analyseToggle: DuloToggleView? = null
 
     // Dauerbeobachtung: läuft der Schalter, wird das Brett im Takt POLL_INTERVAL_MS abgeklopft
     @Volatile
@@ -140,8 +139,9 @@ class FloatingBubbleService : Service() {
 
     // Zuletzt erfolgreich lokalisiertes Brett; darauf bezieht sich der Vergleich der Frames
     private var lastBoardRect: Rect? = null
-    // Fingerabdruck der eigenen Figuren aus der letzten Analyse (siehe UltraRobustClassifier.ownPieceSignature)
-    private var lastOwnSignature: String? = null
+    // Felder der gegnerischen Figuren aus der letzten Analyse. Steht dort später eine gegnerische
+    // Figur auf einem neuen Feld, hat der Gegner gezogen und man ist selbst wieder am Zug.
+    private var lastOpponentSquares: Set<String>? = null
     // Eingedampfter Brettausschnitt des letzten ruhigen Frames
     private var baselineFingerprint: FloatArray? = null
     // Das Brett hat sich verändert und wartet darauf, wieder ruhig zu stehen
@@ -157,12 +157,7 @@ class FloatingBubbleService : Service() {
     private data class ArrowSnapshot(
         val boardRect: Rect,
         val eval: StockfishBridge.EngineEvaluation,
-        val isWhitePerspective: Boolean,
-        val displayMove: String,
-        val fen: String,
-        val medianSim: Float,
-        val occupiedCount: Int,
-        val detectedPerspective: Boolean
+        val isWhitePerspective: Boolean
     )
 
     private var lastArrow: ArrowSnapshot? = null
@@ -447,49 +442,41 @@ class FloatingBubbleService : Service() {
     private fun showMenu() {
         if (menuView != null) return
 
-        val pad = dp(14)
+        val gap = dp(10)
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(pad, pad, pad, pad)
-            elevation = 30f
-            background = GradientDrawable().apply {
-                cornerRadius = dp(20).toFloat()
-                setColor(Color.argb(242, 18, 22, 28))
-                setStroke(dp(2), Color.rgb(0, 230, 118))
-            }
+            setPadding(0, 0, 0, 0)
         }
 
-        val title = TextView(this).apply {
-            text = "DuLo"
-            setTextColor(Color.rgb(0, 230, 118))
-            textSize = 18f
-            typeface = Typeface.DEFAULT_BOLD
+        // Schalter im Stil der Systemkacheln: Pille mit weißem Knopf, darunter "Off" bzw. "On"
+        val toggle = DuloToggleView(this).apply {
+            setOn(autoAnalyseEnabled, animate = false)
+            onSwitched = { on -> setAutoAnalyse(on) }
         }
+        analyseToggle = toggle
 
-        // Schalter: an = Engine fragen und danach bei jedem eigenen Zug erneut fragen
-        val switchView = Switch(this).apply {
-            text = "Analyse"
-            setTextColor(Color.WHITE)
-            textSize = 16f
-            isChecked = autoAnalyseEnabled
-            setPadding(0, dp(10), 0, dp(10))
-            setOnCheckedChangeListener { _, checked -> setAutoAnalyse(checked) }
-        }
-        analyseSwitch = switchView
-
-        val destroyButton = Button(this).apply {
+        // Beenden in derselben Kachelform, nur in Rot
+        val destroyButton = TextView(this).apply {
             text = "Beenden"
             setTextColor(Color.WHITE)
+            textSize = 15f
+            gravity = Gravity.CENTER
+            setPadding(dp(16), dp(14), dp(16), dp(14))
             background = GradientDrawable().apply {
-                cornerRadius = dp(12).toFloat()
-                setColor(Color.rgb(150, 30, 30))
+                cornerRadius = dp(22).toFloat()
+                setColor(Color.rgb(48, 24, 26))
+                setStroke(dp(1), Color.rgb(190, 60, 60))
             }
             setOnClickListener { destroyAssistant() }
         }
 
-        container.addView(title)
-        container.addView(switchView)
-        container.addView(destroyButton)
+        container.addView(toggle)
+        container.addView(
+            destroyButton,
+            LinearLayout.LayoutParams(dp(132), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = gap
+            }
+        )
 
         val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -498,7 +485,7 @@ class FloatingBubbleService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
         // FLAG_NOT_FOCUSABLE: das Menü nimmt Berührungen an, zieht aber keinen Eingabefokus
-        // von der darunterliegenden App ab (sonst würde Duolingo die Tastatur/Fokus verlieren)
+        // von der darunterliegenden App ab
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -536,7 +523,7 @@ class FloatingBubbleService : Service() {
         } catch (_: Exception) {
         }
         menuView = null
-        analyseSwitch = null
+        analyseToggle = null
     }
 
     // ================= Dauerbeobachtung =================
@@ -560,13 +547,13 @@ class FloatingBubbleService : Service() {
 
         if (!isProjectionAlive()) {
             autoAnalyseEnabled = false
-            analyseSwitch?.isChecked = false
+            analyseToggle?.setOn(false, animate = true)
             requestReAuthorization()
             return
         }
 
         // Beim Einschalten immer rechnen, egal wie die Stellung zur letzten Analyse steht
-        lastOwnSignature = null
+        lastOpponentSquares = null
         baselineFingerprint = null
         boardChangePending = false
         Toast.makeText(this, "Analyse an", Toast.LENGTH_SHORT).show()
@@ -688,11 +675,6 @@ class FloatingBubbleService : Service() {
             boardRect = snapshot.boardRect,
             moveInfo = snapshot.eval,
             isWhitePerspective = snapshot.isWhitePerspective,
-            displayMoveStr = snapshot.displayMove,
-            fenString = snapshot.fen,
-            medianSim = snapshot.medianSim,
-            occupiedCount = snapshot.occupiedCount,
-            detectedPerspective = snapshot.detectedPerspective,
             autoDismiss = !autoAnalyseEnabled
         )
     }
@@ -754,7 +736,7 @@ class FloatingBubbleService : Service() {
 
         if (!isProjectionAlive()) {
             autoAnalyseEnabled = false
-            analyseSwitch?.isChecked = false
+            analyseToggle?.setOn(false, animate = true)
             stopMonitoring()
             requestReAuthorization()
             return
@@ -778,7 +760,7 @@ class FloatingBubbleService : Service() {
                 menuView?.visibility = View.VISIBLE
 
                 if (screenBitmap == null) {
-                    Toast.makeText(this@FloatingBubbleService, "Bild wird noch aufgenommen, bitte kurz danach erneut versuchen", Toast.LENGTH_SHORT).show()
+                    Log.i(TAG, "Noch kein Frame verfügbar, dieser Durchgang wird übersprungen")
                     return@launch
                 }
 
@@ -791,7 +773,7 @@ class FloatingBubbleService : Service() {
                 // und ein unvollständiges Bild ist ohnehin nicht zuverlässig erkennbar; stattdessen erscheinen die Fehlertafel und der rote Rahmen
                 if (locateResult.isCropped) {
                     withContext(Dispatchers.Main) {
-                        transparentOverlay?.showError("Außerhalb des Bildes: das Brett ist unvollständig, bitte mittig ausrichten", boardRect)
+                        transparentOverlay?.showError("Brett unvollständig im Bild")
                     }
                     return@launch
                 }
@@ -891,18 +873,22 @@ class FloatingBubbleService : Service() {
                         // Brett merken, damit die Beobachtungsschleife weiß, welchen Ausschnitt sie vergleichen muss
                         lastBoardRect = Rect(res.boardRect)
 
-                        // Kern der Dauerbeobachtung: nur wenn eine eigene Figur ihr Feld gewechselt hat,
-                        // wird die Engine erneut bemüht. Ein reiner Zug des Gegners oder eine Animation
-                        // der Oberfläche lässt die Signatur unverändert und spart den Rechenlauf.
-                        val ownSignature = UltraRobustClassifier.ownPieceSignature(res.standardBoard, res.isWhitePerspective)
-                        if (!force && ownSignature == lastOwnSignature) {
-                            // Nur der Gegner hat gezogen oder die Oberfläche hat sich bewegt:
-                            // Engine sparen und den bisherigen Pfeil wieder einblenden
+                        // Kern der Dauerbeobachtung: gerechnet wird, sobald man wieder am Zug ist.
+                        // Das ist genau dann der Fall, wenn seit der letzten Analyse eine gegnerische
+                        // Figur auf einem Feld steht, das vorher nicht ihr gehörte - also nachdem der
+                        // Gegner gezogen hat. Der eigene Zug allein löst nichts aus, denn danach ist
+                        // der Gegner am Zug und eine Empfehlung wäre verfrüht.
+                        val opponentSquares = UltraRobustClassifier.opponentSquares(res.standardBoard, res.isWhitePerspective)
+                        val previousOpponentSquares = lastOpponentSquares
+                        val myTurn = force || previousOpponentSquares == null ||
+                            UltraRobustClassifier.opponentMovedSince(previousOpponentSquares, opponentSquares)
+                        if (!myTurn) {
+                            // Der Gegner ist noch dran: Engine sparen und den bisherigen Pfeil wieder einblenden
                             restoreLastArrow()
                             refreshBaselinePending = true
                             return@launch
                         }
-                        lastOwnSignature = ownSignature
+                        lastOpponentSquares = opponentSquares
 
                         // Vorgegebene Bedenkzeit: go movetime 2000
                         val eval = StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = StockfishBridge.DEFAULT_MOVE_TIME_MS)
@@ -911,95 +897,44 @@ class FloatingBubbleService : Service() {
                         // deshalb wird kein Pfeil gezeichnet, sondern die rote Fehlertafel mit dem fehlerhaften FEN angezeigt
                         if (eval.bestMove == "(invalid)") {
                             withContext(Dispatchers.Main) {
-                                transparentOverlay?.showError("Unmögliche Stellung erkannt (Könige nebeneinander oder Figuren fehlerhaft)", boardRect, res.fullFen)
+                                transparentOverlay?.showError("Unmögliche Stellung erkannt (Könige nebeneinander oder Figuren fehlerhaft)")
                             }
                             lastFen = res.fullFen
                             return@launch
                         }
 
-                        // Figurentyp des Startfeldes voranstellen, ergibt eine Anzeige wie R-d4d5 (UCI -> SAN)
-                        var displayMoveStr = eval.bestMove
-                        if (eval.bestMove.length >= 4 && eval.bestMove[0] in 'a'..'h') {
-                            val fileIdx = eval.bestMove[0] - 'a'
-                            val rankIdx = 8 - (eval.bestMove[1] - '0') // in standardBoard entspricht r=0 der Reihe 8
-                            val pieceChar = res.standardBoard[rankIdx][fileIdx]
-                            
-                            // Regel: Bauern ohne Präfix, alle anderen Figuren mit ihrem Großbuchstaben
-                            if (!pieceChar.equals('p', ignoreCase = true) && pieceChar != '.') {
-                                displayMoveStr = "${pieceChar.uppercaseChar()}-${eval.bestMove}"
-                            }
-                        }
-
-                        // Warnung vor flackernder Erkennung: unverändertes Brett bei geändertem FEN belegt ein Flackern in Klassifikation oder Perspektive und damit wechselnde Empfehlungen
-                        val fenFlickerWarn = if (lastFen != null && lastFen != res.fullFen) " | Erkennung flackert" else ""
-                        lastFen = res.fullFen
-
-                        // Fallback deutlich anzeigen (Lektion aus bug_15): erscheint im Overlay der Fallback-Hinweis, steht die erste Diagnosezeile sofort daneben, alle Details liegen in engine_fallback_log.txt
-                        // Ein von der Engine bestätigtes Partieende (Matt/Patt) hat zwar depth=0, ist aber kein Fallback und darf nicht so gemeldet werden (Lektion aus bug_19)
-                        val isTrueFallback = eval.depth <= 0 &&
-                            eval.bestMove != "(checkmate)" && eval.bestMove != "(stalemate)"
-                        val engineWarn = if (isTrueFallback) {
-                            " | [Engine-Fallback]"
-                        } else ""
-                        
-                        // Kennzeichnung unsicherer Felder (Lektion aus bug_11): ein Verdacht auf Fehlklassifikation ist sofort sichtbar, alle Details stehen in cells_forensics.txt
-                        val lowConfWarn = if (detailedResp.lowConfidenceCells.isNotEmpty()) {
-                            " | unsichere Felder: ${detailedResp.lowConfidenceCells.take(3).joinToString(",")}"
-                        } else ""
-
-                        // Übergabe an das Overlay inklusive displayMoveStr und fenString
                         transparentOverlay?.showSuggestion(
                             boardRect = res.boardRect,
                             moveInfo = eval,
                             isWhitePerspective = res.isWhitePerspective,
-                            displayMoveStr = displayMoveStr,
-                            fenString = res.fullFen,
-                            medianSim = detailedResp.medianSim,
-                            occupiedCount = detailedResp.occupiedCount,
-                            detectedPerspective = detailedResp.detectedPerspective,
                             // In der Dauerbeobachtung bleibt der Pfeil stehen, bis der nächste Zug erkannt wird
                             autoDismiss = !autoAnalyseEnabled
                         )
                         lastArrow = ArrowSnapshot(
                             boardRect = Rect(res.boardRect),
                             eval = eval,
-                            isWhitePerspective = res.isWhitePerspective,
-                            displayMove = displayMoveStr,
-                            fen = res.fullFen,
-                            medianSim = detailedResp.medianSim,
-                            occupiedCount = detailedResp.occupiedCount,
-                            detectedPerspective = detailedResp.detectedPerspective
+                            isWhitePerspective = res.isWhitePerspective
                         )
                         // Der frisch gezeichnete Pfeil verändert das Bild: die Schleife holt sich eine neue Vergleichsbasis
                         refreshBaselinePending = true
+                        lastFen = res.fullFen
 
-                        val conflictDesc = if (sessionLockedPerspective != null && detailedResp.detectedPerspective != res.isWhitePerspective) {
-                            ", erkannt: ${if (detailedResp.detectedPerspective) "Weiß" else "Schwarz"}"
-                        } else ""
-                        val lockedStateDesc = when {
-                            manualPerspectiveLock -> "(von Hand$conflictDesc)"
-                            sessionLockedPerspective != null -> "(gesperrt$conflictDesc)"
-                            else -> ""
-                        }
-                        val perspectiveName = if (res.isWhitePerspective) "Weiß$lockedStateDesc" else "Schwarz$lockedStateDesc"
-
-                        withContext(Dispatchers.Main) {
-                            Toast.makeText(
-                                this@FloatingBubbleService,
-                                "Perspektive: $perspectiveName (${detailedResp.perspectiveReason}, ${String.format("%.0f", detailedResp.perspectiveConfidence * 100)}%) | Sim: ${String.format("%.3f", detailedResp.medianSim)}$engineWarn$lowConfWarn$fenFlickerWarn",
-                                if (isTrueFallback) Toast.LENGTH_LONG else Toast.LENGTH_SHORT
-                            ).show()
-                        }
+                        // Befunde nur ins Protokoll, der Bildschirm bleibt ruhig
+                        val isTrueFallback = eval.depth <= 0 &&
+                            eval.bestMove != "(checkmate)" && eval.bestMove != "(stalemate)"
+                        Log.i(
+                            TAG,
+                            "Zug=${eval.bestMove} Tiefe=${eval.depth} Perspektive=${if (res.isWhitePerspective) "Weiß" else "Schwarz"}" +
+                                " (${detailedResp.perspectiveReason}, ${String.format("%.2f", detailedResp.perspectiveConfidence)})" +
+                                " Sim=${String.format("%.3f", detailedResp.medianSim)}" +
+                                (if (isTrueFallback) " [Engine-Fallback]" else "")
+                        )
                     }
                     is UltraRobustClassifier.ClassificationResponse.Rejected -> {
-                        // Rote Fehlertafel mit dem Grund anzeigen, damit ein falscher Rahmen sichtbar wird
                         withContext(Dispatchers.Main) {
-                            transparentOverlay?.showError(detailedResp.reason, boardRect)
-                            Toast.makeText(
-                                this@FloatingBubbleService,
-                                "[Vom Gatter abgewiesen] Grund: ${detailedResp.reason} (Sim=${String.format("%.3f", detailedResp.medianSim)}, belegt=${detailedResp.occupiedCount}, Locator-Score=${String.format("%.0f", locateResult.score)})",
-                                Toast.LENGTH_LONG
-                            ).show()
+                            transparentOverlay?.showError(
+                                "Vom Gatter abgewiesen: ${detailedResp.reason} (Sim=${String.format("%.3f", detailedResp.medianSim)}, belegt=${detailedResp.occupiedCount})"
+                            )
                         }
                     }
                     null -> {
@@ -1009,7 +944,10 @@ class FloatingBubbleService : Service() {
                     }
                 }
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.w(TAG, "Analyse abgebrochen: ${e.javaClass.simpleName}: ${e.message}")
+                withContext(Dispatchers.Main) {
+                    transparentOverlay?.showError("Ausnahme in der Analyse: ${e.javaClass.simpleName}")
+                }
             } finally {
                 bubbleView?.visibility = View.VISIBLE
                 menuView?.visibility = View.VISIBLE

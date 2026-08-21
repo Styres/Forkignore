@@ -44,10 +44,12 @@
   - Liefert Bewertung (Centipawns / Matt), besten Zug und die zweitbeste Antwort.
 - 🎨 **Blase am Bildschirmrand, Menü und transparentes Overlay**
   - Der Vordergrunddienst `FloatingBubbleService` zeigt DuLo als frei verschiebbare Blase mit abgerundeten Ecken;
-  - ein Tippen öffnet ein kleines Menü mit dem Schalter **Analyse** und dem Knopf **Beenden**;
-  - `TransparentCanvasOverlay` zeichnet Pfeil und Bewertung unmittelbar über das Duolingo-Brett, Berührungen gehen hindurch.
+  - ein Tippen öffnet ein kleines Menü mit einem Schalter im Stil der Systemkacheln (**Off** / **On**, animiert) und dem Knopf **Beenden**;
+  - `TransparentCanvasOverlay` zeichnet nur den Pfeil und die beiden hervorgehobenen Felder über das Duolingo-Brett, Berührungen gehen hindurch;
+  - geht etwas schief, steht dort schlicht **Something went wrong :(** statt einer technischen Fehlertafel.
 - 🔁 **Dauerbeobachtung statt Antippen**
-  - Steht der Schalter auf an, fragt DuLo die Engine sofort und danach automatisch erneut, sobald eine **eigene** Figur ihr Feld gewechselt hat;
+  - Steht der Schalter auf **On**, fragt DuLo die Engine sofort und danach automatisch erneut, sobald **der Gegner gezogen hat** und man selbst wieder am Zug ist;
+  - erkannt wird das daran, dass eine gegnerische Figur auf einem Feld auftaucht, das vorher nicht ihr gehörte; ein eigener Schlagfall zählt dabei bewusst nicht;
   - dazwischen wird das Brett nur grob abgeklopft (eingedampftes Raster im Takt von 900 ms), das kostet kaum Rechenzeit;
   - die volle Erkennung läuft erst an, wenn der Zug fertig animiert ist und das Bild wieder still steht.
 - 🔒 **Vollständig offline**
@@ -175,9 +177,10 @@ cd android_copilot
    den Dienst, das Bild leuchtet dann mit grünem Rahmen; ein weiteres Tippen beendet ihn wieder.
 3. **Duolingo öffnen** und ein Schachlevel starten.
 4. **Menü öffnen**: Kurz auf die Blase tippen. Es erscheinen:
-   - **Analyse** (Schalter, standardmäßig aus): an bedeutet, die Engine wird sofort gefragt und danach
-     jedes Mal automatisch erneut, wenn eine eigene Figur ihr Feld gewechselt hat. Der Pfeil bleibt
-     dabei stehen, bis der nächste Zug erkannt wird. Aus beendet die Beobachtung und blendet den Pfeil aus.
+   - der **Schalter** (steht auf **Off**): ein Tippen schiebt den Knopf animiert nach rechts, die Spur
+     wird grün und die Beschriftung wechselt auf **On**. Ab dann wird die Engine sofort gefragt und
+     danach jedes Mal erneut, sobald der Gegner gezogen hat. Der Pfeil bleibt stehen, bis der nächste
+     Zug erkannt wird. Zurück auf **Off** beendet die Beobachtung und blendet den Pfeil aus.
    - **Beenden**: schließt das Menü und stoppt DuLo samt Bildschirmaufnahme vollständig, so als hätte
      man die App über die Systemeinstellungen beendet.
 5. **Farbe umschalten**: Zeigt der Pfeil einmal Züge für die gegnerischen Figuren, schaltet ein

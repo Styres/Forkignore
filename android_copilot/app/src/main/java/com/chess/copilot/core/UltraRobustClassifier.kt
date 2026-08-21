@@ -731,6 +731,43 @@ class UltraRobustClassifier(context: Context? = null) {
         }
 
         /**
+         * Reine Funktion: alle Felder, auf denen gegnerische Figuren stehen (z. B. "e7").
+         *
+         * @param standardBoard Brett in Standardausrichtung (row 0 = Reihe 8, row 7 = Reihe 1)
+         * @param isWhitePerspective true = die eigenen Figuren sind die weißen, gegnerisch ist alles Kleingeschriebene
+         */
+        fun opponentSquares(standardBoard: Array<CharArray>, isWhitePerspective: Boolean): Set<String> {
+            val fileChars = "abcdefgh"
+            val squares = mutableSetOf<String>()
+            for (r in standardBoard.indices) {
+                val row = standardBoard[r]
+                for (c in row.indices) {
+                    val sym = row[c]
+                    if (sym == '.') continue
+                    val isWhitePiece = sym.isUpperCase()
+                    if (isWhitePiece == isWhitePerspective) continue
+                    val file = if (c in fileChars.indices) fileChars[c] else '?'
+                    squares.add("$file${8 - r}")
+                }
+            }
+            return squares
+        }
+
+        /**
+         * Reine Funktion: Hat der Gegner seit der letzten Analyse gezogen? Dann ist man selbst am Zug.
+         *
+         * Entscheidend ist, ob eine gegnerische Figur auf einem Feld auftaucht, das vorher nicht von
+         * ihm besetzt war. Damit zählt jeder gegnerische Zug, auch ein Schlagfall auf einem eigenen
+         * Feld, eine Rochade oder eine Umwandlung.
+         *
+         * Bewusst nicht gezählt wird der Fall, dass gegnerische Figuren nur verschwinden: das passiert,
+         * wenn man selbst schlägt, und danach ist der Gegner am Zug, nicht man selbst.
+         */
+        fun opponentMovedSince(previousSquares: Set<String>, currentSquares: Set<String>): Boolean {
+            return currentSquares.any { it !in previousSquares }
+        }
+
+        /**
          * Reine Funktion: mittlerer Helligkeitsabstand zweier eingedampfter Brettausschnitte.
          *
          * Die Dauerbeobachtung vergleicht damit aufeinanderfolgende Frames, ohne jedes Mal die
@@ -744,35 +781,6 @@ class UltraRobustClassifier(context: Context? = null) {
                 sum += abs(a[i] - b[i])
             }
             return sum / a.size
-        }
-
-        /**
-         * Reine Funktion: Fingerabdruck der eigenen Figuren als sortierte Liste "Figur@Feld".
-         *
-         * Grundlage der laufenden Beobachtung: Solange dieser Fingerabdruck gleich bleibt, hat sich an
-         * den eigenen Figuren nichts geändert und die Engine muss nicht erneut rechnen. Sobald eine
-         * eigene Figur ihr Feld wechselt (Zug, Schlagfall, Umwandlung), unterscheidet sich der
-         * Fingerabdruck und die Analyse läuft neu an.
-         *
-         * @param standardBoard Brett in Standardausrichtung (row 0 = Reihe 8, row 7 = Reihe 1)
-         * @param isWhitePerspective true = die eigenen Figuren sind die weißen (Großbuchstaben)
-         */
-        fun ownPieceSignature(standardBoard: Array<CharArray>, isWhitePerspective: Boolean): String {
-            val fileChars = "abcdefgh"
-            val entries = mutableListOf<String>()
-            for (r in standardBoard.indices) {
-                val row = standardBoard[r]
-                for (c in row.indices) {
-                    val sym = row[c]
-                    if (sym == '.') continue
-                    val isWhitePiece = sym.isUpperCase()
-                    if (isWhitePiece != isWhitePerspective) continue
-                    val file = if (c in fileChars.indices) fileChars[c] else '?'
-                    entries.add("$sym@$file${8 - r}")
-                }
-            }
-            entries.sort()
-            return entries.joinToString(",")
         }
 
         /**

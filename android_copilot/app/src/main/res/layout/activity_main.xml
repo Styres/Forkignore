@@ -75,7 +75,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
             android:lineSpacingExtra="4dp"
-            android:text="• Kurz auf die Blase tippen öffnet das Menü.\n• Der Schalter „Analyse“ fragt die Engine sofort und danach automatisch bei jedem eigenen Zug erneut.\n• „Beenden“ schließt das Menü und stoppt die Bildschirmaufnahme vollständig.\n• Langes Drücken auf die Blase schaltet die eigene Farbe um, falls die Zuordnung einmal vertauscht ist."
+            android:text="• Kurz auf die Blase tippen öffnet das Menü.\n• Der Schalter steht auf „Off“; ein Tippen schaltet ihn auf „On“. Dann fragt DuLo die Engine sofort und danach jedes Mal neu, sobald der Gegner gezogen hat und du wieder am Zug bist.\n• „Beenden“ schließt das Menü und stoppt die Bildschirmaufnahme vollständig.\n• Langes Drücken auf die Blase schaltet die eigene Farbe um, falls die Zuordnung einmal vertauscht ist."
             android:textColor="#AAAAAA"
             android:textSize="14sp" />
 

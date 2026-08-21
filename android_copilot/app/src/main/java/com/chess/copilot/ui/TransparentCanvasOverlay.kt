@@ -9,6 +9,7 @@ import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.RectF
 import android.os.Build
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -28,6 +29,13 @@ import kotlin.math.sin
  */
 class TransparentCanvasOverlay(private val context: Context) {
 
+    private companion object {
+        const val TAG = "DuLoOverlay"
+        // Einheitlicher Text für alle Störungen: fehlgeschlagene Erkennung, abgewiesene Rahmen, Ausnahmen
+        const val ERROR_TEXT = "Something went wrong :("
+    }
+
+
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private var overlayView: OverlayDrawView? = null
     private var isShowing = false
@@ -38,31 +46,9 @@ class TransparentCanvasOverlay(private val context: Context) {
         var boardRect: Rect? = null
         var moveInfo: StockfishBridge.EngineEvaluation? = null
         var isWhitePerspective: Boolean = true
-        var medianSim: Float = 1.0f
-        var occupiedCount: Int = 0
-        var detectedPerspective: Boolean? = null
-        
-        // Menschenlesbarer Zugtext, z. B. R-d4d5
-        var displayMoveStr: String = ""
-        // Text der grossflächigen Fehlertafel
-        var errorMessage: String? = null 
-        // Aktuell berechnetes FEN, damit der Befund auf dem Bildschirm belegt ist
-        var fenString: String = "" 
 
-        // Roter Rahmen um das erkannte Brett, damit ein falscher Rahmen oder ein Versatz sofort auffällt
-        private val boardDebugPaint = Paint().apply {
-            color = Color.RED
-            style = Paint.Style.STROKE
-            strokeWidth = 6f
-            isAntiAlias = true
-        }
-
-        // Hintergrund der Fehlertafel
-        private val errorBgPaint = Paint().apply {
-            color = Color.argb(230, 180, 0, 0) // halbtransparentes Dunkelrot
-            style = Paint.Style.FILL
-            isAntiAlias = true
-        }
+        // Gesetzt, solange eine Störung angezeigt wird
+        var errorMessage: String? = null
 
         private val startPaint = Paint().apply {
             color = Color.argb(130, 0, 230, 115) // halbtransparentes Blaugrün
@@ -104,105 +90,27 @@ class TransparentCanvasOverlay(private val context: Context) {
             isFakeBoldText = true
         }
 
-        private val subTextPaint = Paint().apply {
-            color = Color.rgb(180, 215, 255)
-            textSize = 26f
-            isAntiAlias = true
-        }
-
-        private val fenTextPaint = Paint().apply {
-            color = Color.rgb(180, 215, 255)
-            textSize = 22f
-            isAntiAlias = true
-        }
-
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
-            
-            val screenW = width.toFloat()
-            val paddingX = 24f
-            val maxAvailableW = screenW - 48f
 
-            // Die Fehlertafel hat Vorrang vor allem anderen
-            val errMsg = errorMessage
-            if (errMsg != null) {
-                val cx = width / 2f
-                val cy = height / 2f
-                val line1 = "Fehler: $errMsg"
-                val line2 = if (fenString.isNotEmpty()) "FEN: $fenString" else ""
-                
-                val w1 = textPaint.measureText(line1)
-                var fenSize = 22f
-                fenTextPaint.textSize = fenSize
-                val maxFenAvailableW = maxAvailableW - paddingX * 2
-                while (line2.isNotEmpty() && fenTextPaint.measureText(line2) > maxFenAvailableW && fenSize > 14f) {
-                    fenSize -= 1f
-                    fenTextPaint.textSize = fenSize
-                }
-                val w2 = if (line2.isNotEmpty()) fenTextPaint.measureText(line2) else 0f
-                val pillW = (maxOf(w1, w2) + paddingX * 2).coerceIn(400f, maxAvailableW)
-                val pillH = 160f
-                val pillX = cx - pillW / 2f
-                val pillY = cy - pillH / 2f
-                
-                canvas.drawRoundRect(RectF(pillX, pillY, pillX + pillW, pillY + pillH), 24f, 24f, errorBgPaint)
-                canvas.drawText(line1, pillX + paddingX, cy - 20f, textPaint)
-                if (line2.isNotEmpty()) {
-                    canvas.drawText(line2, pillX + paddingX, cy + 30f, fenTextPaint)
-                }
-                
-                // Liegt ein (falscher) Brettrahmen vor, wird er mitgezeichnet, damit er sichtbar wird
-                boardRect?.let { canvas.drawRect(it, boardDebugPaint) }
+            // Störungsmeldung: eine ruhige Kachel in der Bildschirmmitte, ohne weitere Angaben
+            if (errorMessage != null) {
+                drawStatusPill(canvas, ERROR_TEXT)
                 return
             }
 
             val rect = boardRect ?: return
             val move = moveInfo ?: return
-
-            // Vom Erkenner angenommene Brettgrenze einzeichnen
-            canvas.drawRect(rect, boardDebugPaint)
-
             val step = (rect.right - rect.left) / 8.0f
             val uci = move.bestMove
-            val conflictStr = if (detectedPerspective != null && detectedPerspective != isWhitePerspective) {
-                "(erkannt: ${if (detectedPerspective == true) "Weiß" else "Schwarz"})"
-            } else ""
-            val perspectiveStr = "${if (isWhitePerspective) "Weiß" else "Schwarz"}$conflictStr"
 
             if (uci.length < 4 || uci == "(none)" || uci == "(checkmate)" || uci == "(stalemate)" || uci == "(invalid)") {
-                val statusStr = when {
-                    uci == "(invalid)" -> "Erkennungsfehler (unmögliche Stellung)"
-                    move.isMate || uci == "(checkmate)" -> "Partie entschieden (Schachmatt)"
-                    uci == "(stalemate)" -> "Remis (Patt)"
-                    else -> "Kein legaler Zug"
+                val statusText = when {
+                    move.isMate || uci == "(checkmate)" -> "Schachmatt"
+                    uci == "(stalemate)" -> "Patt"
+                    else -> ERROR_TEXT
                 }
-                val line1 = "Stellung: $statusStr"
-                val line2 = "Perspektive: $perspectiveStr | Sim: ${String.format("%.3f", medianSim)} | belegt: $occupiedCount"
-                val line3 = if (fenString.isNotEmpty()) "FEN: $fenString" else ""
-
-                // Breite eng am Inhalt ausrichten (Wrap Content)
-                val w1 = textPaint.measureText(line1)
-                val w2 = subTextPaint.measureText(line2)
-                var fenSize = 22f
-                fenTextPaint.textSize = fenSize
-                val maxFenAvailableW = maxAvailableW - paddingX * 2
-                while (line3.isNotEmpty() && fenTextPaint.measureText(line3) > maxFenAvailableW && fenSize > 14f) {
-                    fenSize -= 1f
-                    fenTextPaint.textSize = fenSize
-                }
-                val w3 = if (line3.isNotEmpty()) fenTextPaint.measureText(line3) else 0f
-                val pillW = (maxOf(w1, w2, w3) + paddingX * 2).coerceIn(400f, maxAvailableW)
-                val pillH = 150f
-                val idealPillX = rect.left + (rect.width() - pillW) / 2f
-                val pillX = idealPillX.coerceIn(24f, (screenW - pillW - 24f).coerceAtLeast(24f))
-                val pillY = (rect.top - pillH - 25f).coerceAtLeast(50f)
-
-                canvas.drawRoundRect(RectF(pillX, pillY, pillX + pillW, pillY + pillH), 24f, 24f, textBgPaint)
-                canvas.drawText(line1, pillX + paddingX, pillY + 42f, textPaint)
-                canvas.drawText(line2, pillX + paddingX, pillY + 84f, subTextPaint)
-                if (line3.isNotEmpty()) {
-                    canvas.drawText(line3, pillX + paddingX, pillY + 126f, fenTextPaint)
-                }
+                drawStatusPill(canvas, statusText)
                 return
             }
 
@@ -221,47 +129,28 @@ class TransparentCanvasOverlay(private val context: Context) {
             val x2 = rect.left + (c2 + 0.5f) * step
             val y2 = rect.top + (r2 + 0.5f) * step
 
-            // 1. Start- und Zielfeld hervorheben
+            // Start- und Zielfeld hervorheben
             val startBox = RectF(rect.left + c1 * step, rect.top + r1 * step, rect.left + (c1 + 1) * step, rect.top + (r1 + 1) * step)
             val targetBox = RectF(rect.left + c2 * step, rect.top + r2 * step, rect.left + (c2 + 1) * step, rect.top + (r2 + 1) * step)
             canvas.drawRoundRect(startBox, 16f, 16f, startPaint)
             canvas.drawRoundRect(targetBox, 16f, 16f, targetPaint)
 
-            // 2. Pfeilschaft und Pfeilspitze zeichnen
+            // Pfeilschaft und Pfeilspitze
             canvas.drawLine(x1, y1, x2, y2, arrowPaint)
             drawArrowHead(canvas, x1, y1, x2, y2)
+        }
 
-            // 3. Infofeld darüber zeichnen (Zug, Bewertung, Telemetrie und FEN)
-            val scoreStr = if (move.isMate) "MATE" else "${if (move.evalScore >= 0) "+" else ""}${String.format("%.2f", move.evalScore)}"
-            val depthStr = if (move.depth <= 0) "[Fallback]" else "Tiefe ${move.depth}"
-            // Zugtext mit vorangestelltem Figurentyp verwenden
-            val line1 = "Zug: $displayMoveStr | Bewertung: $scoreStr ($depthStr)"
-            val line2 = "Perspektive: $perspectiveStr | Sim: ${String.format("%.3f", medianSim)} | belegt: $occupiedCount"
-            val line3 = if (fenString.isNotEmpty()) "FEN: $fenString" else ""
-
-            // Breite eng am Inhalt ausrichten (Wrap Content)
-            val w1 = textPaint.measureText(line1)
-            val w2 = subTextPaint.measureText(line2)
-            var fenSize = 22f
-            fenTextPaint.textSize = fenSize
-            val maxFenAvailableW = maxAvailableW - paddingX * 2
-            while (line3.isNotEmpty() && fenTextPaint.measureText(line3) > maxFenAvailableW && fenSize > 14f) {
-                fenSize -= 1f
-                fenTextPaint.textSize = fenSize
-            }
-            val w3 = if (line3.isNotEmpty()) fenTextPaint.measureText(line3) else 0f
-            val pillW = (maxOf(w1, w2, w3) + paddingX * 2).coerceIn(400f, maxAvailableW)
-            val pillH = 150f
-            val idealPillX = rect.left + (rect.width() - pillW) / 2f
-            val pillX = idealPillX.coerceIn(24f, (screenW - pillW - 24f).coerceAtLeast(24f))
-            val pillY = (rect.top - pillH - 25f).coerceAtLeast(50f)
-
-            canvas.drawRoundRect(RectF(pillX, pillY, pillX + pillW, pillY + pillH), 24f, 24f, textBgPaint)
-            canvas.drawText(line1, pillX + paddingX, pillY + 42f, textPaint)
-            canvas.drawText(line2, pillX + paddingX, pillY + 84f, subTextPaint)
-            if (line3.isNotEmpty()) {
-                canvas.drawText(line3, pillX + paddingX, pillY + 126f, fenTextPaint)
-            }
+        /** Kurze Meldung mittig auf dem Bildschirm, sonst nichts */
+        private fun drawStatusPill(canvas: Canvas, text: String) {
+            val cx = width / 2f
+            val cy = height / 2f
+            val textWidth = textPaint.measureText(text)
+            val pillW = (textWidth + 72f).coerceAtMost(width - 48f)
+            val pillH = 108f
+            val pillX = cx - pillW / 2f
+            val pillY = cy - pillH / 2f
+            canvas.drawRoundRect(RectF(pillX, pillY, pillX + pillW, pillY + pillH), 28f, 28f, textBgPaint)
+            canvas.drawText(text, cx - textWidth / 2f, cy + 12f, textPaint)
         }
 
         private fun drawArrowHead(canvas: Canvas, x1: Float, y1: Float, x2: Float, y2: Float) {
@@ -284,16 +173,11 @@ class TransparentCanvasOverlay(private val context: Context) {
         }
     }
 
-    // Anzeige des empfohlenen Zuges inklusive displayMoveStr und fenString
+    /** Empfohlenen Zug anzeigen: hervorgehobene Felder und Pfeil, sonst nichts */
     fun showSuggestion(
         boardRect: Rect,
         moveInfo: StockfishBridge.EngineEvaluation,
         isWhitePerspective: Boolean,
-        displayMoveStr: String,
-        fenString: String,
-        medianSim: Float = 1.0f,
-        occupiedCount: Int = 0,
-        detectedPerspective: Boolean? = null,
         // false = der Pfeil bleibt stehen (Dauerbeobachtung), bis die nächste Analyse ihn ersetzt
         autoDismiss: Boolean = true
     ) {
@@ -306,16 +190,9 @@ class TransparentCanvasOverlay(private val context: Context) {
             this.boardRect = boardRect
             this.moveInfo = moveInfo
             this.isWhitePerspective = isWhitePerspective
-            this.displayMoveStr = displayMoveStr
-            this.fenString = fenString
-            this.medianSim = medianSim
-            this.occupiedCount = occupiedCount
-            this.detectedPerspective = detectedPerspective
             postInvalidate()
         }
 
-        // 5 Sekunden Standzeit, damit das FEN in Ruhe gelesen oder abfotografiert werden kann.
-        // In der Dauerbeobachtung entfällt das Ausblenden: dort ersetzt erst der nächste Zug den Pfeil.
         autoDismissJob?.cancel()
         autoDismissJob = if (autoDismiss) {
             scope.launch {
@@ -327,21 +204,25 @@ class TransparentCanvasOverlay(private val context: Context) {
         }
     }
 
-    // Rote Warntafel für abgewiesene Rahmen und unmögliche Stellungen
-    fun showError(reason: String, errorRect: Rect? = null, fenString: String = "") {
+    /**
+     * Störung anzeigen. Auf dem Bildschirm steht immer derselbe kurze Satz; der übergebene Grund
+     * dient nur dem Protokoll, damit die Anzeige ruhig bleibt.
+     */
+    fun showError(reason: String) {
+        Log.i(TAG, "Overlay meldet Störung: $reason")
         if (overlayView == null) {
             initOverlayView()
         }
         overlayView?.apply {
             this.errorMessage = reason
-            this.boardRect = errorRect
-            this.fenString = fenString
+            this.boardRect = null
+            this.moveInfo = null
             postInvalidate()
         }
         autoDismissJob?.cancel()
-        autoDismissJob = scope.launch { 
-            delay(5000)
-            hide() 
+        autoDismissJob = scope.launch {
+            delay(4000)
+            hide()
         }
     }
 
