@@ -4,14 +4,14 @@
 { pkgs, ... }: {
   channel = "stable-23.11";
 
-  # 包含 Android SDK 与 JDK 17
+  # Enthält das Android SDK und JDK 17
   packages = [
     pkgs.jdk17
     pkgs.gradle
     pkgs.git
   ];
 
-  # 启用 Android 模拟器与开发扩展
+  # Aktiviert den Android-Emulator und die Entwicklungserweiterungen
   idx = {
     extensions = [
       "vscjava.vscode-java-pack"

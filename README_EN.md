@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="README.md">
-    <img src="https://img.shields.io/badge/语言-简体中文-red?style=for-the-badge&logo=google-translate&logoColor=white" alt="简体中文" />
+    <img src="https://img.shields.io/badge/Sprache-Deutsch-red?style=for-the-badge&logo=google-translate&logoColor=white" alt="Deutsch" />
   </a>
   &nbsp;&nbsp;
   <a href="README_EN.md">
@@ -114,12 +114,53 @@ cd android_copilot
 
 ---
 
+## ♟️ Engine Configuration
+
+The engine is configured during the UCI handshake for maximum strength at 2 seconds per move (see
+`StockfishBridge`). Only options the engine advertises during the handshake are sent; anything else
+is skipped and noted in the diagnostics.
+
+| Option              | Value                                                                       |
+|---------------------|-----------------------------------------------------------------------------|
+| Threads             | logical cores minus 2 (e.g. 14 on 16 cores), at least 1                      |
+| Hash                | 256 MB on 4-6, 512 MB on 8-12, 1024 MB from 16 logical cores                 |
+| MultiPV             | 1                                                                            |
+| Ponder              | false                                                                        |
+| Skill Level         | 20                                                                           |
+| UCI_LimitStrength   | false                                                                        |
+| Move Overhead       | 10 ms (the engine runs locally on the device)                                |
+| nodestime           | 0                                                                            |
+| UCI_ShowWDL         | true                                                                         |
+| NumaPolicy          | auto                                                                         |
+| SyzygyPath          | only set when tablebases exist under `filesDir/syzygy`                       |
+| SyzygyProbeDepth    | 1 (only with tablebases)                                                     |
+| SyzygyProbeLimit    | 5 (only with tablebases)                                                     |
+| Syzygy50MoveRule    | true (only with tablebases)                                                  |
+| Search command      | `go movetime 2000`, preceded by `ucinewgame` for every new position          |
+
+- **Binary variant**: if variants such as `libstockfish-vnni512.so`, `-bmi2`, `-avx2`,
+  `-armv8-i8mm` or `-armv8-dotprod` ship alongside the generic `libstockfish.so`, the app picks the
+  strongest one supported by the CPU features found in `/proc/cpuinfo`.
+- **Hash re-tuning**: when the engine reports an average `hashfull` above 30 percent, the app
+  doubles the hash, up to four times the initial value.
+- **Device memory cap**: the table value is capped at a quarter of physical RAM, otherwise Android
+  kills the engine process on low-memory phones.
+- **Large pages**: the "Lock pages in memory" privilege only exists on Windows and does not apply
+  here; grant it to the user account when running the same configuration on a Windows machine.
+
+Note on reproducibility: with multiple threads the search under `movetime` is no longer
+deterministic. Results are cached per FEN, so tapping twice on an unchanged board still yields the
+same recommendation.
+
+---
+
 ## 📱 Permissions & Usage
 
 1. **Grant Permissions**: Grant **Overlay Permission** (`SYSTEM_ALERT_WINDOW`) and **Screen Capture Permission** (`MediaProjection`) on first launch.
-2. **Start Copilot**: Tap "Start Copilot" to display the floating bubble.
+2. **Toggle the Copilot**: The toggle button on the main screen starts the service and stops it again ("Overlay-Assistent starten" / "Overlay-Assistent stoppen"). The app's user interface is German.
 3. **Open Duolingo**: Launch Duolingo and enter any chess lesson or game.
 4. **Instant Analysis**: Tap the floating bubble to instantly view best moves and evaluation arrows.
+5. **Flip your side**: If the arrow ever suggests moves for the opponent's pieces, long-press the bubble to switch your own colour. The manual choice stays in effect until you long-press again or restart the service.
 
 ---
 
