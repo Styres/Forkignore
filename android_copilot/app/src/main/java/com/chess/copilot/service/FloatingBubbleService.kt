@@ -83,15 +83,27 @@ class FloatingBubbleService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "chess_copilot_service"
 
+        // Kantenlänge der Blase; die Menükachel ist genauso breit
+        const val BUBBLE_SIZE_DP = 64
+
         // Ab dieser Druckdauer gilt eine Berührung der Blase als langer Druck (Perspektive umschalten)
         private const val LONG_PRESS_MS = 500L
 
         // Takt der Dauerbeobachtung: so oft wird das Brett auf Veränderung abgeklopft
-        private const val POLL_INTERVAL_MS = 900L
+        private const val POLL_INTERVAL_MS = 700L
 
         // Ab dieser mittleren Helligkeitsdifferenz je Kachel gilt das Brett als verändert.
         // Darunter liegen Kompressionsrauschen und leichte Animationen der Oberfläche.
-        private const val BOARD_CHANGE_THRESHOLD = 2.5f
+        private const val BOARD_CHANGE_THRESHOLD = 1.8f
+
+        // Bewegt sich das Bild so lange ohne Ruhepause, wird trotzdem analysiert.
+        // Duolingo animiert nach einem Zug gern weiter (Hervorhebungen, Maskottchen).
+        private const val MAX_PENDING_TICKS = 4
+
+        // Sicherheitsnetz: spätestens nach so vielen Takten wird ohnehin nachgesehen,
+        // auch wenn der Bildvergleich nichts gemeldet hat. Die Engine läuft dabei nur,
+        // wenn der Gegner tatsächlich gezogen hat - der Durchlauf kostet also wenig.
+        private const val SWEEP_TICKS = 8
 
         // Kantenlänge des Rasters, auf das der Brettausschnitt zum Vergleich eingedampft wird
         private const val FINGERPRINT_GRID = 12
@@ -142,12 +154,29 @@ class FloatingBubbleService : Service() {
     // Felder der gegnerischen Figuren aus der letzten Analyse. Steht dort später eine gegnerische
     // Figur auf einem neuen Feld, hat der Gegner gezogen und man ist selbst wieder am Zug.
     private var lastOpponentSquares: Set<String>? = null
-    // Eingedampfter Brettausschnitt des letzten ruhigen Frames
-    private var baselineFingerprint: FloatArray? = null
-    // Das Brett hat sich verändert und wartet darauf, wieder ruhig zu stehen
-    private var boardChangePending = false
-    // Nach dem Zeichnen des Pfeils muss die Vergleichsbasis neu genommen werden (der Pfeil verändert das Bild)
-    private var refreshBaselinePending = false
+    /**
+     * Stand des Bretts zum Zeitpunkt der letzten Analyse. Diese Vergleichsbasis wird ausschließlich
+     * nach einer gelaufenen Analyse erneuert - niemals zwischendurch. Genau daran scheiterte die
+     * vorherige Fassung: sie zog die Basis bei jedem veränderten Bild nach, wodurch ein Zug des
+     * Gegners, der kurz nach dem eigenen Zug kam, in die Basis wanderte und nie erkannt wurde.
+     */
+    private var referenceFingerprint: FloatArray? = null
+    // Bild des vorherigen Taktes, nur um zu erkennen, ob das Brett gerade still steht
+    private var lastTickFingerprint: FloatArray? = null
+    // Wie viele Takte am Stück weicht das Bild schon von der Vergleichsbasis ab
+    private var changePendingTicks = 0
+    // Takte seit der letzten Analyse (für das Sicherheitsnetz)
+    private var ticksSinceAnalysis = 0
+
+    /**
+     * Zuletzt erfolgreich aufgenommener Brettausschnitt.
+     *
+     * MediaProjection liefert nur dann einen neuen Frame, wenn sich auf dem Bildschirm etwas
+     * bewegt. Bei einem stehenden Brett kommt also gar nichts an, und ohne diesen Zwischenspeicher
+     * bekäme die Schleife nie eine Vergleichsbasis zu fassen. Kein neuer Frame bedeutet aber gerade,
+     * dass sich nichts geändert hat - der letzte Ausschnitt ist dann noch gültig.
+     */
+    private var lastKnownFingerprint: FloatArray? = null
 
     /**
      * Zuletzt gezeichneter Pfeil. Für jede Aufnahme wird das Overlay kurz ausgeblendet; ergibt die
@@ -338,7 +367,7 @@ class FloatingBubbleService : Service() {
     }
 
     private fun createFloatingBubble() {
-        val size = dp(64)
+        val size = dp(BUBBLE_SIZE_DP)
         val radius = dp(18).toFloat()
         bubbleView = ImageView(this).apply {
             setImageResource(R.drawable.dulo_blase)
@@ -442,7 +471,7 @@ class FloatingBubbleService : Service() {
     private fun showMenu() {
         if (menuView != null) return
 
-        val gap = dp(10)
+        val gap = dp(6)
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 0, 0, 0)
@@ -458,14 +487,14 @@ class FloatingBubbleService : Service() {
         // Beenden in derselben Kachelform, nur in Rot
         val destroyButton = TextView(this).apply {
             text = "Beenden"
-            setTextColor(Color.WHITE)
-            textSize = 15f
+            setTextColor(Color.rgb(255, 138, 138))
+            textSize = 11f
             gravity = Gravity.CENTER
-            setPadding(dp(16), dp(14), dp(16), dp(14))
+            setPadding(0, dp(6), 0, dp(6))
             background = GradientDrawable().apply {
-                cornerRadius = dp(22).toFloat()
-                setColor(Color.rgb(48, 24, 26))
-                setStroke(dp(1), Color.rgb(190, 60, 60))
+                cornerRadius = dp(12).toFloat()
+                setColor(Color.rgb(40, 22, 24))
+                setStroke(dp(1), Color.rgb(150, 55, 55))
             }
             setOnClickListener { destroyAssistant() }
         }
@@ -473,7 +502,7 @@ class FloatingBubbleService : Service() {
         container.addView(toggle)
         container.addView(
             destroyButton,
-            LinearLayout.LayoutParams(dp(132), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            LinearLayout.LayoutParams(dp(BUBBLE_SIZE_DP), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                 topMargin = gap
             }
         )
@@ -506,7 +535,7 @@ class FloatingBubbleService : Service() {
         val params = menuParams ?: return
         val bubble = bubbleParams ?: return
         val view = menuView ?: return
-        val menuWidth = if (view.width > 0) view.width else dp(200)
+        val menuWidth = if (view.width > 0) view.width else dp(BUBBLE_SIZE_DP)
         val left = bubble.x - menuWidth - dp(12)
         params.x = if (left >= dp(8)) left else bubble.x + dp(76)
         params.y = bubble.y.coerceIn(dp(8), (screenHeight - dp(200)).coerceAtLeast(dp(8)))
@@ -554,8 +583,7 @@ class FloatingBubbleService : Service() {
 
         // Beim Einschalten immer rechnen, egal wie die Stellung zur letzten Analyse steht
         lastOpponentSquares = null
-        baselineFingerprint = null
-        boardChangePending = false
+        resetMonitorState()
         Toast.makeText(this, "Analyse an", Toast.LENGTH_SHORT).show()
         startAnalysis(force = true)
         startMonitoring()
@@ -569,55 +597,69 @@ class FloatingBubbleService : Service() {
      */
     private fun startMonitoring() {
         monitorJob?.cancel()
+        resetMonitorState()
         monitorJob = serviceScope.launch {
             while (isActive && autoAnalyseEnabled) {
                 delay(POLL_INTERVAL_MS)
                 if (isAnalyzing || !autoAnalyseEnabled) continue
                 if (!isProjectionAlive()) continue
 
+                ticksSinceAnalysis++
+
                 val rect = lastBoardRect
                 if (rect == null) {
-                    // Noch kein Brett bekannt (erste Analyse lief ins Leere): erneut versuchen
+                    // Noch kein Brett bekannt (die erste Analyse lief ins Leere): erneut versuchen
                     startAnalysis(force = true)
                     continue
                 }
 
-                val fingerprint = captureBoardFingerprint(rect) ?: continue
+                // Kommt kein neuer Frame, hat sich nichts bewegt: der letzte Ausschnitt gilt weiter
+                val fingerprint = captureBoardFingerprint(rect) ?: lastKnownFingerprint
+                if (fingerprint == null) {
+                    if (ticksSinceAnalysis >= SWEEP_TICKS) startAnalysis(force = false)
+                    continue
+                }
+                lastKnownFingerprint = fingerprint
 
-                if (refreshBaselinePending) {
-                    // Der frisch gezeichnete Pfeil verändert das Bild: als neue Vergleichsbasis nehmen
-                    baselineFingerprint = fingerprint
-                    refreshBaselinePending = false
+                val reference = referenceFingerprint
+                if (reference == null) {
+                    referenceFingerprint = fingerprint
+                    lastTickFingerprint = fingerprint
                     continue
                 }
 
-                val baseline = baselineFingerprint
-                if (baseline == null) {
-                    baselineFingerprint = fingerprint
-                    continue
-                }
+                val changedSinceAnalysis =
+                    UltraRobustClassifier.fingerprintDistance(reference, fingerprint) > BOARD_CHANGE_THRESHOLD
+                val standsStill = lastTickFingerprint?.let {
+                    UltraRobustClassifier.fingerprintDistance(it, fingerprint) <= BOARD_CHANGE_THRESHOLD
+                } ?: false
+                lastTickFingerprint = fingerprint
 
-                val distance = UltraRobustClassifier.fingerprintDistance(baseline, fingerprint)
-                if (distance > BOARD_CHANGE_THRESHOLD) {
-                    // Es bewegt sich gerade etwas: Basis nachziehen und auf ein ruhiges Bild warten
-                    baselineFingerprint = fingerprint
-                    boardChangePending = true
-                    continue
-                }
+                changePendingTicks = if (changedSinceAnalysis) changePendingTicks + 1 else 0
 
-                if (boardChangePending) {
-                    boardChangePending = false
+                val analyseNow = (changedSinceAnalysis && standsStill) ||
+                    changePendingTicks >= MAX_PENDING_TICKS ||
+                    ticksSinceAnalysis >= SWEEP_TICKS
+                if (analyseNow) {
                     startAnalysis(force = false)
                 }
             }
         }
     }
 
+    /** Vergleichsbasis und Zähler zurücksetzen; der nächste Takt nimmt das Brett neu auf */
+    private fun resetMonitorState() {
+        referenceFingerprint = null
+        lastTickFingerprint = null
+        lastKnownFingerprint = null
+        changePendingTicks = 0
+        ticksSinceAnalysis = 0
+    }
+
     private fun stopMonitoring() {
         monitorJob?.cancel()
         monitorJob = null
-        boardChangePending = false
-        refreshBaselinePending = false
+        resetMonitorState()
     }
 
     /**
@@ -882,10 +924,14 @@ class FloatingBubbleService : Service() {
                         val previousOpponentSquares = lastOpponentSquares
                         val myTurn = force || previousOpponentSquares == null ||
                             UltraRobustClassifier.opponentMovedSince(previousOpponentSquares, opponentSquares)
+                        Log.i(
+                            TAG,
+                            "Am Zug? $myTurn (force=$force, gegnerische Felder vorher=${previousOpponentSquares?.size ?: -1}," +
+                                " jetzt=${opponentSquares.size}, neu=${opponentSquares.count { previousOpponentSquares?.contains(it) != true }})"
+                        )
                         if (!myTurn) {
                             // Der Gegner ist noch dran: Engine sparen und den bisherigen Pfeil wieder einblenden
                             restoreLastArrow()
-                            refreshBaselinePending = true
                             return@launch
                         }
                         lastOpponentSquares = opponentSquares
@@ -915,8 +961,6 @@ class FloatingBubbleService : Service() {
                             eval = eval,
                             isWhitePerspective = res.isWhitePerspective
                         )
-                        // Der frisch gezeichnete Pfeil verändert das Bild: die Schleife holt sich eine neue Vergleichsbasis
-                        refreshBaselinePending = true
                         lastFen = res.fullFen
 
                         // Befunde nur ins Protokoll, der Bildschirm bleibt ruhig
@@ -952,6 +996,10 @@ class FloatingBubbleService : Service() {
                 bubbleView?.visibility = View.VISIBLE
                 menuView?.visibility = View.VISIBLE
                 screenBitmap?.recycle()
+                // Die Vergleichsbasis wird erst jetzt fallengelassen: der nächste Takt nimmt das
+                // Brett samt frisch gezeichnetem Pfeil neu auf. So kann zwischen zwei Analysen
+                // kein Zug in der Basis verschwinden.
+                resetMonitorState()
                 isAnalyzing = false
             }
         }

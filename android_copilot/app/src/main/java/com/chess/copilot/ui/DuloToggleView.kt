@@ -27,7 +27,7 @@ class DuloToggleView(context: Context) : View(context) {
     private val knobPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
     private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
-        textSize = 15f * density
+        textSize = 11f * density
         isFakeBoldText = true
     }
 
@@ -35,10 +35,10 @@ class DuloToggleView(context: Context) : View(context) {
     private var progress = 0f
     private var animator: ValueAnimator? = null
 
-    private val tileRadius = 22f * density
-    private val trackWidth = 84f * density
-    private val trackHeight = 42f * density
-    private val knobRadius = 16f * density
+    private val tileRadius = 16f * density
+    private val trackWidth = 44f * density
+    private val trackHeight = 22f * density
+    private val knobRadius = 8f * density
 
     init {
         isClickable = true
@@ -46,7 +46,9 @@ class DuloToggleView(context: Context) : View(context) {
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        setMeasuredDimension((132 * density).toInt(), (124 * density).toInt())
+        // Genauso groß wie die Blase daneben
+        val side = (SIDE_DP * density).toInt()
+        setMeasuredDimension(side, side)
     }
 
     fun toggle() {
@@ -84,7 +86,7 @@ class DuloToggleView(context: Context) : View(context) {
 
         // Spur: grau im Aus-Zustand, grün im An-Zustand, dazwischen weich überblendet
         val trackLeft = (w - trackWidth) / 2f
-        val trackTop = h * 0.24f
+        val trackTop = h * 0.28f
         trackPaint.color = blend(Color.rgb(99, 99, 102), Color.rgb(0, 230, 118), progress)
         canvas.drawRoundRect(
             RectF(trackLeft, trackTop, trackLeft + trackWidth, trackTop + trackHeight),
@@ -103,7 +105,12 @@ class DuloToggleView(context: Context) : View(context) {
         // Beschriftung
         val label = if (isOn) "On" else "Off"
         val labelWidth = labelPaint.measureText(label)
-        canvas.drawText(label, (w - labelWidth) / 2f, h - 20f * density, labelPaint)
+        canvas.drawText(label, (w - labelWidth) / 2f, h - 9f * density, labelPaint)
+    }
+
+    private companion object {
+        // Kantenlänge in dp, passend zur Blase (FloatingBubbleService.BUBBLE_SIZE_DP)
+        const val SIDE_DP = 64f
     }
 
     /** Zwei Farben anteilig mischen (0 = erste Farbe, 1 = zweite Farbe) */
