@@ -1,16 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Overlay-Berechtigung (Zeichnen ueber anderen Apps) -->
+    <!-- Overlay-Berechtigung (Zeichnen über anderen Apps) -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     
-    <!-- Berechtigungen fuer den Vordergrunddienst (ab Android 14 fuer die Bildschirmaufnahme noetig) -->
+    <!-- Berechtigungen für den Vordergrunddienst (ab Android 14 für die Bildschirmaufnahme nötig) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
-    
-    <!-- Lesezugriff auf Medien (Screenshots aus der Galerie fuer die Diagnose) -->
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
     <application
         android:allowBackup="true"
@@ -20,7 +16,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.AppCompat.DayNight.NoActionBar">
 
-        <!-- Hauptbildschirm mit Steuerung und Diagnose -->
+        <!-- Startbildschirm mit dem Umschalter -->
         <activity
             android:name=".ui.MainActivity"
             android:exported="true">
@@ -30,7 +26,7 @@
             </intent-filter>
         </activity>
 
-        <!-- Vordergrunddienst fuer Blase und Bildschirmanalyse (Typ mediaProjection ab Android 14) -->
+        <!-- Vordergrunddienst für Blase und Bildschirmanalyse (Typ mediaProjection ab Android 14) -->
         <service
             android:name=".service.FloatingBubbleService"
             android:enabled="true"

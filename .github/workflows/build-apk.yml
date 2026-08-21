@@ -1,4 +1,4 @@
-name: Build Duolingo Chess Copilot APK
+name: DuLo APK bauen
 
 on:
   push:
@@ -63,6 +63,6 @@ jobs:
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v7
         with:
-          name: Duolingo-Chess-Copilot-APK
+          name: DuLo-APK
           path: android_copilot/app/build/outputs/apk/debug/*.apk
           retention-days: 14

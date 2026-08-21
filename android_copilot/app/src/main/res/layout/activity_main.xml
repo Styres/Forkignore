@@ -1,5 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Scrollbar, weil die Foto-Schaltfläche zusammen mit der Diagnoseausgabe höher wird als kleine Displays -->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -7,10 +6,10 @@
     android:fillViewport="true">
 
     <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:padding="24dp">
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="24dp">
 
         <TextView
             android:layout_width="wrap_content"
@@ -29,7 +28,7 @@
             android:textSize="14sp" />
 
         <!--
-          Umschalter für die Blase: an = Dienst läuft, aus = Dienst beendet.
+          Umschalter: an = Dienst läuft, aus = Dienst beendet.
           Die Schaltfläche ist das Foto von DuLo; ausgeschaltet liegt ein dunkler
           Schleier darüber, eingeschaltet leuchtet das Bild mit grünem Rahmen.
         -->
@@ -39,33 +38,23 @@
             android:layout_height="200dp"
             android:layout_marginTop="24dp"
             android:background="@drawable/dulo_umschalter_hintergrund"
-            android:contentDescription="Overlay-Assistent ein- und ausschalten"
-            android:textOff=""
-            android:textOn=""
-            android:text=""
+            android:contentDescription="DuLo ein- und ausschalten"
             android:minHeight="0dp"
-            android:minWidth="0dp" />
+            android:minWidth="0dp"
+            android:text=""
+            android:textOff=""
+            android:textOn="" />
 
         <TextView
             android:id="@+id/tvToggleStatus"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
-            android:text="Assistent aus – auf DuLo tippen zum Starten"
+            android:text="DuLo ist aus – auf das Bild tippen zum Starten"
             android:textColor="#00E676"
             android:textSize="16sp"
             android:textStyle="bold" />
 
-        <TextView
-            android:id="@+id/tvBubbleHint"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="Tipp: kurz auf die Blase tippen analysiert die Stellung, langes Drücken schaltet die eigene Farbe um, falls die Zuordnung einmal vertauscht ist."
-            android:textColor="#AAAAAA"
-            android:textSize="13sp" />
-
-        <!-- Trennlinie zur Einzelbild-Diagnose -->
         <View
             android:layout_width="match_parent"
             android:layout_height="1dp"
@@ -74,33 +63,21 @@
             android:background="#333333" />
 
         <TextView
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="[Diagnose einzelner Screenshots] (ohne Overlay testen)"
+            android:text="So läuft es auf dem Bildschirm"
             android:textColor="#FFFFFF"
             android:textSize="18sp"
             android:textStyle="bold" />
 
-        <Button
-            android:id="@+id/btnSelectImage"
-            android:layout_width="match_parent"
-            android:layout_height="50dp"
-            android:layout_marginTop="16dp"
-            android:backgroundTint="#2C2C2C"
-            android:text="Duolingo-Screenshot aus der Galerie prüfen"
-            android:textColor="#FFFFFF" />
-
         <TextView
-            android:id="@+id/tvDiagnosticResult"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:background="#1E1E1E"
-            android:padding="16dp"
-            android:text="Bitte einen Screenshot zur Prüfung auswählen ..."
-            android:textColor="#CCCCCC"
-            android:textSize="13sp"
-            android:typeface="monospace" />
+            android:layout_marginTop="12dp"
+            android:lineSpacingExtra="4dp"
+            android:text="• Kurz auf die Blase tippen öffnet das Menü.\n• Der Schalter „Analyse“ fragt die Engine sofort und danach automatisch bei jedem eigenen Zug erneut.\n• „Beenden“ schließt das Menü und stoppt die Bildschirmaufnahme vollständig.\n• Langes Drücken auf die Blase schaltet die eigene Farbe um, falls die Zuordnung einmal vertauscht ist."
+            android:textColor="#AAAAAA"
+            android:textSize="14sp" />
 
     </LinearLayout>
 

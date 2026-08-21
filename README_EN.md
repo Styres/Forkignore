@@ -1,4 +1,4 @@
-# ♟️ Duolingo Chess Copilot
+# ♟️ DuLo
 
 <p align="center">
   <a href="README.md">
@@ -159,8 +159,10 @@ same recommendation.
 1. **Grant Permissions**: Grant **Overlay Permission** (`SYSTEM_ALERT_WINDOW`) and **Screen Capture Permission** (`MediaProjection`) on first launch.
 2. **Toggle the Copilot**: The toggle button on the main screen is a photo of DuLo (the app is named after the dog). Tapping it starts the service, the picture then lights up with a green frame; tapping again stops it and the picture is dimmed. The app's user interface is German.
 3. **Open Duolingo**: Launch Duolingo and enter any chess lesson or game.
-4. **Instant Analysis**: Tap the floating bubble to instantly view best moves and evaluation arrows.
+4. **Open the bubble menu**: Tap the bubble to open a small menu with an **Analyse** switch (off by default) and a **Beenden** button. With the switch on, the engine is queried immediately and then again automatically whenever one of *your own* pieces has changed square; the arrow stays on screen until the next move is detected. **Beenden** closes the menu and stops the service together with the screen capture.
 5. **Flip your side**: If the arrow ever suggests moves for the opponent's pieces, long-press the bubble to switch your own colour. The manual choice stays in effect until you long-press again or restart the service.
+
+Nothing is written to disk or copied to the clipboard — screenshots stay in memory only.
 
 ---
 

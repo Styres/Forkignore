@@ -293,7 +293,9 @@ class TransparentCanvasOverlay(private val context: Context) {
         fenString: String,
         medianSim: Float = 1.0f,
         occupiedCount: Int = 0,
-        detectedPerspective: Boolean? = null
+        detectedPerspective: Boolean? = null,
+        // false = der Pfeil bleibt stehen (Dauerbeobachtung), bis die nächste Analyse ihn ersetzt
+        autoDismiss: Boolean = true
     ) {
         if (overlayView == null) {
             initOverlayView()
@@ -312,11 +314,16 @@ class TransparentCanvasOverlay(private val context: Context) {
             postInvalidate()
         }
 
-        // 5 Sekunden Standzeit, damit das FEN in Ruhe gelesen oder abfotografiert werden kann
+        // 5 Sekunden Standzeit, damit das FEN in Ruhe gelesen oder abfotografiert werden kann.
+        // In der Dauerbeobachtung entfällt das Ausblenden: dort ersetzt erst der nächste Zug den Pfeil.
         autoDismissJob?.cancel()
-        autoDismissJob = scope.launch {
-            delay(5000) 
-            hide()
+        autoDismissJob = if (autoDismiss) {
+            scope.launch {
+                delay(5000)
+                hide()
+            }
+        } else {
+            null
         }
     }
 

@@ -731,6 +731,51 @@ class UltraRobustClassifier(context: Context? = null) {
         }
 
         /**
+         * Reine Funktion: mittlerer Helligkeitsabstand zweier eingedampfter Brettausschnitte.
+         *
+         * Die Dauerbeobachtung vergleicht damit aufeinanderfolgende Frames, ohne jedes Mal die
+         * vollständige Erkennung zu starten. Unterschiedlich lange Raster gelten als völlig
+         * verschieden (Float.MAX_VALUE), damit ein Wechsel der Brettgröße sicher auslöst.
+         */
+        fun fingerprintDistance(a: FloatArray, b: FloatArray): Float {
+            if (a.isEmpty() || b.isEmpty() || a.size != b.size) return Float.MAX_VALUE
+            var sum = 0.0f
+            for (i in a.indices) {
+                sum += abs(a[i] - b[i])
+            }
+            return sum / a.size
+        }
+
+        /**
+         * Reine Funktion: Fingerabdruck der eigenen Figuren als sortierte Liste "Figur@Feld".
+         *
+         * Grundlage der laufenden Beobachtung: Solange dieser Fingerabdruck gleich bleibt, hat sich an
+         * den eigenen Figuren nichts geändert und die Engine muss nicht erneut rechnen. Sobald eine
+         * eigene Figur ihr Feld wechselt (Zug, Schlagfall, Umwandlung), unterscheidet sich der
+         * Fingerabdruck und die Analyse läuft neu an.
+         *
+         * @param standardBoard Brett in Standardausrichtung (row 0 = Reihe 8, row 7 = Reihe 1)
+         * @param isWhitePerspective true = die eigenen Figuren sind die weißen (Großbuchstaben)
+         */
+        fun ownPieceSignature(standardBoard: Array<CharArray>, isWhitePerspective: Boolean): String {
+            val fileChars = "abcdefgh"
+            val entries = mutableListOf<String>()
+            for (r in standardBoard.indices) {
+                val row = standardBoard[r]
+                for (c in row.indices) {
+                    val sym = row[c]
+                    if (sym == '.') continue
+                    val isWhitePiece = sym.isUpperCase()
+                    if (isWhitePiece != isWhitePerspective) continue
+                    val file = if (c in fileChars.indices) fileChars[c] else '?'
+                    entries.add("$sym@$file${8 - r}")
+                }
+            }
+            entries.sort()
+            return entries.joinToString(",")
+        }
+
+        /**
          * Reine Funktion: Zustandsautomat für die Perspektivsperre der Sitzung
          * @param currentLock aktuell gesperrte Perspektive der Sitzung (null = noch nicht gesperrt)
          * @param detectedPerspective die im aktuellen Frame erkannte Perspektive

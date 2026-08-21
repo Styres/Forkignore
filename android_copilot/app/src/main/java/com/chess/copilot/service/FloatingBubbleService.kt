@@ -5,14 +5,16 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Outline
 import android.graphics.PixelFormat
+import android.graphics.Rect
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
@@ -26,11 +28,17 @@ import android.util.DisplayMetrics
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewOutlineProvider
 import android.view.WindowManager
+import android.widget.Button
 import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.Switch
+import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.content.IntentCompat
+import com.chess.copilot.R
 import com.chess.copilot.core.ChessLocator
 import com.chess.copilot.core.UltraRobustClassifier
 import com.chess.copilot.engine.StockfishBridge
@@ -41,10 +49,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileOutputStream
 
 /**
  * Dienst für die Blase am Bildschirmrand (Floating Bubble)
@@ -75,10 +83,21 @@ class FloatingBubbleService : Service() {
 
         // Ab dieser Druckdauer gilt eine Berührung der Blase als langer Druck (Perspektive umschalten)
         private const val LONG_PRESS_MS = 500L
+
+        // Takt der Dauerbeobachtung: so oft wird das Brett auf Veränderung abgeklopft
+        private const val POLL_INTERVAL_MS = 900L
+
+        // Ab dieser mittleren Helligkeitsdifferenz je Kachel gilt das Brett als verändert.
+        // Darunter liegen Kompressionsrauschen und leichte Animationen der Oberfläche.
+        private const val BOARD_CHANGE_THRESHOLD = 2.5f
+
+        // Kantenlänge des Rasters, auf das der Brettausschnitt zum Vergleich eingedampft wird
+        private const val FINGERPRINT_GRID = 12
     }
 
     private lateinit var windowManager: WindowManager
     private var bubbleView: ImageView? = null
+    private var bubbleParams: WindowManager.LayoutParams? = null
     private var transparentOverlay: TransparentCanvasOverlay? = null
     private var classifier: UltraRobustClassifier? = null
 
@@ -105,6 +124,45 @@ class FloatingBubbleService : Service() {
     private var lastFen: String? = null
     // Zähler für Konflikte mit der Perspektivsperre (Lektion aus bug_19): widerspricht die Erkennung der Sperre dauerhaft, wird neu gesperrt, damit eine Fehlsperre nicht die ganze Sitzung blockiert
     private var perspectiveConflictStreak = 0
+
+    // Kleines Menü an der Blase: Schalter für die Dauerbeobachtung und Beenden-Knopf
+    private var menuView: View? = null
+    private var menuParams: WindowManager.LayoutParams? = null
+    private var analyseSwitch: Switch? = null
+
+    // Dauerbeobachtung: läuft der Schalter, wird das Brett im Takt POLL_INTERVAL_MS abgeklopft
+    @Volatile
+    private var autoAnalyseEnabled = false
+    private var monitorJob: Job? = null
+
+    // Zuletzt erfolgreich lokalisiertes Brett; darauf bezieht sich der Vergleich der Frames
+    private var lastBoardRect: Rect? = null
+    // Fingerabdruck der eigenen Figuren aus der letzten Analyse (siehe UltraRobustClassifier.ownPieceSignature)
+    private var lastOwnSignature: String? = null
+    // Eingedampfter Brettausschnitt des letzten ruhigen Frames
+    private var baselineFingerprint: FloatArray? = null
+    // Das Brett hat sich verändert und wartet darauf, wieder ruhig zu stehen
+    private var boardChangePending = false
+    // Nach dem Zeichnen des Pfeils muss die Vergleichsbasis neu genommen werden (der Pfeil verändert das Bild)
+    private var refreshBaselinePending = false
+
+    /**
+     * Zuletzt gezeichneter Pfeil. Für jede Aufnahme wird das Overlay kurz ausgeblendet; ergibt die
+     * Analyse danach, dass sich an den eigenen Figuren nichts geändert hat, wird derselbe Pfeil
+     * wieder eingeblendet, statt den Nutzer ohne Hinweis zurückzulassen.
+     */
+    private data class ArrowSnapshot(
+        val boardRect: Rect,
+        val eval: StockfishBridge.EngineEvaluation,
+        val isWhitePerspective: Boolean,
+        val displayMove: String,
+        val fen: String,
+        val medianSim: Float,
+        val occupiedCount: Int,
+        val detectedPerspective: Boolean
+    )
+
+    private var lastArrow: ArrowSnapshot? = null
 
     private val serviceJob = Job()
     private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
@@ -282,11 +340,19 @@ class FloatingBubbleService : Service() {
     }
 
     private fun createFloatingBubble() {
+        val size = dp(64)
+        val radius = dp(18).toFloat()
         bubbleView = ImageView(this).apply {
-            setImageResource(android.R.drawable.ic_menu_compass)
-            setBackgroundColor(Color.argb(210, 88, 204, 2))
-            setPadding(20, 20, 20, 20)
+            setImageResource(R.drawable.dulo_blase)
+            scaleType = ImageView.ScaleType.CENTER_CROP
             elevation = 25f
+            // Abgerundete Ecken: das Bild wird an einer abgerundeten Kontur beschnitten
+            outlineProvider = object : ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: Outline) {
+                    outline.setRoundRect(0, 0, view.width, view.height, radius)
+                }
+            }
+            clipToOutline = true
         }
 
         val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -297,16 +363,17 @@ class FloatingBubbleService : Service() {
         }
 
         val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
+            size,
+            size,
             layoutType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = screenWidth - 180
+            x = screenWidth - size - dp(12)
             y = screenHeight / 3
         }
+        bubbleParams = params
 
         bubbleView?.setOnTouchListener(object : View.OnTouchListener {
             private var initialX = 0
@@ -336,6 +403,8 @@ class FloatingBubbleService : Service() {
                         params.x = (initialX + dx).toInt()
                         params.y = (initialY + dy).toInt()
                         windowManager.updateViewLayout(bubbleView, params)
+                        // Das offene Menü hängt an der Blase und wandert mit
+                        positionMenu()
                         return true
                     }
                     MotionEvent.ACTION_UP -> {
@@ -344,7 +413,8 @@ class FloatingBubbleService : Service() {
                                 // Langer Druck: eigene Farbe von Hand umschalten
                                 togglePerspectiveManually()
                             } else {
-                                onBubbleClicked()
+                                // Kurzer Druck: das Menü öffnen bzw. schließen
+                                toggleMenu()
                             }
                         }
                         return true
@@ -355,6 +425,297 @@ class FloatingBubbleService : Service() {
         })
 
         windowManager.addView(bubbleView, params)
+    }
+
+    /** dp in Pixel umrechnen */
+    private fun dp(value: Int): Int = (resources.displayMetrics.density * value).toInt()
+
+    // ================= Menü an der Blase =================
+
+    /** Kurzer Druck auf die Blase: Menü öffnen bzw. wieder schließen */
+    private fun toggleMenu() {
+        if (menuView == null) showMenu() else hideMenu()
+    }
+
+    /**
+     * Baut das kleine Menü neben der Blase auf: ein Schalter für die Dauerbeobachtung
+     * und ein Knopf, der DuLo samt Bildschirmaufnahme vollständig beendet.
+     */
+    private fun showMenu() {
+        if (menuView != null) return
+
+        val pad = dp(14)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad, pad, pad)
+            elevation = 30f
+            background = GradientDrawable().apply {
+                cornerRadius = dp(20).toFloat()
+                setColor(Color.argb(242, 18, 22, 28))
+                setStroke(dp(2), Color.rgb(0, 230, 118))
+            }
+        }
+
+        val title = TextView(this).apply {
+            text = "DuLo"
+            setTextColor(Color.rgb(0, 230, 118))
+            textSize = 18f
+            typeface = Typeface.DEFAULT_BOLD
+        }
+
+        // Schalter: an = Engine fragen und danach bei jedem eigenen Zug erneut fragen
+        val switchView = Switch(this).apply {
+            text = "Analyse"
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            isChecked = autoAnalyseEnabled
+            setPadding(0, dp(10), 0, dp(10))
+            setOnCheckedChangeListener { _, checked -> setAutoAnalyse(checked) }
+        }
+        analyseSwitch = switchView
+
+        val destroyButton = Button(this).apply {
+            text = "Beenden"
+            setTextColor(Color.WHITE)
+            background = GradientDrawable().apply {
+                cornerRadius = dp(12).toFloat()
+                setColor(Color.rgb(150, 30, 30))
+            }
+            setOnClickListener { destroyAssistant() }
+        }
+
+        container.addView(title)
+        container.addView(switchView)
+        container.addView(destroyButton)
+
+        val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            @Suppress("DEPRECATION")
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+        // FLAG_NOT_FOCUSABLE: das Menü nimmt Berührungen an, zieht aber keinen Eingabefokus
+        // von der darunterliegenden App ab (sonst würde Duolingo die Tastatur/Fokus verlieren)
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            layoutType,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+        }
+        menuParams = params
+        menuView = container
+        windowManager.addView(container, params)
+        positionMenu()
+    }
+
+    /** Menü an der Blase ausrichten: bevorzugt links daneben, sonst rechts */
+    private fun positionMenu() {
+        val params = menuParams ?: return
+        val bubble = bubbleParams ?: return
+        val view = menuView ?: return
+        val menuWidth = if (view.width > 0) view.width else dp(200)
+        val left = bubble.x - menuWidth - dp(12)
+        params.x = if (left >= dp(8)) left else bubble.x + dp(76)
+        params.y = bubble.y.coerceIn(dp(8), (screenHeight - dp(200)).coerceAtLeast(dp(8)))
+        try {
+            windowManager.updateViewLayout(view, params)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun hideMenu() {
+        val view = menuView ?: return
+        try {
+            windowManager.removeView(view)
+        } catch (_: Exception) {
+        }
+        menuView = null
+        analyseSwitch = null
+    }
+
+    // ================= Dauerbeobachtung =================
+
+    /**
+     * Schalter im Menü.
+     * An: sofort einmal die Engine fragen und danach das Brett im Takt beobachten - jedes Mal,
+     * wenn eine eigene Figur ihr Feld gewechselt hat, wird erneut gerechnet.
+     * Aus: Beobachtung stoppen und den Pfeil ausblenden.
+     */
+    private fun setAutoAnalyse(enabled: Boolean) {
+        if (autoAnalyseEnabled == enabled) return
+        autoAnalyseEnabled = enabled
+
+        if (!enabled) {
+            stopMonitoring()
+            transparentOverlay?.hide()
+            Toast.makeText(this, "Analyse aus", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (!isProjectionAlive()) {
+            autoAnalyseEnabled = false
+            analyseSwitch?.isChecked = false
+            requestReAuthorization()
+            return
+        }
+
+        // Beim Einschalten immer rechnen, egal wie die Stellung zur letzten Analyse steht
+        lastOwnSignature = null
+        baselineFingerprint = null
+        boardChangePending = false
+        Toast.makeText(this, "Analyse an", Toast.LENGTH_SHORT).show()
+        startAnalysis(force = true)
+        startMonitoring()
+    }
+
+    /**
+     * Beobachtungsschleife: dampft den Brettausschnitt jedes Taktes auf ein grobes Raster ein und
+     * vergleicht ihn mit dem letzten ruhigen Bild. Erst wenn sich das Brett verändert hat und
+     * danach wieder still steht (der Zug also fertig animiert ist), läuft die volle Analyse an.
+     * Das spart Rechenzeit und verhindert, dass mitten in einer Zuganimation erkannt wird.
+     */
+    private fun startMonitoring() {
+        monitorJob?.cancel()
+        monitorJob = serviceScope.launch {
+            while (isActive && autoAnalyseEnabled) {
+                delay(POLL_INTERVAL_MS)
+                if (isAnalyzing || !autoAnalyseEnabled) continue
+                if (!isProjectionAlive()) continue
+
+                val rect = lastBoardRect
+                if (rect == null) {
+                    // Noch kein Brett bekannt (erste Analyse lief ins Leere): erneut versuchen
+                    startAnalysis(force = true)
+                    continue
+                }
+
+                val fingerprint = captureBoardFingerprint(rect) ?: continue
+
+                if (refreshBaselinePending) {
+                    // Der frisch gezeichnete Pfeil verändert das Bild: als neue Vergleichsbasis nehmen
+                    baselineFingerprint = fingerprint
+                    refreshBaselinePending = false
+                    continue
+                }
+
+                val baseline = baselineFingerprint
+                if (baseline == null) {
+                    baselineFingerprint = fingerprint
+                    continue
+                }
+
+                val distance = UltraRobustClassifier.fingerprintDistance(baseline, fingerprint)
+                if (distance > BOARD_CHANGE_THRESHOLD) {
+                    // Es bewegt sich gerade etwas: Basis nachziehen und auf ein ruhiges Bild warten
+                    baselineFingerprint = fingerprint
+                    boardChangePending = true
+                    continue
+                }
+
+                if (boardChangePending) {
+                    boardChangePending = false
+                    startAnalysis(force = false)
+                }
+            }
+        }
+    }
+
+    private fun stopMonitoring() {
+        monitorJob?.cancel()
+        monitorJob = null
+        boardChangePending = false
+        refreshBaselinePending = false
+    }
+
+    /**
+     * Dampft den Brettausschnitt des aktuellen Frames auf ein Raster mittlerer Helligkeiten ein.
+     * Bewusst ohne Ausblenden von Blase und Pfeil: dieser Vergleich soll nur feststellen, ob sich
+     * überhaupt etwas bewegt hat. Der Pfeil bleibt zwischen zwei Analysen unverändert und fällt
+     * deshalb nicht ins Gewicht.
+     */
+    private suspend fun captureBoardFingerprint(rect: Rect): FloatArray? {
+        val bitmap = captureCurrentScreenBitmap() ?: return null
+        return try {
+            withContext(Dispatchers.Default) {
+                val safe = Rect(rect)
+                if (!safe.intersect(0, 0, bitmap.width, bitmap.height) || safe.width() < FINGERPRINT_GRID || safe.height() < FINGERPRINT_GRID) {
+                    return@withContext null
+                }
+                val cellW = safe.width() / FINGERPRINT_GRID
+                val cellH = safe.height() / FINGERPRINT_GRID
+                val out = FloatArray(FINGERPRINT_GRID * FINGERPRINT_GRID)
+                val row = IntArray(cellW)
+                for (gy in 0 until FINGERPRINT_GRID) {
+                    for (gx in 0 until FINGERPRINT_GRID) {
+                        var sum = 0.0f
+                        var count = 0
+                        // Drei Zeilen je Kachel genügen für den Vergleich und halten die Schleife kurz
+                        for (k in 0 until 3) {
+                            val y = safe.top + gy * cellH + (cellH * (k + 1)) / 4
+                            if (y < 0 || y >= bitmap.height) continue
+                            bitmap.getPixels(row, 0, cellW, safe.left + gx * cellW, y, cellW, 1)
+                            for (pixel in row) {
+                                val r = (pixel shr 16) and 0xFF
+                                val g = (pixel shr 8) and 0xFF
+                                val b = pixel and 0xFF
+                                sum += 0.299f * r + 0.587f * g + 0.114f * b
+                                count++
+                            }
+                        }
+                        out[gy * FINGERPRINT_GRID + gx] = if (count > 0) sum / count else 0f
+                    }
+                }
+                out
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "captureBoardFingerprint fehlgeschlagen: ${e.message}")
+            null
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    /** Den zuletzt berechneten Pfeil unverändert wieder einblenden */
+    private fun restoreLastArrow() {
+        val snapshot = lastArrow ?: return
+        transparentOverlay?.showSuggestion(
+            boardRect = snapshot.boardRect,
+            moveInfo = snapshot.eval,
+            isWhitePerspective = snapshot.isWhitePerspective,
+            displayMoveStr = snapshot.displayMove,
+            fenString = snapshot.fen,
+            medianSim = snapshot.medianSim,
+            occupiedCount = snapshot.occupiedCount,
+            detectedPerspective = snapshot.detectedPerspective,
+            autoDismiss = !autoAnalyseEnabled
+        )
+    }
+
+    /** Beendet DuLo vollständig: Beobachtung, Menü, Overlay, Bildschirmaufnahme und Dienst */
+    private fun destroyAssistant() {
+        autoAnalyseEnabled = false
+        stopMonitoring()
+        hideMenu()
+        transparentOverlay?.hide()
+        recordProjectionState("Von Hand über den Beenden-Knopf im Menü gestoppt")
+        Toast.makeText(this, "DuLo beendet, Bildschirmaufnahme gestoppt", Toast.LENGTH_SHORT).show()
+        cleanupProjection()
+        stopSelf()
+    }
+
+    private fun isProjectionAlive(): Boolean =
+        mediaProjection != null && imageReader != null && virtualDisplay != null
+
+    /** Aufnahmeberechtigung ist weg: den Nutzer zurück in die App schicken */
+    private fun requestReAuthorization() {
+        Toast.makeText(this, "Die Aufnahmeberechtigung ist abgelaufen, bitte DuLo neu starten", Toast.LENGTH_LONG).show()
+        val reAuthIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        startActivity(reAuthIntent)
     }
 
     /**
@@ -377,15 +738,22 @@ class FloatingBubbleService : Service() {
         ).show()
     }
 
-    private fun onBubbleClicked() {
+    /**
+     * Eine vollständige Analyse: sauberes Bild aufnehmen, Brett lokalisieren, Figuren erkennen,
+     * Engine fragen und den Pfeil zeichnen.
+     *
+     * @param force true beim Einschalten des Schalters - dann wird gerechnet, ohne vorher zu prüfen,
+     *        ob sich eine eigene Figur bewegt hat. false in der Dauerbeobachtung: dort bricht die
+     *        Analyse vor dem Engine-Aufruf ab, wenn die eigenen Figuren unverändert stehen.
+     */
+    private fun startAnalysis(force: Boolean) {
         if (isAnalyzing) return
 
-        if (mediaProjection == null || imageReader == null || virtualDisplay == null) {
-            Toast.makeText(this, "Die Aufnahmeberechtigung ist abgelaufen, bitte den Overlay-Assistenten neu starten", Toast.LENGTH_LONG).show()
-            val reAuthIntent = Intent(this, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            }
-            startActivity(reAuthIntent)
+        if (!isProjectionAlive()) {
+            autoAnalyseEnabled = false
+            analyseSwitch?.isChecked = false
+            stopMonitoring()
+            requestReAuthorization()
             return
         }
 
@@ -396,6 +764,7 @@ class FloatingBubbleService : Service() {
             try {
                 transparentOverlay?.hide()
                 bubbleView?.visibility = View.INVISIBLE
+                menuView?.visibility = View.INVISIBLE
                 // 150 ms statt 60 ms (Verdacht aus bug_13/14): zwischen dem Entfernen der Fenster und dem Eintreffen eines sauberen Frames im Puffer liegt eine Kompositionsverzögerung.
                 // Wartet man zu kurz, enthält die Aufnahme noch den alten Frame mit Rahmen und Pfeil; verdeckt der die 8. Linie, sieht es nach einer übersehenen Figur aus
                 delay(150)
@@ -403,6 +772,7 @@ class FloatingBubbleService : Service() {
                 screenBitmap = captureCurrentScreenBitmap()
 
                 bubbleView?.visibility = View.VISIBLE
+                menuView?.visibility = View.VISIBLE
 
                 if (screenBitmap == null) {
                     Toast.makeText(this@FloatingBubbleService, "Bild wird noch aufgenommen, bitte kurz danach erneut versuchen", Toast.LENGTH_SHORT).show()
@@ -417,10 +787,6 @@ class FloatingBubbleService : Service() {
                 // Umgang mit zugeschnittenen Frames (negative Ränder bzw. Überlauf): nur melden, nicht erzwingen - ein Rect außerhalb des Bildes würde beim Zuschneiden eine Ausnahme werfen,
                 // und ein unvollständiges Bild ist ohnehin nicht zuverlässig erkennbar; stattdessen erscheinen die Fehlertafel und der rote Rahmen
                 if (locateResult.isCropped) {
-                    val croppedCopy = try {
-                        screenBitmap.copy(screenBitmap.config ?: Bitmap.Config.ARGB_8888, false)
-                    } catch (_: Exception) { null }
-                    saveDebugArtifactsAsync(croppedCopy, boardRect, locateResult, "CROPPED_FRAME_NO_FEN")
                     withContext(Dispatchers.Main) {
                         transparentOverlay?.showError("Außerhalb des Bildes: das Brett ist unvollständig, bitte mittig ausrichten", boardRect)
                     }
@@ -469,10 +835,6 @@ class FloatingBubbleService : Service() {
                         }
                     }
                 }
-
-                val copyForDebug = try {
-                    screenBitmap.copy(screenBitmap.config ?: Bitmap.Config.ARGB_8888, false)
-                } catch (_: Exception) { null }
 
                 when (detailedResp) {
                     is UltraRobustClassifier.ClassificationResponse.Success -> {
@@ -523,23 +885,22 @@ class FloatingBubbleService : Service() {
                             )
                         }
 
-                        // Sobald ein gültiges FEN vorliegt, wandert es still in die Zwischenablage - so lässt sich ein falscher Rahmen später belegen
-                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        val clip = ClipData.newPlainText("FEN", res.fullFen)
-                        clipboard.setPrimaryClip(clip)
+                        // Brett merken, damit die Beobachtungsschleife weiß, welchen Ausschnitt sie vergleichen muss
+                        lastBoardRect = Rect(res.boardRect)
 
-                        // Zellenweise Forensik speichern (für die Fälle bug_11~14): unsichere Felder und vom Gatter verworfene Kandidaten landen in cells_forensics.txt
-                        // LocateScore/Confidence/Residual: Telemetrie des Locators für die Feinkalibrierung
-                        val cellForensics = buildString {
-                            appendLine("LocateScore: ${String.format("%.1f", locateResult.score)}")
-                            appendLine("Confidence: ${locateResult.confidence}")
-                            appendLine("Residual: ${String.format("%.2f", locateResult.residual)}")
-                            appendLine("IsCropped: ${locateResult.isCropped}")
-                            appendLine("LowConf: ${detailedResp.lowConfidenceCells.joinToString(" ")}")
-                            appendLine("GateRejected: ${detailedResp.gateRejectedCells.joinToString(" ")}")
+                        // Kern der Dauerbeobachtung: nur wenn eine eigene Figur ihr Feld gewechselt hat,
+                        // wird die Engine erneut bemüht. Ein reiner Zug des Gegners oder eine Animation
+                        // der Oberfläche lässt die Signatur unverändert und spart den Rechenlauf.
+                        val ownSignature = UltraRobustClassifier.ownPieceSignature(res.standardBoard, res.isWhitePerspective)
+                        if (!force && ownSignature == lastOwnSignature) {
+                            // Nur der Gegner hat gezogen oder die Oberfläche hat sich bewegt:
+                            // Engine sparen und den bisherigen Pfeil wieder einblenden
+                            restoreLastArrow()
+                            refreshBaselinePending = true
+                            return@launch
                         }
-                        saveDebugArtifactsAsync(copyForDebug, boardRect, locateResult, res.fullFen, cellForensics)
-                        
+                        lastOwnSignature = ownSignature
+
                         // Vorgegebene Bedenkzeit: go movetime 2000
                         val eval = StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = StockfishBridge.DEFAULT_MOVE_TIME_MS)
 
@@ -592,8 +953,22 @@ class FloatingBubbleService : Service() {
                             fenString = res.fullFen,
                             medianSim = detailedResp.medianSim,
                             occupiedCount = detailedResp.occupiedCount,
+                            detectedPerspective = detailedResp.detectedPerspective,
+                            // In der Dauerbeobachtung bleibt der Pfeil stehen, bis der nächste Zug erkannt wird
+                            autoDismiss = !autoAnalyseEnabled
+                        )
+                        lastArrow = ArrowSnapshot(
+                            boardRect = Rect(res.boardRect),
+                            eval = eval,
+                            isWhitePerspective = res.isWhitePerspective,
+                            displayMove = displayMoveStr,
+                            fen = res.fullFen,
+                            medianSim = detailedResp.medianSim,
+                            occupiedCount = detailedResp.occupiedCount,
                             detectedPerspective = detailedResp.detectedPerspective
                         )
+                        // Der frisch gezeichnete Pfeil verändert das Bild: die Schleife holt sich eine neue Vergleichsbasis
+                        refreshBaselinePending = true
 
                         val conflictDesc = if (sessionLockedPerspective != null && detailedResp.detectedPerspective != res.isWhitePerspective) {
                             ", erkannt: ${if (detailedResp.detectedPerspective) "Weiß" else "Schwarz"}"
@@ -608,22 +983,12 @@ class FloatingBubbleService : Service() {
                         withContext(Dispatchers.Main) {
                             Toast.makeText(
                                 this@FloatingBubbleService,
-                                "[FEN kopiert] Perspektive: $perspectiveName (${detailedResp.perspectiveReason}, ${String.format("%.0f", detailedResp.perspectiveConfidence * 100)}%) | Sim: ${String.format("%.3f", detailedResp.medianSim)}$engineWarn$lowConfWarn$fenFlickerWarn",
+                                "Perspektive: $perspectiveName (${detailedResp.perspectiveReason}, ${String.format("%.0f", detailedResp.perspectiveConfidence * 100)}%) | Sim: ${String.format("%.3f", detailedResp.medianSim)}$engineWarn$lowConfWarn$fenFlickerWarn",
                                 if (isTrueFallback) Toast.LENGTH_LONG else Toast.LENGTH_SHORT
                             ).show()
                         }
                     }
                     is UltraRobustClassifier.ClassificationResponse.Rejected -> {
-                        val rejectedForensics = buildString {
-                            appendLine("LocateScore: ${String.format("%.1f", locateResult.score)}")
-                            appendLine("Confidence: ${locateResult.confidence}")
-                            appendLine("Residual: ${String.format("%.2f", locateResult.residual)}")
-                            appendLine("IsCropped: ${locateResult.isCropped}")
-                            appendLine("LowConf: ${detailedResp.lowConfidenceCells.joinToString(" ")}")
-                            appendLine("GateRejected: ${detailedResp.gateRejectedCells.joinToString(" ")}")
-                        }
-                        saveDebugArtifactsAsync(copyForDebug, boardRect, locateResult, "REJECTED_${detailedResp.reason}", rejectedForensics)
-                        
                         // Rote Fehlertafel mit dem Grund anzeigen, damit ein falscher Rahmen sichtbar wird
                         withContext(Dispatchers.Main) {
                             transparentOverlay?.showError(detailedResp.reason, boardRect)
@@ -644,6 +1009,7 @@ class FloatingBubbleService : Service() {
                 e.printStackTrace()
             } finally {
                 bubbleView?.visibility = View.VISIBLE
+                menuView?.visibility = View.VISIBLE
                 screenBitmap?.recycle()
                 isAnalyzing = false
             }
@@ -708,44 +1074,6 @@ class FloatingBubbleService : Service() {
         }
     }
 
-    private fun saveDebugArtifactsAsync(
-        bitmap: Bitmap?,
-        rect: android.graphics.Rect,
-        locateResult: ChessLocator.LocateResult,
-        fen: String,
-        cellForensics: String = ""
-    ) {
-        val b = bitmap ?: return
-        serviceScope.launch(Dispatchers.IO) {
-            try {
-                val debugDir = File(filesDir, "debug")
-                if (!debugDir.exists()) debugDir.mkdirs()
-
-                val imgFile = File(debugDir, "last_capture.png")
-                val fos = FileOutputStream(imgFile)
-                b.compress(Bitmap.CompressFormat.PNG, 90, fos)
-                fos.flush()
-                fos.close()
-
-                val txtFile = File(debugDir, "last_diagnostic.txt")
-                val timeStr = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
-                txtFile.writeText(
-                    "Quelle: [Overlay auf dem Gerät]\n" +
-                    "BoardRect: $rect\n" +
-                    "LocateScore: ${String.format("%.1f", locateResult.score)}\n" +
-                    "Confidence: ${locateResult.confidence}\n" +
-                    "Residual: ${String.format("%.2f", locateResult.residual)}\n" +
-                    "IsCropped: ${locateResult.isCropped}\n" +
-                    "FEN: $fen\n" +
-                    "${cellForensics}Zeitpunkt: $timeStr\n"
-                )
-            } catch (_: Exception) {
-            } finally {
-                b.recycle()
-            }
-        }
-    }
-
     private fun cleanupProjection() {
         try { virtualDisplay?.release() } catch (_: Exception) {}
         try { imageReader?.close() } catch (_: Exception) {}
@@ -758,8 +1086,11 @@ class FloatingBubbleService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         isRunning = false
+        autoAnalyseEnabled = false
+        stopMonitoring()
+        hideMenu()
         serviceScope.cancel()
-        bubbleView?.let { windowManager.removeView(it) }
+        bubbleView?.let { try { windowManager.removeView(it) } catch (_: Exception) {} }
         transparentOverlay?.hide()
         cleanupProjection()
         try { captureThread?.quitSafely() } catch (_: Exception) {}

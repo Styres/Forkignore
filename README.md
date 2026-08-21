@@ -42,9 +42,14 @@
   - Native C++-Builds für `arm64-v8a`, `armeabi-v7a` und `x86_64`;
   - Das Netz `nn-5af11540bbfe.nnue` liegt im APK, die Kommunikation läuft über das UCI-Protokoll;
   - Liefert Bewertung (Centipawns / Matt), besten Zug und die zweitbeste Antwort.
-- 🎨 **Blase am Bildschirmrand und transparentes Overlay**
-  - Der Vordergrunddienst `FloatingBubbleService` zeigt eine frei verschiebbare Blase, ein Tippen startet die Analyse;
+- 🎨 **Blase am Bildschirmrand, Menü und transparentes Overlay**
+  - Der Vordergrunddienst `FloatingBubbleService` zeigt DuLo als frei verschiebbare Blase mit abgerundeten Ecken;
+  - ein Tippen öffnet ein kleines Menü mit dem Schalter **Analyse** und dem Knopf **Beenden**;
   - `TransparentCanvasOverlay` zeichnet Pfeil und Bewertung unmittelbar über das Duolingo-Brett, Berührungen gehen hindurch.
+- 🔁 **Dauerbeobachtung statt Antippen**
+  - Steht der Schalter auf an, fragt DuLo die Engine sofort und danach automatisch erneut, sobald eine **eigene** Figur ihr Feld gewechselt hat;
+  - dazwischen wird das Brett nur grob abgeklopft (eingedampftes Raster im Takt von 900 ms), das kostet kaum Rechenzeit;
+  - die volle Erkennung läuft erst an, wenn der Zug fertig animiert ist und das Bild wieder still steht.
 - 🔒 **Vollständig offline**
   - Bildverarbeitung und Engine laufen ausschließlich auf dem Gerät, es gibt keine Netzwerkanfragen und keine Datenübertragung.
 
@@ -166,15 +171,21 @@ cd android_copilot
 
 1. **Berechtigungen erteilen**: Beim ersten Start die **Overlay-Berechtigung**
    (`SYSTEM_ALERT_WINDOW`) und die **Bildschirmaufnahme** (`MediaProjection`) freigeben.
-2. **Assistenten einschalten**: Der Umschalter auf dem Hauptbildschirm ist das Foto von DuLo. Ein Tippen
-   startet den Dienst, das Bild leuchtet dann mit grünem Rahmen; ein weiteres Tippen beendet ihn wieder
-   (dann liegt ein dunkler Schleier über dem Bild).
+2. **DuLo starten**: Der Umschalter auf dem Startbildschirm ist das Foto von DuLo. Ein Tippen startet
+   den Dienst, das Bild leuchtet dann mit grünem Rahmen; ein weiteres Tippen beendet ihn wieder.
 3. **Duolingo öffnen** und ein Schachlevel starten.
-4. **Analysieren**: Kurz auf die Blase tippen, dann erscheinen der Pfeil des besten Zuges und die
-   Bewertung direkt auf dem Brett.
+4. **Menü öffnen**: Kurz auf die Blase tippen. Es erscheinen:
+   - **Analyse** (Schalter, standardmäßig aus): an bedeutet, die Engine wird sofort gefragt und danach
+     jedes Mal automatisch erneut, wenn eine eigene Figur ihr Feld gewechselt hat. Der Pfeil bleibt
+     dabei stehen, bis der nächste Zug erkannt wird. Aus beendet die Beobachtung und blendet den Pfeil aus.
+   - **Beenden**: schließt das Menü und stoppt DuLo samt Bildschirmaufnahme vollständig, so als hätte
+     man die App über die Systemeinstellungen beendet.
 5. **Farbe umschalten**: Zeigt der Pfeil einmal Züge für die gegnerischen Figuren, schaltet ein
    langer Druck auf die Blase die eigene Farbe um. Diese Einstellung bleibt dann bestehen, bis
    erneut lange gedrückt oder der Dienst neu gestartet wird.
+
+DuLo schreibt keine Screenshots auf die Platte und legt nichts in der Zwischenablage ab; alles bleibt
+im Arbeitsspeicher des Geräts.
 
 ---
 
