@@ -768,6 +768,57 @@ class UltraRobustClassifier(context: Context? = null) {
         }
 
         /**
+         * Reine Funktion: Hat sich die Belegung des Bretts verändert?
+         *
+         * Verglichen wird Feld für Feld, was tatsächlich dort steht: die Streuung im Feld zeigt an,
+         * ob eine Figur darauf steht, die mittlere Helligkeit unterscheidet helle von dunklen Figuren.
+         * Damit hängt die Erkennung an den Figuren selbst und nicht an einem Gesamteindruck des Bildes.
+         *
+         * @param ignoredCells Felder, die übersprungen werden - dort liegt der eingezeichnete Pfeil
+         *        und verfälscht Helligkeit und Streuung
+         * @param meanTolerance zulässige Abweichung der mittleren Helligkeit eines Feldes
+         * @param stdTolerance zulässige Abweichung der Streuung eines Feldes
+         */
+        fun boardCellsChanged(
+            previousMeans: FloatArray,
+            previousStds: FloatArray,
+            currentMeans: FloatArray,
+            currentStds: FloatArray,
+            ignoredCells: Set<Int> = emptySet(),
+            meanTolerance: Float = 14.0f,
+            stdTolerance: Float = 10.0f
+        ): Boolean {
+            if (previousMeans.size != currentMeans.size || previousStds.size != currentStds.size) return true
+            for (i in currentMeans.indices) {
+                if (i in ignoredCells) continue
+                if (abs(previousMeans[i] - currentMeans[i]) > meanTolerance) return true
+                if (abs(previousStds[i] - currentStds[i]) > stdTolerance) return true
+            }
+            return false
+        }
+
+        /**
+         * Reine Funktion: Felder, über die der eingezeichnete Pfeil läuft.
+         *
+         * Start- und Zielfeld sind hervorgehoben, dazwischen liegt der Pfeilschaft; auf diesen Feldern
+         * ist ein Vergleich der Helligkeit wertlos. Abgetastet wird die Strecke in Vierteln einer
+         * Feldbreite, damit auch gestreifte Felder erfasst werden.
+         *
+         * @return Feldindizes (Zeile * 8 + Spalte) im Bildschirmraster
+         */
+        fun cellsCoveredByArrow(fromRow: Int, fromCol: Int, toRow: Int, toCol: Int): Set<Int> {
+            val covered = mutableSetOf<Int>()
+            val steps = 32
+            for (step in 0..steps) {
+                val t = step / steps.toFloat()
+                val row = (fromRow + (toRow - fromRow) * t).roundToInt()
+                val col = (fromCol + (toCol - fromCol) * t).roundToInt()
+                if (row in 0..7 && col in 0..7) covered.add(row * 8 + col)
+            }
+            return covered
+        }
+
+        /**
          * Reine Funktion: mittlerer Helligkeitsabstand zweier eingedampfter Brettausschnitte.
          *
          * Die Dauerbeobachtung vergleicht damit aufeinanderfolgende Frames, ohne jedes Mal die

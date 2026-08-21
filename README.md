@@ -50,7 +50,8 @@
 - 🔁 **Dauerbeobachtung statt Antippen**
   - Steht der Schalter auf **On**, fragt DuLo die Engine sofort und danach automatisch erneut, sobald **der Gegner gezogen hat** und man selbst wieder am Zug ist;
   - erkannt wird das daran, dass eine gegnerische Figur auf einem Feld auftaucht, das vorher nicht ihr gehörte; ein eigener Schlagfall zählt dabei bewusst nicht;
-  - dazwischen wird das Brett nur grob abgeklopft (eingedampftes Raster im Takt von 700 ms), das kostet kaum Rechenzeit;
+  - dazwischen prüft DuLo im Takt von 700 ms Feld für Feld, ob dort noch dasselbe steht (Streuung zeigt eine Figur an, Helligkeit ihre Farbe) - das kostet kaum Rechenzeit und braucht kein Ausblenden des Pfeils;
+  - die Felder unter dem gezeichneten Pfeil bleiben beim Vergleich außen vor, sonst würde die Zeichnung selbst als Veränderung zählen;
   - die volle Erkennung läuft an, sobald der Zug fertig animiert ist - spätestens aber nach wenigen Takten, damit dauerhafte Animationen der Oberfläche sie nicht aufhalten;
   - zusätzlich sieht ein Sicherheitsnetz regelmäßig von sich aus nach. Die Engine läuft dabei nur, wenn der Gegner wirklich gezogen hat.
 - 🔒 **Vollständig offline**

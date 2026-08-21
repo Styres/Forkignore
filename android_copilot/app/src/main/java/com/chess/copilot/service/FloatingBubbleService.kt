@@ -154,36 +154,39 @@ class FloatingBubbleService : Service() {
     // Felder der gegnerischen Figuren aus der letzten Analyse. Steht dort später eine gegnerische
     // Figur auf einem neuen Feld, hat der Gegner gezogen und man ist selbst wieder am Zug.
     private var lastOpponentSquares: Set<String>? = null
+    /** Helligkeit und Streuung der 64 Felder eines Frames */
+    private class BoardCells(val means: FloatArray, val stds: FloatArray)
+
     /**
-     * Stand des Bretts zum Zeitpunkt der letzten Analyse. Diese Vergleichsbasis wird ausschließlich
-     * nach einer gelaufenen Analyse erneuert - niemals zwischendurch. Genau daran scheiterte die
-     * vorherige Fassung: sie zog die Basis bei jedem veränderten Bild nach, wodurch ein Zug des
+     * Stand der Felder zum Zeitpunkt der letzten Analyse. Diese Vergleichsbasis wird ausschließlich
+     * nach einer gelaufenen Analyse erneuert - niemals zwischendurch. Genau daran scheiterte eine
+     * frühere Fassung: sie zog die Basis bei jedem veränderten Bild nach, wodurch ein Zug des
      * Gegners, der kurz nach dem eigenen Zug kam, in die Basis wanderte und nie erkannt wurde.
      */
-    private var referenceFingerprint: FloatArray? = null
-    // Bild des vorherigen Taktes, nur um zu erkennen, ob das Brett gerade still steht
-    private var lastTickFingerprint: FloatArray? = null
-    // Wie viele Takte am Stück weicht das Bild schon von der Vergleichsbasis ab
+    private var referenceCells: BoardCells? = null
+    // Felder des vorherigen Taktes, nur um zu erkennen, ob die Figuren gerade still stehen
+    private var lastTickCells: BoardCells? = null
+    /**
+     * Zuletzt erfolgreich aufgenommene Felder.
+     *
+     * MediaProjection liefert nur dann einen neuen Frame, wenn sich auf dem Bildschirm etwas bewegt.
+     * Bei einem stehenden Brett kommt also gar nichts an. Kein neuer Frame bedeutet aber gerade, dass
+     * sich nichts geändert hat - die zuletzt gelesenen Felder gelten dann weiter.
+     */
+    private var lastKnownCells: BoardCells? = null
+    // Felder, auf denen der eingezeichnete Pfeil liegt; dort ist ein Helligkeitsvergleich wertlos
+    private var arrowCells: Set<Int> = emptySet()
+    // Wie viele Takte am Stück weichen die Felder schon von der Vergleichsbasis ab
     private var changePendingTicks = 0
     // Takte seit der letzten Analyse (für das Sicherheitsnetz)
     private var ticksSinceAnalysis = 0
 
     /**
-     * Zuletzt erfolgreich aufgenommener Brettausschnitt.
-     *
-     * MediaProjection liefert nur dann einen neuen Frame, wenn sich auf dem Bildschirm etwas
-     * bewegt. Bei einem stehenden Brett kommt also gar nichts an, und ohne diesen Zwischenspeicher
-     * bekäme die Schleife nie eine Vergleichsbasis zu fassen. Kein neuer Frame bedeutet aber gerade,
-     * dass sich nichts geändert hat - der letzte Ausschnitt ist dann noch gültig.
-     */
-    private var lastKnownFingerprint: FloatArray? = null
-
-    /**
      * Zuletzt gezeichneter Pfeil. Für jede Aufnahme wird das Overlay kurz ausgeblendet; ergibt die
-     * Analyse danach, dass sich an den eigenen Figuren nichts geändert hat, wird derselbe Pfeil
-     * wieder eingeblendet, statt den Nutzer ohne Hinweis zurückzulassen.
+     * Analyse danach, dass der Gegner noch am Zug ist, wird derselbe Pfeil wieder eingeblendet,
+     * statt den Nutzer ohne Hinweis zurückzulassen.
      */
-    private data class ArrowSnapshot(
+    private class ArrowSnapshot(
         val boardRect: Rect,
         val eval: StockfishBridge.EngineEvaluation,
         val isWhitePerspective: Boolean
@@ -569,6 +572,7 @@ class FloatingBubbleService : Service() {
 
         if (!enabled) {
             stopMonitoring()
+            arrowCells = emptySet()
             transparentOverlay?.hide()
             Toast.makeText(this, "Analyse aus", Toast.LENGTH_SHORT).show()
             return
@@ -613,27 +617,30 @@ class FloatingBubbleService : Service() {
                     continue
                 }
 
-                // Kommt kein neuer Frame, hat sich nichts bewegt: der letzte Ausschnitt gilt weiter
-                val fingerprint = captureBoardFingerprint(rect) ?: lastKnownFingerprint
-                if (fingerprint == null) {
+                // Kommt kein neuer Frame, hat sich nichts bewegt: die zuletzt gelesenen Felder gelten weiter
+                val cells = captureBoardCells(rect) ?: lastKnownCells
+                if (cells == null) {
                     if (ticksSinceAnalysis >= SWEEP_TICKS) startAnalysis(force = false)
                     continue
                 }
-                lastKnownFingerprint = fingerprint
+                lastKnownCells = cells
 
-                val reference = referenceFingerprint
+                val reference = referenceCells
                 if (reference == null) {
-                    referenceFingerprint = fingerprint
-                    lastTickFingerprint = fingerprint
+                    referenceCells = cells
+                    lastTickCells = cells
                     continue
                 }
 
-                val changedSinceAnalysis =
-                    UltraRobustClassifier.fingerprintDistance(reference, fingerprint) > BOARD_CHANGE_THRESHOLD
-                val standsStill = lastTickFingerprint?.let {
-                    UltraRobustClassifier.fingerprintDistance(it, fingerprint) <= BOARD_CHANGE_THRESHOLD
+                // Steht auf einem Feld etwas anderes als bei der letzten Analyse?
+                val changedSinceAnalysis = UltraRobustClassifier.boardCellsChanged(
+                    reference.means, reference.stds, cells.means, cells.stds, arrowCells
+                )
+                // Und stehen die Figuren gerade still, ist die Zuganimation also durch?
+                val standsStill = lastTickCells?.let {
+                    !UltraRobustClassifier.boardCellsChanged(it.means, it.stds, cells.means, cells.stds, arrowCells)
                 } ?: false
-                lastTickFingerprint = fingerprint
+                lastTickCells = cells
 
                 changePendingTicks = if (changedSinceAnalysis) changePendingTicks + 1 else 0
 
@@ -641,6 +648,11 @@ class FloatingBubbleService : Service() {
                     changePendingTicks >= MAX_PENDING_TICKS ||
                     ticksSinceAnalysis >= SWEEP_TICKS
                 if (analyseNow) {
+                    Log.i(
+                        TAG,
+                        "Analyse ausgelöst (verändert=$changedSinceAnalysis, steht still=$standsStill," +
+                            " wartende Takte=$changePendingTicks, Takte seit Analyse=$ticksSinceAnalysis)"
+                    )
                     startAnalysis(force = false)
                 }
             }
@@ -649,9 +661,9 @@ class FloatingBubbleService : Service() {
 
     /** Vergleichsbasis und Zähler zurücksetzen; der nächste Takt nimmt das Brett neu auf */
     private fun resetMonitorState() {
-        referenceFingerprint = null
-        lastTickFingerprint = null
-        lastKnownFingerprint = null
+        referenceCells = null
+        lastTickCells = null
+        lastKnownCells = null
         changePendingTicks = 0
         ticksSinceAnalysis = 0
     }
@@ -663,47 +675,64 @@ class FloatingBubbleService : Service() {
     }
 
     /**
-     * Dampft den Brettausschnitt des aktuellen Frames auf ein Raster mittlerer Helligkeiten ein.
-     * Bewusst ohne Ausblenden von Blase und Pfeil: dieser Vergleich soll nur feststellen, ob sich
-     * überhaupt etwas bewegt hat. Der Pfeil bleibt zwischen zwei Analysen unverändert und fällt
-     * deshalb nicht ins Gewicht.
+     * Liest für jedes der 64 Felder mittlere Helligkeit und Streuung aus dem aktuellen Frame.
+     *
+     * Abgetastet wird nur der mittlere Bereich eines Feldes, damit die Gitterlinien nicht mitzählen.
+     * Die Streuung verrät, ob eine Figur auf dem Feld steht, die Helligkeit unterscheidet helle von
+     * dunklen Figuren - zusammen ergibt das ein Abbild der Figurenstellung, ohne die volle Erkennung
+     * zu starten.
+     *
+     * Bewusst ohne Ausblenden von Blase und Pfeil: die Felder unter dem Pfeil werden beim Vergleich
+     * ohnehin übersprungen, und so bleibt die Anzeige ruhig.
      */
-    private suspend fun captureBoardFingerprint(rect: Rect): FloatArray? {
+    private suspend fun captureBoardCells(rect: Rect): BoardCells? {
         val bitmap = captureCurrentScreenBitmap() ?: return null
         return try {
             withContext(Dispatchers.Default) {
                 val safe = Rect(rect)
-                if (!safe.intersect(0, 0, bitmap.width, bitmap.height) || safe.width() < FINGERPRINT_GRID || safe.height() < FINGERPRINT_GRID) {
+                if (!safe.intersect(0, 0, bitmap.width, bitmap.height) || safe.width() < 32 || safe.height() < 32) {
                     return@withContext null
                 }
-                val cellW = safe.width() / FINGERPRINT_GRID
-                val cellH = safe.height() / FINGERPRINT_GRID
-                val out = FloatArray(FINGERPRINT_GRID * FINGERPRINT_GRID)
-                val row = IntArray(cellW)
-                for (gy in 0 until FINGERPRINT_GRID) {
-                    for (gx in 0 until FINGERPRINT_GRID) {
+                val step = safe.width() / 8.0f
+                val stepY = safe.height() / 8.0f
+                val means = FloatArray(64)
+                val stds = FloatArray(64)
+                val samples = 6
+
+                for (r in 0..7) {
+                    for (c in 0..7) {
                         var sum = 0.0f
+                        var sumSq = 0.0f
                         var count = 0
-                        // Drei Zeilen je Kachel genügen für den Vergleich und halten die Schleife kurz
-                        for (k in 0 until 3) {
-                            val y = safe.top + gy * cellH + (cellH * (k + 1)) / 4
+                        for (sy in 0 until samples) {
+                            // Nur die mittleren 60 Prozent des Feldes abtasten
+                            val y = (safe.top + (r + 0.2f + 0.6f * (sy + 0.5f) / samples) * stepY).toInt()
                             if (y < 0 || y >= bitmap.height) continue
-                            bitmap.getPixels(row, 0, cellW, safe.left + gx * cellW, y, cellW, 1)
-                            for (pixel in row) {
-                                val r = (pixel shr 16) and 0xFF
-                                val g = (pixel shr 8) and 0xFF
-                                val b = pixel and 0xFF
-                                sum += 0.299f * r + 0.587f * g + 0.114f * b
+                            for (sx in 0 until samples) {
+                                val x = (safe.left + (c + 0.2f + 0.6f * (sx + 0.5f) / samples) * step).toInt()
+                                if (x < 0 || x >= bitmap.width) continue
+                                val pixel = bitmap.getPixel(x, y)
+                                val red = (pixel shr 16) and 0xFF
+                                val green = (pixel shr 8) and 0xFF
+                                val blue = pixel and 0xFF
+                                val luminance = 0.299f * red + 0.587f * green + 0.114f * blue
+                                sum += luminance
+                                sumSq += luminance * luminance
                                 count++
                             }
                         }
-                        out[gy * FINGERPRINT_GRID + gx] = if (count > 0) sum / count else 0f
+                        val index = r * 8 + c
+                        if (count > 0) {
+                            val mean = sum / count
+                            means[index] = mean
+                            stds[index] = kotlin.math.sqrt(kotlin.math.max(0f, sumSq / count - mean * mean))
+                        }
                     }
                 }
-                out
+                BoardCells(means, stds)
             }
         } catch (e: Exception) {
-            Log.w(TAG, "captureBoardFingerprint fehlgeschlagen: ${e.message}")
+            Log.w(TAG, "captureBoardCells fehlgeschlagen: ${e.message}")
             null
         } finally {
             bitmap.recycle()
@@ -719,6 +748,25 @@ class FloatingBubbleService : Service() {
             isWhitePerspective = snapshot.isWhitePerspective,
             autoDismiss = !autoAnalyseEnabled
         )
+    }
+
+    /**
+     * Rechnet einen UCI-Zug in die Bildschirmfelder um, über die der gezeichnete Pfeil läuft.
+     * Leere Menge, wenn es kein normaler Zug ist (Matt, Patt, abgewiesene Stellung).
+     */
+    private fun arrowCellsFor(uci: String, isWhitePerspective: Boolean): Set<Int> {
+        if (uci.length < 4 || uci[0] !in 'a'..'h' || uci[2] !in 'a'..'h') return emptySet()
+        val fromRank = uci[1] - '0'
+        val toRank = uci[3] - '0'
+        if (fromRank !in 1..8 || toRank !in 1..8) return emptySet()
+        val fromCol = uci[0] - 'a'
+        val toCol = uci[2] - 'a'
+
+        val fromRow = if (isWhitePerspective) 8 - fromRank else fromRank - 1
+        val fromScreenCol = if (isWhitePerspective) fromCol else 7 - fromCol
+        val toRow = if (isWhitePerspective) 8 - toRank else toRank - 1
+        val toScreenCol = if (isWhitePerspective) toCol else 7 - toCol
+        return UltraRobustClassifier.cellsCoveredByArrow(fromRow, fromScreenCol, toRow, toScreenCol)
     }
 
     /** Beendet DuLo vollständig: Beobachtung, Menü, Overlay, Bildschirmaufnahme und Dienst */
@@ -961,6 +1009,8 @@ class FloatingBubbleService : Service() {
                             eval = eval,
                             isWhitePerspective = res.isWhitePerspective
                         )
+                        // Felder unter dem Pfeil merken: dort verfälscht die Zeichnung jeden Vergleich
+                        arrowCells = arrowCellsFor(eval.bestMove, res.isWhitePerspective)
                         lastFen = res.fullFen
 
                         // Befunde nur ins Protokoll, der Bildschirm bleibt ruhig
