@@ -173,4 +173,32 @@ class EngineKonfigurationTest {
             StockfishBridge.selectBinaryVariant(listOf("libstockfish.so"), setOf("avx2", "bmi2", "avx512_vnni"))
         )
     }
+
+    @Test
+    fun testNeuePartieNurWennFigurenHinzukommen() {
+        val grundstellung = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        val nachE4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+        val mittelspiel = "r3k2r/pp3ppp/8/8/8/8/PP3PPP/R3K2R w KQkq - 0 20"
+
+        // Erster Aufruf der Sitzung: es gibt keine Vorgeschichte
+        assertTrue(StockfishBridge.isIndependentPosition(null, grundstellung))
+
+        // Die Fortsetzung derselben Partie darf die Tabelle nicht leeren - genau daran krankte
+        // die frühere Regel "28 Figuren oder mehr": sie traf in der ganzen Eröffnung zu und warf
+        // die Tabelle bei jedem Zug weg.
+        assertFalse(StockfishBridge.isIndependentPosition(grundstellung, nachE4))
+        assertFalse(StockfishBridge.isIndependentPosition(nachE4, mittelspiel))
+
+        // Zurück zur Grundstellung heißt: neue Partie
+        assertTrue(StockfishBridge.isIndependentPosition(mittelspiel, grundstellung))
+
+        // Und allgemein: kommen Figuren hinzu, kann es keine Fortsetzung sein
+        assertTrue(StockfishBridge.isIndependentPosition(mittelspiel, nachE4))
+    }
+
+    @Test
+    fun testGleicheStellungGiltNichtAlsNeuePartie() {
+        val stellung = "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 0 1"
+        assertFalse(StockfishBridge.isIndependentPosition(stellung, stellung))
+    }
 }

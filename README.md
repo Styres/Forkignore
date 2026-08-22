@@ -170,10 +170,15 @@ unterstützte Option meldet; alles andere wird übersprungen und in der Diagnose
 | SyzygyProbeDepth    | 1 (nur mit Tablebases)                                                            |
 | SyzygyProbeLimit    | 5 (nur mit Tablebases)                                                            |
 | Syzygy50MoveRule    | true (nur mit Tablebases)                                                         |
-| Suchbefehl          | `go depth 30 movetime 2000`; `ucinewgame` nur zu Beginn einer neuen Partie        |
+| Suchbefehl          | `go depth 30 movetime 2000`; `ucinewgame` nur bei einer wirklich neuen Partie     |
 
 Weitere Punkte der Vorgabe:
 
+- **Transpositionstabelle**: `ucinewgame` leert sie und wird deshalb nur gesendet, wenn die neue
+  Stellung keine Fortsetzung der vorherigen ist - erkennbar daran, dass Figuren hinzugekommen sind
+  (innerhalb einer Partie verschwinden sie nur) oder die Grundstellung auf dem Brett steht. Die
+  frühere Regel "28 Figuren oder mehr" traf in der ganzen Eröffnung zu und warf die Tabelle bei
+  jedem Zug weg - ausgerechnet in der Phase, in der sie am meisten trägt.
 - **Passende Binary**: Liegen im APK neben `libstockfish.so` weitere Varianten
   (`libstockfish-vnni512.so`, `-bmi2`, `-avx2`, `-armv8-i8mm`, `-armv8-dotprod`), wählt die App
   anhand der Merkmale aus `/proc/cpuinfo` die stärkste passende aus. Aktuell liefert das Projekt

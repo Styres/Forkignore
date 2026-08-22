@@ -208,6 +208,16 @@ class FloatingBubbleService : Service() {
     @Volatile
     private var autoMoveBusyUntil = 0L
 
+    /**
+     * Nehmen Blase und Menü gerade Berührungen an?
+     *
+     * Für die Dauer einer Tippfolge werden sie durchlässig geschaltet. Bleibt die Rückmeldung des
+     * Bedienungshilfen-Dienstes aus - etwa weil er zwischendurch abgeschaltet wurde -, wäre die
+     * Blase sonst dauerhaft nicht mehr zu bedienen, also auch nicht mehr zu beenden. Deshalb wird
+     * der Zustand mitgeführt und im Takt notfalls von Hand zurückgesetzt.
+     */
+    private var overlayTouchable = true
+
     // Dauerbeobachtung: läuft der Schalter, wird das Brett im Takt POLL_INTERVAL_MS abgeklopft
     @Volatile
     private var autoAnalyseEnabled = false
@@ -268,6 +278,15 @@ class FloatingBubbleService : Service() {
      * nicht, die Stellung frisch vom Bildschirm gelesen.
      */
     private var lastProgressAt = 0L
+
+    /**
+     * Gesetzt, sobald die Engine die Partie als entschieden meldet (Matt oder Patt).
+     *
+     * Danach gibt es nichts mehr zu tippen. Ohne diese Sperre liefe die Aufsichtsuhr alle zwölf
+     * Sekunden an und rechnete dieselbe beendete Stellung erneut durch. Aufgehoben wird sie,
+     * sobald sich auf dem Brett wieder etwas rührt - dann läuft die nächste Partie.
+     */
+    private var awaitingBoardChange = false
     // Beim Einschalten wird die eigene Farbe aus der Ausgangsstellung bestimmt und für die Sitzung festgehalten
     private var sideEstablished = false
     /** Helligkeit und Streuung der 64 Felder eines Frames */
@@ -707,6 +726,8 @@ class FloatingBubbleService : Service() {
     private fun setAutoMove(enabled: Boolean) {
         if (!enabled) {
             autoMoveEnabled = false
+            // Eine noch laufende Tippfolge darf die Blase nicht unbedienbar zurücklassen
+            setOverlayTouchable(true)
             // Mit dem Auto-Zug endet auch die Dauerbeobachtung: sie läuft nur für ihn
             setAutoAnalyse(false)
             Toast.makeText(this, "Auto-Zug aus", Toast.LENGTH_SHORT).show()
@@ -760,6 +781,7 @@ class FloatingBubbleService : Service() {
      * verschieben, also ist das keine Randerscheinung, sondern passiert früher oder später.
      */
     private fun setOverlayTouchable(touchable: Boolean) {
+        overlayTouchable = touchable
         fun apply(view: View?, params: WindowManager.LayoutParams?) {
             if (view == null || params == null) return
             val flag = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
@@ -867,6 +889,7 @@ class FloatingBubbleService : Service() {
         clearPendingMove()
         resetMonitorState()
         markProgress()
+        awaitingBoardChange = false
         startAnalysis(force = false)
         startMonitoring()
     }
@@ -912,6 +935,13 @@ class FloatingBubbleService : Service() {
         if (!autoAnalyseEnabled) return
         if (!isProjectionAlive()) return
 
+        // Sicherheitsnetz: Blieb die Rückmeldung der Tippfolge aus, wären Blase und Menü dauerhaft
+        // nicht mehr zu bedienen. Ist die Sperre längst abgelaufen, werden sie zurückgeholt.
+        if (!overlayTouchable && System.currentTimeMillis() > autoMoveBusyUntil + AUTO_MOVE_SETTLE_MS) {
+            Log.w(TAG, "Tippfolge hat sich nicht zurückgemeldet, Blase wird wieder bedienbar gemacht")
+            setOverlayTouchable(true)
+        }
+
         // Solange der Auto-Zug tippt, wird nichts abgelesen: das Brett zeigt gerade Hervorhebungen
         // und Zielpunkte, keine Stellung.
         if (System.currentTimeMillis() < autoMoveBusyUntil) {
@@ -929,7 +959,7 @@ class FloatingBubbleService : Service() {
         // höchstens ein Aussetzer von wenigen Sekunden - egal, wodurch sie entstanden ist.
         val now = System.currentTimeMillis()
         if (lastProgressAt == 0L) lastProgressAt = now
-        if (now - lastProgressAt > STALL_TIMEOUT_MS) {
+        if (now - lastProgressAt > STALL_TIMEOUT_MS && !awaitingBoardChange) {
             Log.w(TAG, "Seit ${(now - lastProgressAt) / 1000} Sekunden kein Fortschritt, Stellung wird neu erkannt")
             markProgress()
             clearPendingMove()
@@ -1072,6 +1102,14 @@ class FloatingBubbleService : Service() {
         // Empfehlung ersetzt werden. Erst wenn sich das Brett über Sekunden anders darstellt, hat
         // der Nutzer offenbar etwas anderes gespielt - dann wird neu erkannt.
         val holdingArrow = pendingMoveReference != null
+        // Nach einer entschiedenen Partie wird erst wieder gerechnet, wenn sich etwas rührt
+        if (awaitingBoardChange) {
+            if (!changedSinceAnalysis) return
+            Log.i(TAG, "Brett hat sich wieder verändert, die Beobachtung läuft weiter")
+            awaitingBoardChange = false
+            markProgress()
+        }
+
         val analyseNow = changedSinceAnalysis && if (holdingArrow) {
             standsStill && changePendingTicks >= MAX_PENDING_TICKS
         } else {
@@ -1161,6 +1199,13 @@ class FloatingBubbleService : Service() {
         // gar nicht gibt.
         if (bestMove.length < 4 || bestMove.startsWith("(")) {
             Log.i(TAG, "Kein ausführbarer Zug ($bestMove), es wird nichts beobachtet")
+            if (bestMove == "(checkmate)" || bestMove == "(stalemate)" || bestMove == "(none)") {
+                // Die Partie ist entschieden. Bis sich auf dem Brett wieder etwas rührt, gibt es
+                // nichts zu rechnen - sonst liefe alle zwölf Sekunden dieselbe Suche erneut.
+                Log.i(TAG, "Partie ist entschieden, es wird auf eine neue Stellung gewartet")
+                awaitingBoardChange = true
+                markProgress()
+            }
             return
         }
         val from = UltraRobustClassifier.screenCellForSquare(bestMove.substring(0, 2), isWhitePerspective)
@@ -1918,6 +1963,8 @@ class FloatingBubbleService : Service() {
         super.onDestroy()
         isRunning = false
         autoAnalyseEnabled = false
+        autoMoveEnabled = false
+        setOverlayTouchable(true)
         stopMonitoring()
         hideMenu()
         serviceScope.cancel()

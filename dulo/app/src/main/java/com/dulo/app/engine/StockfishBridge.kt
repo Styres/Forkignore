@@ -239,6 +239,16 @@ object StockfishBridge {
     // LRU-Cache: hält die echten Analyseergebnisse der letzten 32 Stellungen
     private val evalCache = LruCache<String, EngineEvaluation>(32)
 
+    /**
+     * Zuletzt tatsächlich durchgerechnete Stellung.
+     *
+     * Daran wird entschieden, ob die nächste Stellung die Fortsetzung derselben Partie ist. Nur
+     * wenn nicht, wird die Transpositionstabelle geleert - innerhalb einer Partie erspart sie der
+     * Suche einen großen Teil der Arbeit.
+     */
+    @Volatile
+    private var lastSearchedFen: String? = null
+
     // Bedenkzeit pro Zug: "go movetime 2000". Mehr Zeit ist der wirksamste Hebel für Spielstärke -
     // je Verdopplung der Bedenkzeit gewinnt Stockfish grob 50 bis 70 Elo hinzu. Zwei Sekunden sind
     // der Kompromiss aus Spielstärke und Reaktionszeit im Overlay; alle übrigen Optionen bleiben
@@ -724,10 +734,11 @@ object StockfishBridge {
             // nächste Stellung aber keine unabhängige, sondern die Fortsetzung der vorherigen: die
             // gespeicherten Bewertungen passen weiterhin und ersparen der Suche einen großen Teil
             // der Arbeit. Sie bei jedem Zug wegzuwerfen kostet spürbar Spielstärke.
-            if (isNewGamePosition(fen)) {
+            if (isIndependentPosition(lastSearchedFen, fen)) {
                 Log.i(TAG, "Neue Partie erkannt, Transpositionstabelle wird geleert")
                 sendCommand("ucinewgame")
             }
+            lastSearchedFen = fen
             sendCommand("isready")
             val readyOk = waitForResponse("readyok", timeoutMs = 3000)
             if (!readyOk) {
@@ -846,6 +857,32 @@ object StockfishBridge {
         val boardPart = fen.substringBefore(' ')
         val pieces = boardPart.count { it.isLetter() }
         return pieces >= 28
+    }
+
+    /**
+     * Reine Funktion: Ist die neue Stellung eine unabhängige Partie und keine Fortsetzung?
+     *
+     * [isNewGamePosition] allein taugt dafür nicht: Nach 28 Figuren gefragt, trifft das auf die
+     * ersten Züge jeder Partie zu - die Tabelle wurde dann bei jedem Zug der Eröffnung geleert,
+     * also genau in der Phase, in der sie am meisten trägt.
+     *
+     * Verlässlich ist der Vergleich mit der zuletzt gerechneten Stellung: Innerhalb einer Partie
+     * nimmt die Zahl der Figuren nie zu. Kommen welche hinzu, ist eine neue Partie angefangen
+     * worden. Dazu die Grundstellung selbst und der Fall, dass noch gar nichts gerechnet wurde.
+     *
+     * @param previousFen zuletzt gerechnete Stellung, null beim ersten Aufruf
+     */
+    fun isIndependentPosition(previousFen: String?, currentFen: String): Boolean {
+        if (previousFen == null) return true
+
+        val currentBoard = currentFen.substringBefore(' ')
+        // Die Grundstellung ist immer der Anfang einer Partie
+        if (currentBoard == "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR") return true
+
+        val previousPieces = previousFen.substringBefore(' ').count { it.isLetter() }
+        val currentPieces = currentBoard.count { it.isLetter() }
+        // Innerhalb einer Partie verschwinden Figuren, sie kommen nie hinzu
+        return currentPieces > previousPieces
     }
 
     /**
@@ -997,6 +1034,9 @@ object StockfishBridge {
         lineChannel = null
         readerJob = null
         isEngineReady = false
+        // Ein frischer Prozess beginnt mit leerer Transpositionstabelle: die nächste Suche gilt
+        // wieder als unabhängig.
+        lastSearchedFen = null
     }
 
     fun parseBestMoveLine(line: String): String? {
