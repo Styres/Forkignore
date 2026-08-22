@@ -6,7 +6,7 @@ import os
 # V9 (Forensik aus bug_10): Fehlt der Engine das NNUE-Bewertungsnetz, beendet sie sich bei der ersten Suche selbst.
 # Den Standarddateinamen nennt die Fehlermeldung der Binary; er muss exakt dem beim Kompilieren eingebauten Namen entsprechen.
 NNUE_FILES = {
-    'nn-5af11540bbfe.nnue': 'android_copilot/app/src/main/assets/nnue/nn-5af11540bbfe.nnue',
+    'nn-5af11540bbfe.nnue': 'dulo/app/src/main/assets/nnue/nn-5af11540bbfe.nnue',
 }
 NNUE_DIRECT_URL_TMPL = 'https://tests.stockfishchess.org/api/nn/{name}'
 
@@ -21,9 +21,9 @@ def setup_stockfish():
     zf = zipfile.ZipFile(io.BytesIO(apk_data))
     
     mapping = {
-        'assets/arm64-v8a/stockfish': 'android_copilot/app/src/main/assets/bin/arm64-v8a/stockfish',
-        'assets/armeabi-v7a/stockfish': 'android_copilot/app/src/main/assets/bin/armeabi-v7a/stockfish',
-        'assets/x86_64/stockfish': 'android_copilot/app/src/main/assets/bin/x86_64/stockfish',
+        'assets/arm64-v8a/stockfish': 'dulo/app/src/main/assets/bin/arm64-v8a/stockfish',
+        'assets/armeabi-v7a/stockfish': 'dulo/app/src/main/assets/bin/armeabi-v7a/stockfish',
+        'assets/x86_64/stockfish': 'dulo/app/src/main/assets/bin/x86_64/stockfish',
     }
     
     for src_entry, dest_path in mapping.items():

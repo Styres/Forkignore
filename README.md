@@ -11,8 +11,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/risenh/duolingo-chess-copilot/actions/workflows/build-apk.yml">
-    <img src="https://github.com/risenh/duolingo-chess-copilot/actions/workflows/build-apk.yml/badge.svg" alt="Build Status" />
+  <a href="https://github.com/styres/forkignore/actions/workflows/build-apk.yml">
+    <img src="https://github.com/styres/forkignore/actions/workflows/build-apk.yml/badge.svg" alt="Build Status" />
   </a>
   <img src="https://img.shields.io/badge/Plattform-Android%208.0%2B-3DDC84.svg?logo=android&logoColor=white" alt="Plattform" />
   <img src="https://img.shields.io/badge/Sprache-Kotlin%20%7C%20C%2B%2B-7F52FF.svg?logo=kotlin&logoColor=white" alt="Sprache" />
@@ -87,7 +87,7 @@ flowchart TD
 
 ## ♟️ Konfiguration der Engine
 
-Die Engine wird beim Handshake auf maximale Spielstärke bei 4 Sekunden Bedenkzeit pro Zug
+Die Engine wird beim Handshake auf maximale Spielstärke bei 2 Sekunden Bedenkzeit pro Zug
 eingestellt (siehe `StockfishBridge`). Gesetzt wird nur, was die Engine im Handshake als
 unterstützte Option meldet; alles andere wird übersprungen und in der Diagnose vermerkt.
 
@@ -107,7 +107,7 @@ unterstützte Option meldet; alles andere wird übersprungen und in der Diagnose
 | SyzygyProbeDepth    | 1 (nur mit Tablebases)                                                            |
 | SyzygyProbeLimit    | 5 (nur mit Tablebases)                                                            |
 | Syzygy50MoveRule    | true (nur mit Tablebases)                                                         |
-| Suchbefehl          | `go movetime 4000`; `ucinewgame` nur zu Beginn einer neuen Partie                 |
+| Suchbefehl          | `go movetime 2000`; `ucinewgame` nur zu Beginn einer neuen Partie                 |
 
 Weitere Punkte der Vorgabe:
 
@@ -139,7 +139,7 @@ Empfehlung.
 ## 📂 Aufbau des Projekts
 
 ```text
-├── android_copilot/         # Android-Anwendung (Hauptprojekt)
+├── dulo/         # Android-Anwendung (Hauptprojekt)
 │   ├── app/src/main/java/   # Quelltext (Locator, Classifier, Dienst, Oberfläche)
 │   ├── app/src/main/jniLibs/# Vorkompilierte native Stockfish-Bibliotheken (.so)
 │   ├── app/src/main/assets/ # Vorlagenbilder und NNUE-Gewichte
@@ -159,9 +159,9 @@ Empfehlung.
 
 ### Weg 1: fertiges APK herunterladen
 
-1. Die **[Actions-Seite des Repositories](https://github.com/risenh/duolingo-chess-copilot/actions)** öffnen;
-2. den letzten erfolgreichen Lauf von **`Build Duolingo Chess Copilot APK`** anklicken;
-3. unten unter **Artifacts** das Archiv `Duolingo-Chess-Copilot-APK` herunterladen, entpacken und auf
+1. Die **[Actions-Seite des Repositories](https://github.com/styres/forkignore/actions)** öffnen;
+2. den letzten erfolgreichen Lauf von **`Build DuLo APK`** anklicken;
+3. unten unter **Artifacts** das Archiv `DuLo-APK` herunterladen, entpacken und auf
    einem Android-Gerät (ab Android 8.0) installieren.
 
 ### Weg 2: aus den Quellen bauen
@@ -173,12 +173,12 @@ Voraussetzungen:
 
 ```bash
 # 1. Repository klonen (mit LFS)
-git clone https://github.com/risenh/duolingo-chess-copilot.git
-cd duolingo-chess-copilot
+git clone https://github.com/styres/forkignore.git
+cd forkignore
 git lfs pull
 
 # 2. In das Android-Projekt wechseln und bauen
-cd android_copilot
+cd dulo
 ./gradlew assembleDebug
 
 # 3. Das fertige APK liegt unter: app/build/outputs/apk/debug/app-debug.apk

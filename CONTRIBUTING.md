@@ -1,6 +1,6 @@
 # 🤝 Leitfaden für Beiträge (Contributing Guide)
 
-Vielen Dank für dein Interesse an **Duolingo Chess Copilot**! Beiträge aus der Community sind
+Vielen Dank für dein Interesse an **DuLo**! Beiträge aus der Community sind
 ausdrücklich willkommen: Code, Fehlerbehebungen, Verbesserungen an den Algorithmen und Vorschläge
 für neue Funktionen.
 
@@ -18,7 +18,7 @@ für neue Funktionen.
 Vor einem Pull Request müssen alle Kotlin-Unit-Tests durchlaufen:
 
 ```bash
-cd android_copilot
+cd dulo
 ./gradlew testDebugUnitTest
 ```
 

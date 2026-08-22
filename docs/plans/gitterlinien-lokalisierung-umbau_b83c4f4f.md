@@ -108,7 +108,7 @@ Geometrie**. Waagerecht und senkrecht werden getrennt behandelt und stützen sic
 
 ## Stufe 2: Portierung nach Kotlin (nur die Lokalisierung)
 
-Geändert wird `android_copilot/app/src/main/java/com/chess/copilot/core/ChessLocator.kt`:
+Geändert wird `dulo/app/src/main/java/com/dulo/app/core/ChessLocator.kt`:
 - Die Schranke `maxSize` steigt von `0.98*sW` auf `sW` (damit liegt ein bildbreites Brett im Suchraum;
   bei size=sW bleibt für x nur noch 0 übrig, das hat keine Nebenwirkungen);
 - Neu ist `refineByGridLines(gray, box): RefineResult(rect, confidence, residual)`, die Kotlin-Umsetzung

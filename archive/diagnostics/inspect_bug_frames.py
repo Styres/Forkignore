@@ -123,7 +123,7 @@ def inspect_frame(path, templates):
     print(f"\nAls leer erkannte Felder ({len(empties)}): {' '.join(empties)}")
 
 def main():
-    template_dir = "android_copilot/app/src/main/assets/templates"
+    template_dir = "dulo/app/src/main/assets/templates"
     template_files = glob.glob(os.path.join(template_dir, "*.png"))
     templates = []
     for tf in template_files:

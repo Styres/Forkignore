@@ -12,7 +12,7 @@ def evaluate_fen_cloud(fen):
     
     req = urllib.request.Request(
         url,
-        headers={'User-Agent': 'DuolingoChessCopilot/1.0'}
+        headers={'User-Agent': 'DuLo/1.0'}
     )
     
     try:

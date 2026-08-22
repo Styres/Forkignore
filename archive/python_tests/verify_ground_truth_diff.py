@@ -133,7 +133,7 @@ def run_detection_pipeline(img, templates):
     return board_fen, full_fen, is_white_persp
 
 def run_ground_truth_diff_verification():
-    template_dir = os.path.join(PROJECT_ROOT, "android_copilot/app/src/main/assets/templates")
+    template_dir = os.path.join(PROJECT_ROOT, "dulo/app/src/main/assets/templates")
     template_files = glob.glob(os.path.join(template_dir, "*.png"))
     templates = []
     for tf in template_files:

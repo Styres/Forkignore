@@ -9,7 +9,7 @@ const zlib = require('zlib');
 
 const APK_URL = 'https://f-droid.org/repo/org.petero.droidfish_99.apk';
 const APK_LOCAL = path.join(__dirname, 'droidfish.apk');
-const NNUE_OUT_DIR = path.join(__dirname, '..', 'android_copilot', 'app', 'src', 'main', 'assets', 'nnue');
+const NNUE_OUT_DIR = path.join(__dirname, '..', 'dulo', 'app', 'src', 'main', 'assets', 'nnue');
 // Offizieller Link (den Dateinamen nennt die Fehlermeldung der Binary, er entspricht exakt dem eingebauten Standardnetz)
 const NNUE_DIRECT = [
     { name: 'nn-5af11540bbfe.nnue', url: 'https://tests.stockfishchess.org/api/nn/nn-5af11540bbfe.nnue' }

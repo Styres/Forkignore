@@ -36,7 +36,7 @@ jobs:
         uses: android-actions/setup-android@v4
 
       - name: Grant execute permission for gradlew
-        working-directory: android_copilot
+        working-directory: dulo
         run: |
           if [ ! -f "gradlew" ]; then
             gradle wrapper
@@ -45,7 +45,7 @@ jobs:
 
       - name: LFS-Dateien prüfen (Abbruch mit deutlicher Meldung)
         run: |
-          NNUE=android_copilot/app/src/main/assets/nnue/nn-5af11540bbfe.nnue
+          NNUE=dulo/app/src/main/assets/nnue/nn-5af11540bbfe.nnue
           SIZE=$(stat -c%s "$NNUE")
           echo "NNUE size: $SIZE bytes"
           if [ "$SIZE" -lt 10000000 ]; then
@@ -55,7 +55,7 @@ jobs:
           fi
 
       - name: Run Unit Tests & Build Debug APK
-        working-directory: android_copilot
+        working-directory: dulo
         run: |
           ./gradlew test --stacktrace
           ./gradlew assembleDebug --stacktrace
@@ -64,5 +64,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: DuLo-APK
-          path: android_copilot/app/build/outputs/apk/debug/*.apk
+          path: dulo/app/build/outputs/apk/debug/*.apk
           retention-days: 14

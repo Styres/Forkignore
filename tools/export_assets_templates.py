@@ -3,7 +3,7 @@ import os
 import shutil
 
 def export_all_verified_templates():
-    out_dir = "android_copilot/app/src/main/assets/templates"
+    out_dir = "dulo/app/src/main/assets/templates"
     
     # Alte Vorlagen entfernen
     if os.path.exists(out_dir):

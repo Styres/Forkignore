@@ -97,7 +97,7 @@ TEMPLATE_SOURCES = [
 
 def build_template_bank():
     templates = {}
-    assets_dir = "android_copilot/app/src/main/assets/templates"
+    assets_dir = "dulo/app/src/main/assets/templates"
     os.makedirs(assets_dir, exist_ok=True)
     
     # Alte Vorlagen entfernen
