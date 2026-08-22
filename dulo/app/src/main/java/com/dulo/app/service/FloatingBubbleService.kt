@@ -161,6 +161,13 @@ class FloatingBubbleService : Service() {
         // Geschieht so lange gar nichts mehr, wird die Buchführung verworfen und frisch erkannt
         private const val STALL_TIMEOUT_MS = 12000L
 
+        // So lange darf der Gegner ueberlegen, ohne dass die Aufsichtsuhr anspringt. Danach ist
+        // die wahrscheinlichere Erklaerung, dass DuLo gar nicht auf den Gegner wartet, sondern
+        // selbst am Zug ist und es nur nicht bemerkt hat. Die Bots in Duolingo antworten in
+        // Sekundenbruchteilen; zwoelf Sekunden voellig stillstehendes Brett sind also ein
+        // deutliches Zeichen und keine lange Bedenkzeit.
+        private const val OPPONENT_PATIENCE_MS = 12000L
+
         // So viele Takte in Folge darf die Aufnahme fehlen, bevor DuLo aufgibt.
         // Bei 80 ms je Takt sind das gut vier Sekunden - lang genug für das Neuanlegen der
         // Aufnahmefläche, kurz genug, um nicht endlos stumm weiterzulaufen.
@@ -453,6 +460,22 @@ class FloatingBubbleService : Service() {
      * Fortschritt, und DuLo wartete auf einen Zug, der nie kommt.
      */
     private var waitingForOpponent = false
+
+    /**
+     * Seit wann auf den Gegner gewartet wird.
+     *
+     * Das Warten selbst gilt als Fortschritt, sonst schlaege die Aufsichtsuhr zu, waehrend der
+     * Gegner nachdenkt. Genau daran konnte DuLo aber dauerhaft haengenbleiben: Deutet die
+     * Erkennung einen gegnerischen Zug einmal faelschlich als eigenen, steht
+     * [waitingForOpponent] auf wahr, obwohl wir am Zug sind. Das Brett aendert sich dann nie
+     * wieder von allein, jeder Takt meldet Fortschritt, und die Aufsichtsuhr - die einzige
+     * Stelle, die das noch aufloesen koennte - kommt nie zum Zug. Von aussen hoerte DuLo einfach
+     * auf, und nur Aus- und Einschalten half.
+     *
+     * Deshalb ist die Geduld begrenzt: Ruehrt sich das Brett laenger als [OPPONENT_PATIENCE_MS]
+     * nicht, wird die Annahme fallengelassen und die Stellung frisch vom Bildschirm aufgenommen.
+     */
+    private var waitingSince = 0L
 
     /**
      * Wie oft in Folge ein getippter Zug nicht auf dem Brett angekommen ist.
@@ -1266,6 +1289,7 @@ class FloatingBubbleService : Service() {
         fallbackReported = false
         projectionFailures = 0
         waitingForOpponent = false
+        waitingSince = 0L
         failedMoveAttempts = 0
         startAnalysis(force = false)
         startMonitoring()
@@ -1425,6 +1449,10 @@ class FloatingBubbleService : Service() {
             Log.w(TAG, "Seit ${(now - lastProgressAt) / 1000} Sekunden kein Fortschritt, Stellung wird neu erkannt")
             markProgress()
             clearPendingMove()
+            // Auch die Annahme, der Gegner sei am Zug, ist Buchfuehrung - und wenn die Uhr
+            // zuschlaegt, war genau sie moeglicherweise falsch.
+            waitingForOpponent = false
+            waitingSince = 0L
             lastAcceptedBoard = null
             castlingRights = null
             referenceCells = null
@@ -1491,6 +1519,7 @@ class FloatingBubbleService : Service() {
                 pendingSince = System.currentTimeMillis()
         // Ab jetzt sind wir am Zug - Warten wäre hier kein Fortschritt mehr
         waitingForOpponent = false
+        waitingSince = 0L
                 Log.i(TAG, "Zug $zugWiederholen kam nicht an, zweiter Versuch")
                 performAutoMove(lastBoardRect!!, felder, isPromotion = zugWiederholen.length >= 5)
                 return
@@ -1540,6 +1569,7 @@ class FloatingBubbleService : Service() {
                 Log.i(TAG, "Empfohlener Zug wurde ausgeführt")
                 markProgress()
                 waitingForOpponent = true
+                waitingSince = System.currentTimeMillis()
                 failedMoveAttempts = 0
                 // Das gemerkte Brett um den eigenen Zug fortschreiben. Ohne das sähe der nächste
                 // Vergleich den eigenen und den gegnerischen Zug zusammen und könnte niemanden
@@ -1609,6 +1639,35 @@ class FloatingBubbleService : Service() {
         // Gegner. Wer lange überlegt, hat DuLo damit zuverlässig aus dem Tritt gebracht.
         // Nur wenn wir berechtigt auf den Gegner warten. Sind wir am Zug und es tut sich nichts,
         // muss die Aufsichtsuhr laufen dürfen.
+        //
+        // Und die Geduld ist begrenzt: Wer laenger als OPPONENT_PATIENCE_MS auf einen Gegner
+        // wartet, der sich nicht ruehrt, wartet mit hoher Wahrscheinlichkeit auf sich selbst -
+        // die Erkennung hat dann einen gegnerischen Zug als eigenen verbucht. Ab da meldet das
+        // Warten keinen Fortschritt mehr, die Aufsichtsuhr uebernimmt und nimmt neu auf.
+        val warteZuLang = waitingForOpponent && !changedSinceAnalysis && pendingSince == 0L &&
+            waitingSince > 0L && now - waitingSince > OPPONENT_PATIENCE_MS
+        if (warteZuLang) {
+            // Nicht erst die Aufsichtsuhr abwarten: Sie wurde die ganze Wartezeit ueber
+            // zurueckgesetzt und braeuchte von hier an noch einmal ihre volle Frist. Das waere
+            // eine halbe Minute Stillstand fuer etwas, das jetzt schon feststeht.
+            Log.w(
+                TAG,
+                "Seit ${(now - waitingSince) / 1000} Sekunden wartet DuLo auf einen Gegner, der sich" +
+                    " nicht ruehrt - die Stellung wird neu aufgenommen"
+            )
+            waitingForOpponent = false
+            waitingSince = 0L
+            markProgress()
+            clearPendingMove()
+            lastAcceptedBoard = null
+            castlingRights = null
+            referenceCells = null
+            lastTickCells = null
+            undecidedRuns = 0
+            nextFullScanAt = 0L
+            startAnalysis(force = true)
+            return
+        }
         if (!changedSinceAnalysis && pendingSince == 0L && waitingForOpponent) markProgress()
 
         val standsStill = stillTicks >= STILL_TICKS_REQUIRED
@@ -1800,6 +1859,7 @@ class FloatingBubbleService : Service() {
             // Eigener Zug: die Empfehlung ist erledigt, jetzt ist der Gegner dran
             clearPendingMove()
             waitingForOpponent = true
+            waitingSince = System.currentTimeMillis()
             failedMoveAttempts = 0
             return true
         }
@@ -2377,6 +2437,7 @@ class FloatingBubbleService : Service() {
                                 // und es wird gewartet, bis der Gegner gezogen hat.
                                 Log.i(TAG, "Eigener Zug erkannt")
                                 waitingForOpponent = true
+                                waitingSince = System.currentTimeMillis()
                                 failedMoveAttempts = 0
                                 clearPendingMove()
                                 return@launch
