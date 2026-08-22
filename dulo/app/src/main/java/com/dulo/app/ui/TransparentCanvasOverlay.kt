@@ -17,6 +17,7 @@ import com.dulo.app.engine.StockfishBridge
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.atan2
@@ -383,6 +384,17 @@ class TransparentCanvasOverlay(private val context: Context) {
         val view = overlayView ?: return false
         return isShowing && view.visibility == View.VISIBLE &&
             view.moveInfo != null && view.errorMessage == null
+    }
+
+    /**
+     * Endgültig abräumen: Fenster entfernen und den eigenen Coroutine-Bereich beenden.
+     *
+     * [hide] allein genügt beim Beenden des Dienstes nicht - der Bereich lebte weiter und mit ihm
+     * jede noch laufende Ein- oder Ausblendung.
+     */
+    fun release() {
+        hide()
+        scope.cancel()
     }
 
     fun hide() {

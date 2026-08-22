@@ -102,9 +102,6 @@ class FloatingBubbleService : Service() {
         // Zuganimation durch. Jeder zusätzliche Takt wäre spürbare Verzögerung bis zum Pfeil.
         private const val STILL_TICKS_REQUIRED = 1
 
-        // Ab dieser mittleren Helligkeitsdifferenz je Kachel gilt das Brett als verändert.
-        // Darunter liegen Kompressionsrauschen und leichte Animationen der Oberfläche.
-        private const val BOARD_CHANGE_THRESHOLD = 1.8f
 
         // Bewegt sich das Bild so lange ohne Ruhepause, wird trotzdem analysiert (rund 2 Sekunden).
         // Duolingo animiert nach einem Zug gern weiter (Hervorhebungen, Maskottchen).
@@ -129,6 +126,9 @@ class FloatingBubbleService : Service() {
         // Geschieht so lange gar nichts mehr, wird die Buchführung verworfen und frisch erkannt
         private const val STALL_TIMEOUT_MS = 12000L
 
+        // So lange wird höchstens auf einen frischen Frame gewartet
+        private const val FRAME_WAIT_MS = 400L
+
         // Sicherheitsnetz: spätestens nach so vielen Takten (rund 2,5 Sekunden) wird ohnehin
         // nachgesehen, auch wenn der Feldvergleich nichts gemeldet hat. Damit bleibt ein Pfeil
         // selbst im schlechtesten Fall nicht länger stehen. Die Engine läuft dabei nur, wenn der
@@ -136,8 +136,6 @@ class FloatingBubbleService : Service() {
         // Durchlauf kostet also kaum etwas.
         private const val SWEEP_TICKS = 12
 
-        // Kantenlänge des Rasters, auf das der Brettausschnitt zum Vergleich eingedampft wird
-        private const val FINGERPRINT_GRID = 12
 
         // Obergrenze für einen kompletten Analysedurchgang (Aufnahme, Erkennung, Bedenkzeit).
         // Reichlich bemessen: die Bedenkzeit sind 2 Sekunden, alles Übrige liegt im Millisekundenbereich.
@@ -161,16 +159,24 @@ class FloatingBubbleService : Service() {
     private var screenHeight = 2400
     private var screenDensity = 420
     private var isAnalyzing = false
-    @Volatile
-    private var isCapturingFrame = false
+    /**
+     * Zuletzt vom System geliefertes Bild, bereitgehalten für den nächsten Zugriff.
+     *
+     * MediaProjection liefert nur bei Veränderungen auf dem Bildschirm ein neues Bild. Wurden
+     * ankommende Bilder - wie zuvor - sofort verworfen, stand bei einem stillstehenden Brett
+     * überhaupt kein Bild zur Verfügung: Die vollständige Erkennung lief dann jedes Mal ins Leere,
+     * gerade dann, wenn sie zum Aufräumen einer verfahrenen Lage gebraucht wurde.
+     *
+     * Der ImageReader hält drei Puffer; genau einen davon dauerhaft bereitzuhalten ist unbedenklich.
+     */
+    private var latestImage: android.media.Image? = null
+    private val imageLock = Any()
     @Volatile
     private var sessionLockedPerspective: Boolean? = null
     // Wurde die Perspektive per langem Druck auf die Blase von Hand gesetzt, bleibt sie stehen:
     // die automatische Erkennung darf eine ausdrückliche Ansage des Nutzers nicht überschreiben.
     @Volatile
     private var manualPerspectiveLock = false
-    // Telemetrie zur Stabilität der Erkennung (Lektion aus bug_19): unterschiedliche FEN bei zwei Klicks auf ein unverändertes Brett belegen ein Flackern der Erkennung und damit die Ursache wechselnder Empfehlungen
-    private var lastFen: String? = null
     // Zähler für Konflikte mit der Perspektivsperre (Lektion aus bug_19): widerspricht die Erkennung der Sperre dauerhaft, wird neu gesperrt, damit eine Fehlsperre nicht die ganze Sitzung blockiert
     private var perspectiveConflictStreak = 0
 
@@ -218,8 +224,15 @@ class FloatingBubbleService : Service() {
      * der Zug des Gegners darin und die Anzeige bleibt stehen.
      */
     private var lastAcceptedBoard: Array<CharArray>? = null
-    // Stellung der letzten Berechnung: dieselbe Stellung wird kein zweites Mal gerechnet
-    private var lastAnalysedFen: String? = null
+
+    /**
+     * Mitgeführte Rochaderechte zur gemerkten Stellung.
+     *
+     * Aus der Figurenstellung allein sind sie nicht ablesbar: Ein König, der nach f1 und zurück
+     * gegangen ist, steht wieder zu Hause, darf aber nie wieder rochieren. Solange die Stellung
+     * fortgeschrieben wird, ist die Zugfolge bekannt und die Rechte lassen sich mitführen.
+     */
+    private var castlingRights: String? = null
 
     // Zuletzt tatsächlich gezeichneter Pfeil (Zug + Brettperspektive). Steht schon derselbe Pfeil
     // auf dem Bildschirm, wird er nicht neu gezeichnet - ein erneutes Zeichnen sähe wie eine
@@ -433,9 +446,13 @@ class FloatingBubbleService : Service() {
             )
 
             imageReader?.setOnImageAvailableListener({ reader ->
-                if (!isCapturingFrame) {
-                    val img = reader.acquireLatestImage()
-                    img?.close()
+                // Immer nur das neueste Bild behalten; ältere schließt acquireLatestImage selbst.
+                val img = try { reader.acquireLatestImage() } catch (e: Exception) { null }
+                if (img != null) {
+                    synchronized(imageLock) {
+                        try { latestImage?.close() } catch (_: Exception) {}
+                        latestImage = img
+                    }
                 }
             }, captureHandler)
 
@@ -866,7 +883,7 @@ class FloatingBubbleService : Service() {
 
         // Beim Einschalten immer rechnen und die eigene Farbe aus der Ausgangsstellung neu bestimmen
         lastAcceptedBoard = null
-        lastAnalysedFen = null
+        castlingRights = null
         lastShownMove = null
         sideEstablished = false
         clearPendingMove()
@@ -939,6 +956,7 @@ class FloatingBubbleService : Service() {
             markProgress()
             clearPendingMove()
             lastAcceptedBoard = null
+            castlingRights = null
             referenceCells = null
             lastTickCells = null
             undecidedRuns = 0
@@ -950,6 +968,15 @@ class FloatingBubbleService : Service() {
         if (rect == null) {
             // Noch kein Brett bekannt (die erste Analyse lief ins Leere): erneut versuchen
             startAnalysis(force = true, drawArrow = false)
+            return
+        }
+
+        // Einmal je Sitzung nachmessen, ob FLAG_SECURE das Overlay wirklich aus der Aufnahme
+        // heraushält. Der Takt ist dafür der richtige Ort: Hier steht der Brettausschnitt fest,
+        // und im Auto-Betrieb läuft unter Umständen nie wieder eine vollständige Erkennung, in der
+        // die Messung sonst gestanden hätte.
+        if (!secureCaptureChecked) {
+            runSecureCaptureSelfTest(rect)
             return
         }
 
@@ -975,10 +1002,12 @@ class FloatingBubbleService : Service() {
         // Der Pfeil steht: warten, bis genau dieser Zug ausgeführt ist. Geprüft werden nur die
         // beiden betroffenen Felder - Startfeld leer, Zielfeld besetzt. Erst dann verschwindet
         // der Pfeil, und erst dann wird auf den Gegner gewartet.
-        // Der Schnellweg misst zwei Felder im laufenden Bild. Er setzt voraus, dass der Pfeil
-        // nicht mit aufgenommen wird - sonst läge seine Hervorhebung genau auf diesen Feldern.
-        // Auf Geräten ohne FLAG_SECURE entscheidet weiter die vollständige Erkennung.
-        val pendingReference = if (secureCaptureOk) pendingMoveReference else null
+        // Der Schnellweg misst zwei Felder im laufenden Bild. Er setzt voraus, dass kein Pfeil
+        // im aufgenommenen Bild liegt - der läge sonst genau auf diesen beiden Feldern.
+        // Zwei Fälle sind unbedenklich: Das Gerät hält sich an FLAG_SECURE, oder es ist ohnehin
+        // kein Pfeil gezeichnet (im Auto-Betrieb der Normalfall).
+        val arrowInFrame = !secureCaptureOk && transparentOverlay?.hasVisibleSuggestion() == true
+        val pendingReference = if (arrowInFrame) null else pendingMoveReference
         if (pendingReference != null && pendingFromCell >= 0 && pendingToCell >= 0) {
             val played = UltraRobustClassifier.moveWasPlayed(
                 pendingReference.means, pendingReference.stds,
@@ -994,7 +1023,15 @@ class FloatingBubbleService : Service() {
                 val playedMove = pendingMoveUci
                 val previous = lastAcceptedBoard
                 if (playedMove != null && previous != null) {
-                    UltraRobustClassifier.applyUciMove(previous, playedMove)?.let { lastAcceptedBoard = it }
+                    UltraRobustClassifier.applyUciMove(previous, playedMove)?.let { updated ->
+                        val piece = previous[8 - (playedMove[1] - '0')][playedMove[0] - 'a']
+                        lastAcceptedBoard = updated
+                        castlingRights = UltraRobustClassifier.updateCastlingRights(
+                            castlingRights ?: UltraRobustClassifier.computeCastlingRights(previous),
+                            playedMove,
+                            piece
+                        )
+                    }
                 }
                 clearPendingMove()
                 transparentOverlay?.clearSuggestion()
@@ -1208,6 +1245,11 @@ class FloatingBubbleService : Service() {
 
         val nextBoard = UltraRobustClassifier.applyUciMove(board, uci) ?: return false
         lastAcceptedBoard = nextBoard
+        castlingRights = UltraRobustClassifier.updateCastlingRights(
+            castlingRights ?: UltraRobustClassifier.computeCastlingRights(board),
+            uci,
+            movingPiece
+        )
         markProgress()
         Log.i(TAG, "Zug abgelesen: $uci von ${if (moverIsWhite) "Weiß" else "Schwarz"} (ohne Neuerkennung)")
 
@@ -1231,15 +1273,31 @@ class FloatingBubbleService : Service() {
         val position = UltraRobustClassifier.buildFenFromStandardBoard(
             standardBoard = nextBoard,
             activeIsWhite = myColourIsWhite,
-            boardRect = lastBoardRect ?: Rect()
+            boardRect = lastBoardRect ?: Rect(),
+            castlingRights = castlingRights
         )
-        // Ergibt die fortgeschriebene Stellung etwas Unmögliches, ist die Buchführung entgleist.
-        // Dann wird sie verworfen und im nächsten Takt frisch vom Bildschirm erkannt - besser ein
-        // Durchgang Verzögerung als eine Partie lang auf einer falschen Stellung zu rechnen.
-        if (!evaluateAndPresent(position, drawArrow = false)) {
-            Log.w(TAG, "Fortgeschriebene Stellung ist unmöglich, sie wird neu vom Bildschirm erkannt")
+
+        // Für die Dauer der Berechnung als beschäftigt melden. Sonst könnte ein Tippen auf
+        // "Bester Zug" mitten hinein eine zweite Analyse starten, die dieselben Felder anfasst.
+        isAnalyzing = true
+        analysisStartedAt = System.currentTimeMillis()
+        try {
+            // Ergibt die fortgeschriebene Stellung etwas Unmögliches, ist die Buchführung entgleist.
+            // Dann wird sie verworfen und im nächsten Takt frisch vom Bildschirm erkannt - besser
+            // ein Durchgang Verzögerung als eine Partie lang auf einer falschen Stellung zu rechnen.
+            if (!evaluateAndPresent(position, drawArrow = false)) {
+                Log.w(TAG, "Fortgeschriebene Stellung ist unmöglich, sie wird neu vom Bildschirm erkannt")
+                lastAcceptedBoard = null
+                clearPendingMove()
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Berechnung zum abgelesenen Zug fehlgeschlagen: ${e.javaClass.simpleName}: ${e.message}")
             lastAcceptedBoard = null
             clearPendingMove()
+        } finally {
+            isAnalyzing = false
         }
         return true
     }
@@ -1259,7 +1317,6 @@ class FloatingBubbleService : Service() {
         val eval = withTimeout(ANALYSIS_TIMEOUT_MS) {
             StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = StockfishBridge.DEFAULT_MOVE_TIME_MS)
         }
-        lastFen = res.fullFen
 
         if (eval.bestMove == "(invalid)") {
             reportError("Unmögliche Stellung erkannt (Könige nebeneinander oder Figuren fehlerhaft)", drawArrow)
@@ -1309,6 +1366,38 @@ class FloatingBubbleService : Service() {
         pendingMoveReference = null
     }
 
+    /**
+     * Rochaderechte nach einer Neuerkennung: aus der Stellung geraten, aber nie großzügiger als
+     * das bisher Mitgeführte. Ein einmal verspieltes Recht kommt nicht zurück.
+     */
+    private fun narrowCastlingRights(known: String?, board: Array<CharArray>): String {
+        val fromBoard = UltraRobustClassifier.computeCastlingRights(board)
+        if (known == null) return fromBoard
+        val allowed = known.filter { it != '-' }.toSet()
+        val kept = fromBoard.filter { it in allowed }
+        return if (kept.isEmpty()) "-" else kept
+    }
+
+    /**
+     * Führt eine Auswertung auf dem bereitgehaltenen Bild aus, ohne es zu verbrauchen.
+     *
+     * Bewusst nicht herausnehmen und schließen: Dann stünde bis zum nächsten gelieferten Bild
+     * nichts mehr zur Verfügung, und bei einem stillstehenden Brett kommt gar keines nach. Das
+     * Bild bleibt liegen, bis das System ein neueres liefert - der Aufrufer liest nur daraus.
+     *
+     * Die Sperre umschließt die Auswertung, damit das Bild nicht mitten im Lesen geschlossen wird.
+     */
+    private fun <T> withLatestImage(block: (android.media.Image) -> T): T? = synchronized(imageLock) {
+        val img = latestImage ?: return@synchronized null
+        block(img)
+    }
+
+    /** Bereitgehaltenes Bild verwerfen (beim Abbau der Aufnahmesitzung) */
+    private fun dropLatestImage() = synchronized(imageLock) {
+        try { latestImage?.close() } catch (_: Exception) {}
+        latestImage = null
+    }
+
     /** Tiefe Kopie eines Bretts: die Erkennung gibt ihre Puffer weiter, die dürfen nicht altern */
     private fun copyBoard(board: Array<CharArray>): Array<CharArray> =
         Array(board.size) { r -> board[r].copyOf() }
@@ -1317,7 +1406,9 @@ class FloatingBubbleService : Service() {
     private fun resetMonitorState() {
         referenceCells = null
         lastTickCells = null
-        lastKnownCells = null
+        // lastKnownCells bleibt bewusst stehen: das ist kein Vergleichsmaßstab, sondern nur die
+        // zuletzt gelesene Abtastung. Sie wird gebraucht, wenn gerade kein neuer Frame kommt -
+        // und genau dann wäre ein Verwerfen fatal, weil dann gar nichts mehr gelesen werden kann.
         changePendingTicks = 0
         ticksSinceAnalysis = 0
         undecidedRuns = 0
@@ -1336,34 +1427,29 @@ class FloatingBubbleService : Service() {
      * Alle bereits gepufferten Frames stammen noch aus der Zeit davor und werden verworfen. Das
      * Ausblenden selbst löst eine neue Bildkomposition aus, der nächste Frame ist also sauber.
      */
-    private suspend fun captureFrameAfterHiding(): Bitmap? = withContext(Dispatchers.IO) {
-        val reader = imageReader ?: return@withContext null
-        isCapturingFrame = true
+    private suspend fun captureFullFrame(discardBuffered: Boolean): Bitmap? = withContext(Dispatchers.IO) {
+        if (imageReader == null) return@withContext null
         try {
-            // Alles verwerfen, was vor dem Ausblenden entstanden ist
-            while (true) {
-                val stale = reader.acquireLatestImage() ?: break
-                stale.close()
+            if (discardBuffered) {
+                // Nur im Rückfallverfahren: Das bereitgehaltene Bild stammt noch aus der Zeit vor
+                // dem Ausblenden und enthielte den eigenen Pfeil. Es wird verworfen und auf das
+                // erste Bild danach gewartet - das Ausblenden selbst löst eines aus.
+                dropLatestImage()
+            } else {
+                // Bleibt das Overlay stehen, ist das bereitgehaltene Bild bereits sauber.
+                withLatestImage { bitmapFromImage(it) }?.let { return@withContext it }
             }
-            val deadline = System.currentTimeMillis() + 400L
+
+            val deadline = System.currentTimeMillis() + FRAME_WAIT_MS
             while (System.currentTimeMillis() < deadline) {
-                val image = reader.acquireLatestImage()
-                if (image != null) {
-                    try {
-                        return@withContext bitmapFromImage(image)
-                    } finally {
-                        image.close()
-                    }
-                }
+                withLatestImage { bitmapFromImage(it) }?.let { return@withContext it }
                 delay(10)
             }
-            Log.i(TAG, "Nach dem Ausblenden kam kein neuer Frame")
+            Log.i(TAG, "Kein Frame verfügbar")
             null
         } catch (e: Exception) {
-            Log.w(TAG, "captureFrameAfterHiding fehlgeschlagen: ${e.message}")
+            Log.w(TAG, "Aufnahme fehlgeschlagen: ${e.message}")
             null
-        } finally {
-            isCapturingFrame = false
         }
     }
 
@@ -1384,18 +1470,12 @@ class FloatingBubbleService : Service() {
      * @return null, wenn gerade kein neuer Frame vorliegt - dann hat sich auf dem Bildschirm nichts bewegt
      */
     private suspend fun captureBoardCells(rect: Rect): BoardCells? = withContext(Dispatchers.IO) {
-        val reader = imageReader ?: return@withContext null
-        isCapturingFrame = true
-        var image: android.media.Image? = null
+        if (imageReader == null) return@withContext null
         try {
-            // Nur den neuesten Frame nehmen und ältere verwerfen
-            while (true) {
-                val next = reader.acquireLatestImage() ?: break
-                image?.close()
-                image = next
-            }
-            val frame = image ?: return@withContext null
-
+            // Aus dem bereitgehaltenen Bild lesen, ohne es zu verbrauchen. Liefert das System kein
+            // neues, bleibt dieses liegen und zeigt weiterhin den unveränderten Bildschirm - genau
+            // das, was bei einem stillstehenden Brett gebraucht wird.
+            return@withContext withLatestImage<BoardCells?> { frame ->
             val plane = frame.planes[0]
             val buffer = plane.buffer
             val pixelStride = plane.pixelStride
@@ -1405,7 +1485,7 @@ class FloatingBubbleService : Service() {
             val top = rect.top.coerceAtLeast(0)
             val right = rect.right.coerceAtMost(screenWidth)
             val bottom = rect.bottom.coerceAtMost(screenHeight)
-            if (right - left < 32 || bottom - top < 32) return@withContext null
+            if (right - left < 32 || bottom - top < 32) return@withLatestImage null
 
             val stepX = (right - left) / 8.0f
             val stepY = (bottom - top) / 8.0f
@@ -1445,12 +1525,10 @@ class FloatingBubbleService : Service() {
                 }
             }
             BoardCells(means, stds)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "captureBoardCells fehlgeschlagen: ${e.message}")
             null
-        } finally {
-            try { image?.close() } catch (_: Exception) {}
-            isCapturingFrame = false
         }
     }
 
@@ -1489,8 +1567,20 @@ class FloatingBubbleService : Service() {
         val flipped = !current
         sessionLockedPerspective = flipped
         manualPerspectiveLock = true
+        sideEstablished = true
         perspectiveConflictStreak = 0
-        lastFen = null
+
+        // Mit der Blickrichtung dreht sich die Zuordnung von Bildschirmfeldern zu Feldnamen.
+        // Alles, was auf der alten Zuordnung beruht, ist damit hinfällig und wird verworfen -
+        // sonst rechnete DuLo auf einem gespiegelten Brett weiter.
+        lastAcceptedBoard = null
+        castlingRights = null
+        clearPendingMove()
+        transparentOverlay?.clearSuggestion()
+        resetMonitorState()
+        markProgress()
+        if (autoAnalyseEnabled) startAnalysis(force = true, drawArrow = false)
+
         Toast.makeText(
             this,
             "Eigene Farbe von Hand auf ${if (flipped) "Weiß" else "Schwarz"} gesetzt (erneut lange drücken zum Zurücksetzen)",
@@ -1529,12 +1619,6 @@ class FloatingBubbleService : Service() {
             // Zug des Gegners war damit verschluckt und die Anzeige rührte sich nicht mehr.
             var analysisDecided = false
             try {
-                // Einmal je Sitzung nachmessen, ob FLAG_SECURE das Overlay wirklich aus der
-                // Aufnahme heraushält. Danach steht fest, ob überhaupt noch ausgeblendet werden muss.
-                if (!secureCaptureChecked) {
-                    lastBoardRect?.let { runSecureCaptureSelfTest(it) }
-                }
-
                 // Der Normalfall: das Overlay bleibt stehen. Der Pfeil ist für die Aufnahme
                 // unsichtbar, für den Nutzer aber die ganze Zeit da - kein Flackern mehr.
                 val hideForCapture = !secureCaptureOk
@@ -1545,7 +1629,7 @@ class FloatingBubbleService : Service() {
                 }
 
                 // Alle noch gepufferten Frames verwerfen und den nächsten frischen Frame nehmen
-                screenBitmap = captureFrameAfterHiding()
+                screenBitmap = captureFullFrame(discardBuffered = hideForCapture)
 
                 if (hideForCapture) {
                     transparentOverlay?.setContentVisible(true)
@@ -1710,7 +1794,7 @@ class FloatingBubbleService : Service() {
                         if (previousBoard == null || myColourIsWhite == null) {
                             // Erster Durchgang der Sitzung: Stellung annehmen und rechnen
                             lastAcceptedBoard = copyBoard(res.standardBoard)
-                            lastAnalysedFen = res.fullFen
+                            castlingRights = UltraRobustClassifier.computeCastlingRights(res.standardBoard)
                             analysisDecided = true
                         } else {
                             val diff = UltraRobustClassifier.diffBoards(previousBoard, res.standardBoard)
@@ -1746,6 +1830,10 @@ class FloatingBubbleService : Service() {
                             }
 
                             lastAcceptedBoard = copyBoard(res.standardBoard)
+                            // Nach einer Neuerkennung ist die Zugfolge verloren: die Rechte werden
+                            // wieder aus der Stellung geraten - aber nie großzügiger als bisher,
+                            // denn ein einmal verspieltes Recht kommt nicht zurück.
+                            castlingRights = narrowCastlingRights(castlingRights, res.standardBoard)
                             analysisDecided = true
 
                             if (diff.moverIsWhite == myColourIsWhite) {
@@ -1753,14 +1841,12 @@ class FloatingBubbleService : Service() {
                                 // und es wird gewartet, bis der Gegner gezogen hat.
                                 Log.i(TAG, "Eigener Zug erkannt, Pfeil wird ausgeblendet")
                                 lastShownMove = null
-                                lastAnalysedFen = res.fullFen
                                 clearPendingMove()
                                 withContext(Dispatchers.Main) { transparentOverlay?.clearSuggestion() }
                                 return@launch
                             }
 
                             // Der Gegner hat gezogen: jetzt bin ich am Zug und es wird gerechnet.
-                            lastAnalysedFen = res.fullFen
                         }
 
                         evaluateAndPresent(res, drawArrow)
@@ -1840,6 +1926,9 @@ class FloatingBubbleService : Service() {
     }
 
     private fun cleanupProjection() {
+        // Erst das bereitgehaltene Bild freigeben, dann den Leser schließen - umgekehrt wirft das
+        // Schließen des Bildes hinterher.
+        dropLatestImage()
         try { virtualDisplay?.release() } catch (_: Exception) {}
         try { imageReader?.close() } catch (_: Exception) {}
         try { mediaProjection?.stop() } catch (_: Exception) {}
@@ -1856,7 +1945,8 @@ class FloatingBubbleService : Service() {
         hideMenu()
         serviceScope.cancel()
         bubbleView?.let { try { windowManager.removeView(it) } catch (_: Exception) {} }
-        transparentOverlay?.hide()
+        transparentOverlay?.release()
+        transparentOverlay = null
         cleanupProjection()
         try { captureThread?.quitSafely() } catch (_: Exception) {}
         captureThread = null

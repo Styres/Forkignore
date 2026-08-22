@@ -67,6 +67,14 @@
     ist immer nur eines davon;
   - passt der Zug nicht in dieses Muster (Rochade, en passant, unklare Aufnahme), übernimmt die
     vollständige Erkennung als Rückfallebene;
+  - das zuletzt gelieferte Bildschirmbild wird **bereitgehalten statt verworfen**: MediaProjection
+    liefert nur bei Veränderungen ein neues, und bei stillstehendem Brett stand sonst überhaupt
+    kein Bild zur Verfügung - ausgerechnet dann, wenn die vollständige Erkennung zum Aufräumen
+    gebraucht wurde;
+  - **Rochaderechte werden mitgeführt**: aus der Figurenstellung sind sie nicht ablesbar, denn ein
+    König, der nach f1 und zurück gegangen ist, steht wieder zu Hause und darf trotzdem nie wieder
+    rochieren. Geraten würde das Recht zurückgegeben und die Engine schlüge eine Rochade vor, die
+    das Spiel ablehnt;
   - über allem wacht eine **Aufsichtsuhr**: geschieht zwölf Sekunden lang gar nichts mehr, wird die
     Buchführung verworfen und die Stellung frisch vom Bildschirm gelesen. Jede Sackgasse ist damit
     höchstens ein Aussetzer von wenigen Sekunden.

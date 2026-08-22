@@ -866,6 +866,57 @@ class UltraRobustClassifier(context: Context? = null) {
         }
 
         /**
+         * Reine Funktion: schreibt die Rochaderechte um einen gespielten Zug fort.
+         *
+         * Aus der reinen Figurenstellung lassen sich die Rechte nicht ablesen: Ein König, der nach
+         * f1 und wieder zurück nach e1 gegangen ist, steht wieder zu Hause, darf aber nie wieder
+         * rochieren. [computeCastlingRights] muss dort raten und gäbe das Recht fälschlich zurück -
+         * die Engine schlüge dann eine Rochade vor, die das Spiel ablehnt.
+         *
+         * Sobald die Stellung fortgeschrieben wird, ist die Zugfolge bekannt und die Rechte lassen
+         * sich mitführen: Ein Königszug nimmt beide Rechte der Seite, ein Turmzug das seiner Ecke,
+         * und ein Schlag auf einer Turmecke nimmt das Recht der geschlagenen Seite.
+         *
+         * @param current Bisherige Rechte in FEN-Schreibweise, etwa "KQkq" oder "-"
+         * @param uci     Gespielter Zug
+         * @param movingPiece Figur, die gezogen hat
+         */
+        fun updateCastlingRights(current: String, uci: String, movingPiece: Char): String {
+            if (uci.length < 4) return current
+            val rights = current.filter { it != '-' }.toSet().toMutableSet()
+            if (rights.isEmpty()) return "-"
+
+            val from = uci.substring(0, 2)
+            val to = uci.substring(2, 4)
+
+            when (movingPiece) {
+                'K' -> { rights.remove('K'); rights.remove('Q') }
+                'k' -> { rights.remove('k'); rights.remove('q') }
+                'R' -> when (from) {
+                    "h1" -> rights.remove('K')
+                    "a1" -> rights.remove('Q')
+                }
+                'r' -> when (from) {
+                    "h8" -> rights.remove('k')
+                    "a8" -> rights.remove('q')
+                }
+            }
+
+            // Ein Schlag auf einer Turmecke nimmt der anderen Seite ihr Recht - dort steht danach
+            // kein Turm mehr, gleich ob er geschlagen wurde oder schon weg war.
+            when (to) {
+                "h1" -> rights.remove('K')
+                "a1" -> rights.remove('Q')
+                "h8" -> rights.remove('k')
+                "a8" -> rights.remove('q')
+            }
+
+            if (rights.isEmpty()) return "-"
+            // FEN schreibt die Rechte in fester Reihenfolge
+            return "KQkq".filter { it in rights }
+        }
+
+        /**
          * Reine Funktion: baut das FEN unmittelbar aus einem Brett in Standardausrichtung.
          *
          * Gebraucht für die fortgeschriebene Stellung: dort steht das Brett bereits richtig herum,
@@ -874,11 +925,20 @@ class UltraRobustClassifier(context: Context? = null) {
         fun buildFenFromStandardBoard(
             standardBoard: Array<CharArray>,
             activeIsWhite: Boolean,
-            boardRect: Rect = Rect()
+            boardRect: Rect = Rect(),
+            // Mitgeführte Rechte; ohne Angabe werden sie aus der Stellung geraten
+            castlingRights: String? = null
         ): DetectionResult {
             val activeColor = if (activeIsWhite) "w" else "b"
             val boardFen = standardBoard.joinToString("/") { compressRow(it) }
-            val castling = computeCastlingRights(standardBoard)
+            // Geratene Rechte nie großzügiger als die mitgeführten: was einmal verspielt ist,
+            // bleibt verspielt.
+            val castling = castlingRights?.let { tracked ->
+                val fromBoard = computeCastlingRights(standardBoard)
+                val allowed = tracked.filter { it != '-' }.toSet()
+                val combined = fromBoard.filter { it in allowed }
+                if (combined.isEmpty()) "-" else combined
+            } ?: computeCastlingRights(standardBoard)
             val occupied = standardBoard.sumOf { row -> row.count { it != '.' } }
 
             // rawBoard ist die Bildschirmansicht: bei schwarzer Sicht steht das Brett gedreht
