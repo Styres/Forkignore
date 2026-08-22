@@ -737,7 +737,12 @@ object StockfishBridge {
         var searchHashfull = -1
 
         try {
-            // Restzeilen aus früheren Ausgaben verwerfen
+            // Eine vorige Suche kann noch laufen - etwa weil ihr Aufrufer abgebrochen wurde,
+            // während Stockfish weiterrechnete. Ein "position" mitten in eine laufende Suche zu
+            // schicken bringt die Engine aus dem Tritt; sie antwortet danach nicht mehr sinnvoll,
+            // wird für tot gehalten und neu gestartet, und es zieht der Regelgenerator.
+            // Deshalb erst beenden, dann alle Restzeilen verwerfen.
+            sendCommand("stop")
             while (lineChannel?.tryReceive()?.getOrNull() != null) {}
 
             // ucinewgame nur bei einer wirklich neuen Partie senden.

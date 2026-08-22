@@ -145,8 +145,10 @@ class FloatingBubbleService : Service() {
         // Takt der Aufsicht über die Beobachtungsschleife
         private const val LOOP_SUPERVISOR_INTERVAL_MS = 2000L
 
-        // Bleibt der Herzschlag der Schleife so lange aus, gilt sie als tot
-        private const val LOOP_DEAD_AFTER_MS = 3000L
+        // Bleibt der Herzschlag der Schleife so lange aus, obwohl gerade nicht gerechnet wird,
+        // gilt sie als tot. Reichlich über allem, was ein gewöhnlicher Takt braucht - ein zu
+        // knapper Wert bricht gesunde Arbeit ab, und das ist schlimmer als eine späte Rettung.
+        private const val LOOP_DEAD_AFTER_MS = 15_000L
 
         // So lange wird höchstens auf einen frischen Frame gewartet
         private const val FRAME_WAIT_MS = 400L
@@ -171,13 +173,14 @@ class FloatingBubbleService : Service() {
         // Ab dieser Dauer gilt eine laufende Analyse als hängengeblieben und ihre Sperre wird
         // gelöst. Deutlich über der Obergrenze eines Durchgangs, damit zuerst dessen eigene
         // Zeitgrenze greift und dies hier nur der letzte Rückhalt ist.
-        private const val STUCK_ANALYSIS_MS = 12_000L
+        private const val STUCK_ANALYSIS_MS = 30_000L
 
         // Obergrenze für einen kompletten Analysedurchgang (Aufnahme, Erkennung, Bedenkzeit).
-        // Reichlich bemessen: die Bedenkzeit sind 2 Sekunden, alles Übrige liegt im
-        // Millisekundenbereich. Muss unter STUCK_ANALYSIS_MS bleiben, damit ein Durchgang sich
-        // selbst beendet, bevor der Rückhalt eingreift.
-        private const val ANALYSIS_TIMEOUT_MS = 8000L
+        // Reichlich bemessen, und das aus gutem Grund: Der allererste Aufruf zahlt zusätzlich den
+        // Start des Engine-Prozesses samt Entpacken der Binary und Handshake. Eine zu knappe Grenze
+        // bricht ihn ab, die Engine bleibt halb gestartet zurück, und es zieht der Regelgenerator.
+        // Muss unter STUCK_ANALYSIS_MS bleiben, damit ein Durchgang sich selbst beendet.
+        private const val ANALYSIS_TIMEOUT_MS = 20_000L
     }
 
     private lateinit var windowManager: WindowManager
@@ -1190,15 +1193,23 @@ class FloatingBubbleService : Service() {
                 delay(LOOP_SUPERVISOR_INTERVAL_MS)
                 if (!autoAnalyseEnabled) continue
 
+                val jetzt = System.currentTimeMillis()
                 val job = monitorJob
-                val stillerHerzschlag = System.currentTimeMillis() - lastTickAt > LOOP_DEAD_AFTER_MS
                 val jobTot = job == null || !job.isActive
 
-                if (jobTot || stillerHerzschlag) {
+                // Ein Takt, in dem gerechnet wird, dauert länger als die Bedenkzeit - er ist dann
+                // nicht tot, sondern beschäftigt. Wer das verwechselt, bricht die Berechnung mitten
+                // im Zug ab und bringt die Engine aus dem Tritt. Deshalb zählt der Herzschlag nur,
+                // solange gerade nicht gerechnet wird; für eine hängende Berechnung gibt es die
+                // eigene, deutlich längere Frist.
+                val analyseHaengt = isAnalyzing && jetzt - analysisStartedAt > STUCK_ANALYSIS_MS
+                val herzschlagWeg = !isAnalyzing && jetzt - lastTickAt > LOOP_DEAD_AFTER_MS
+
+                if (jobTot || analyseHaengt || herzschlagWeg) {
                     Log.w(
                         TAG,
-                        "Beobachtung reagiert nicht (Auftrag tot=$jobTot, letzter Takt vor " +
-                            "${System.currentTimeMillis() - lastTickAt} ms), sie wird neu gestartet"
+                        "Beobachtung reagiert nicht (Auftrag tot=$jobTot, Analyse hängt=$analyseHaengt," +
+                            " letzter Takt vor ${jetzt - lastTickAt} ms), sie wird neu gestartet"
                     )
                     // Eine hängengebliebene Sperre würde die neue Schleife sofort wieder blockieren
                     isAnalyzing = false

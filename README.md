@@ -91,7 +91,10 @@
   - ein **unverändertes Brett gilt nicht als Stillstand**: Der Gegner überlegt, das ist der
     Normalfall und kein Grund einzugreifen;
   - über der Beobachtungsschleife wacht eine **Aufsicht**: Die Schleife meldet bei jedem Takt einen
-    Herzschlag; bleibt er drei Sekunden aus oder ist ihr Auftrag beendet, wird sie neu angeworfen.
+    Herzschlag; bleibt er aus, obwohl gerade nicht gerechnet wird, oder ist ihr Auftrag beendet,
+    wird sie neu angeworfen. Der Herzschlag zählt bewusst nur außerhalb einer laufenden Berechnung -
+    ein Takt, in dem gerechnet wird, dauert länger als die Bedenkzeit und ist nicht tot, sondern
+    beschäftigt. Wer das verwechselt, bricht die Berechnung mitten im Zug ab.
     Der erste Zug nach dem Einschalten stammt nämlich nicht aus der Schleife, sondern unmittelbar
     aus dem Einschalten - hörte sie auf, kam genau ein Zug und danach keiner mehr, bis der Nutzer
     von Hand aus- und wieder einschaltete. Die Aufsicht übernimmt jetzt genau das;
