@@ -177,6 +177,9 @@ class FloatingBubbleService : Service() {
         // So lange wird höchstens auf einen frischen Frame gewartet
         private const val FRAME_WAIT_MS = 400L
 
+        // So oft darf ein Zug nicht auf dem Brett ankommen, bevor der Nutzer es erfährt
+        private const val MAX_FAILED_MOVE_ATTEMPTS = 3
+
         // So viele fortgeschriebene Züge, dann wird die Stellung gegen den Bildschirm geprüft.
         // Sechs Halbzüge sind ein guter Kompromiss: Ein Ablesefehler wirkt sich höchstens ein paar
         // Züge lang aus, und der Abgleich fällt kaum ins Gewicht.
@@ -435,6 +438,26 @@ class FloatingBubbleService : Service() {
      * Brettausschnitt, an dem die Berührungen des Auto-Zugs hängen.
      */
     private var movesSinceVerification = 0
+
+    /**
+     * Warten wir gerade berechtigt auf den Gegner?
+     *
+     * Gesetzt, sobald ein eigener Zug tatsächlich auf dem Brett steht; gelöscht, sobald ein Zug
+     * für uns berechnet und getippt wurde. Der Unterschied ist wesentlich für die Aufsichtsuhr:
+     * Ein unverändertes Brett ist nur dann kein Stillstand, wenn der Gegner am Zug ist. Sind
+     * dagegen wir am Zug und es passiert nichts, ist das genau der Fall, für den es die Uhr gibt -
+     * etwa weil eine Berührung dauerhaft danebengeht. Ohne diese Unterscheidung galt auch das als
+     * Fortschritt, und DuLo wartete auf einen Zug, der nie kommt.
+     */
+    private var waitingForOpponent = false
+
+    /**
+     * Wie oft in Folge ein getippter Zug nicht auf dem Brett angekommen ist.
+     *
+     * Nach mehreren Fehlschlägen hat es keinen Sinn, es weiter mit denselben Mitteln zu versuchen;
+     * dann wird der Nutzer benachrichtigt, statt still weiterzuarbeiten.
+     */
+    private var failedMoveAttempts = 0
 
     /**
      * Zeitpunkt des letzten Takts der Beobachtungsschleife.
@@ -1165,6 +1188,8 @@ class FloatingBubbleService : Service() {
         awaitingBoardChange = false
         fallbackReported = false
         projectionFailures = 0
+        waitingForOpponent = false
+        failedMoveAttempts = 0
         startAnalysis(force = false)
         startMonitoring()
         startLoopSupervisor()
@@ -1387,22 +1412,37 @@ class FloatingBubbleService : Service() {
             if (pendingRetries == 0 && zugWiederholen != null && felder != null && lastBoardRect != null) {
                 pendingRetries++
                 pendingSince = System.currentTimeMillis()
+        // Ab jetzt sind wir am Zug - Warten wäre hier kein Fortschritt mehr
+        waitingForOpponent = false
                 Log.i(TAG, "Zug $zugWiederholen kam nicht an, zweiter Versuch")
                 performAutoMove(lastBoardRect!!, felder, isPromotion = zugWiederholen.length >= 5)
                 return
             }
 
-            // Auch der zweite Versuch blieb wirkungslos: Die gemerkte Stellung wird gegen den
-            // Bildschirm geprüft, statt weiter auf gut Glück zu warten. Bewusst ohne markProgress,
-            // damit die Aufsichtsuhr scharf bleibt.
-            Log.i(TAG, "Zug kam auch im zweiten Versuch nicht an, Stellung wird gegen den Bildschirm geprüft")
+            // Auch der zweite Versuch blieb wirkungslos. Jetzt wird alles neu aufgenommen: Die
+            // vollständige Erkennung vermisst das Brett ohnehin neu, damit stimmen auch die
+            // Bildpunkte wieder, auf die getippt wird. force=true, weil die Stellung sonst als
+            // unverändert durchginge und gar kein Zug entstünde - und dann wartete DuLo wieder auf
+            // einen Gegner, der seinerseits auf uns wartet.
             clearPendingMove()
+            failedMoveAttempts++
             referenceCells = cells
             lastTickCells = cells
             changePendingTicks = 0
             stillTicks = 0
             ticksSinceAnalysis = 0
-            startAnalysis(force = false)
+
+            if (failedMoveAttempts >= MAX_FAILED_MOVE_ATTEMPTS) {
+                // Es hat keinen Sinn, es weiter mit denselben Mitteln zu versuchen. Der Nutzer
+                // erfährt davon, statt dass DuLo still weiterarbeitet.
+                Log.w(TAG, "Zug kam $failedMoveAttempts Mal nicht an, es wird gemeldet")
+                failedMoveAttempts = 0
+                reportError("Der Zug kommt auf dem Brett nicht an")
+                return
+            }
+
+            Log.i(TAG, "Zug kam auch im zweiten Versuch nicht an, es wird neu vermessen und erneut versucht")
+            startAnalysis(force = true)
             return
         }
 
@@ -1420,8 +1460,10 @@ class FloatingBubbleService : Service() {
                 pendingFromCell, pendingToCell
             )
             if (played) {
-                Log.i(TAG, "Empfohlener Zug wurde ausgeführt, Pfeil wird weggenommen")
+                Log.i(TAG, "Empfohlener Zug wurde ausgeführt")
                 markProgress()
+                waitingForOpponent = true
+                failedMoveAttempts = 0
                 // Das gemerkte Brett um den eigenen Zug fortschreiben. Ohne das sähe der nächste
                 // Vergleich den eigenen und den gegnerischen Zug zusammen und könnte niemanden
                 // mehr eindeutig benennen - die Anzeige bliebe stehen.
@@ -1488,7 +1530,9 @@ class FloatingBubbleService : Service() {
         // gemerkte Stellung weg und tippte einen Zug, obwohl gar nicht wir am Zug waren. Der wurde
         // abgelehnt, es folgten acht Sekunden Verfallszeit - und genau in dieser Zeit zog der
         // Gegner. Wer lange überlegt, hat DuLo damit zuverlässig aus dem Tritt gebracht.
-        if (!changedSinceAnalysis && pendingSince == 0L) markProgress()
+        // Nur wenn wir berechtigt auf den Gegner warten. Sind wir am Zug und es tut sich nichts,
+        // muss die Aufsichtsuhr laufen dürfen.
+        if (!changedSinceAnalysis && pendingSince == 0L && waitingForOpponent) markProgress()
 
         val standsStill = stillTicks >= STILL_TICKS_REQUIRED
 
@@ -1676,8 +1720,10 @@ class FloatingBubbleService : Service() {
         undecidedRuns = 0
 
         if (moverIsWhite == myColourIsWhite) {
-            // Eigener Zug: die Empfehlung ist erledigt
+            // Eigener Zug: die Empfehlung ist erledigt, jetzt ist der Gegner dran
             clearPendingMove()
+            waitingForOpponent = true
+            failedMoveAttempts = 0
             return true
         }
 
@@ -2243,7 +2289,9 @@ class FloatingBubbleService : Service() {
                             if (diff.moverIsWhite == myColourIsWhite) {
                                 // Eigener Zug ausgeführt: die Empfehlung ist erledigt, Pfeil weg,
                                 // und es wird gewartet, bis der Gegner gezogen hat.
-                                Log.i(TAG, "Eigener Zug erkannt, Pfeil wird ausgeblendet")
+                                Log.i(TAG, "Eigener Zug erkannt")
+                                waitingForOpponent = true
+                                failedMoveAttempts = 0
                                 clearPendingMove()
                                 return@launch
                             }

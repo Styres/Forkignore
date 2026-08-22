@@ -88,8 +88,10 @@
     ab da auf einer Stellung, die es gar nicht gibt - ihre Vorschläge sind dann auf dem echten
     Brett Unsinn und verschenken Figuren, ohne dass etwas nach einem Fehler aussieht. Der Abgleich
     bringt zugleich den Brettausschnitt auf den neuesten Stand, an dem die Berührungen hängen;
-  - ein **unverändertes Brett gilt nicht als Stillstand**: Der Gegner überlegt, das ist der
-    Normalfall und kein Grund einzugreifen;
+  - ein **unverändertes Brett gilt nicht als Stillstand** - aber nur, solange der Gegner am Zug
+    ist. Sind wir am Zug und es tut sich nichts, ist das genau der Fall, für den es die Aufsichtsuhr
+    gibt: etwa weil eine Berührung dauerhaft danebengeht. Ohne diese Unterscheidung galt auch das
+    als Fortschritt, und DuLo wartete auf einen Zug, der nie kommt;
   - über der Beobachtungsschleife wacht eine **Aufsicht**: Die Schleife meldet bei jedem Takt einen
     Herzschlag; bleibt er aus, obwohl gerade nicht gerechnet wird, oder ist ihr Auftrag beendet,
     wird sie neu angeworfen. Der Herzschlag zählt bewusst nur außerhalb einer laufenden Berechnung -
