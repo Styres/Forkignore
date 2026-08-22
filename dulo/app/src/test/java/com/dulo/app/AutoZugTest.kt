@@ -154,4 +154,58 @@ class AutoZugTest {
         assertEquals('R', nachher[7][5])
         assertEquals("kq", UltraRobustClassifier.updateCastlingRights("KQkq", "e1g1", 'K'))
     }
+
+    @Test
+    fun testGewoehnlicherZugBrauchtZweiBeruehrungen() {
+        // e2 = Feld 52, e4 = Feld 36 aus weißer Sicht
+        assertEquals(
+            listOf(52, 36),
+            UltraRobustClassifier.tapCellsForMove("e2e4", isWhitePerspective = true)
+        )
+    }
+
+    @Test
+    fun testUmwandlungBrauchtEineDritteBeruehrung() {
+        // Die Oberfläche fragt nach der Figur; die Auswahl erscheint auf dem Umwandlungsfeld
+        // selbst, mit der Dame obenauf. Der dritte Tipp geht deshalb noch einmal dorthin.
+        // e7 = Feld 12, e8 = Feld 4
+        assertEquals(
+            listOf(12, 4, 4),
+            UltraRobustClassifier.tapCellsForMove("e7e8q", isWhitePerspective = true)
+        )
+    }
+
+    @Test
+    fun testUmwandlungAusSchwarzerSicht() {
+        // Aus schwarzer Sicht kehren sich die Feldnummern um: e2 = 63 - 52 = 11, e1 = 63 - 60 = 3
+        assertEquals(
+            listOf(11, 3, 3),
+            UltraRobustClassifier.tapCellsForMove("e2e1q", isWhitePerspective = false)
+        )
+    }
+
+    @Test
+    fun testUnbrauchbarerZugLiefertKeineBeruehrungen() {
+        assertNull(UltraRobustClassifier.tapCellsForMove("(none)", isWhitePerspective = true))
+        assertNull(UltraRobustClassifier.tapCellsForMove("e2", isWhitePerspective = true))
+        assertNull(UltraRobustClassifier.tapCellsForMove("", isWhitePerspective = true))
+    }
+
+    @Test
+    fun testUmgewandelteFigurLandetAufDemBrett() {
+        val vorher = board(
+            "........",
+            "....P...",
+            "........",
+            "........",
+            "........",
+            "........",
+            "........",
+            "....K..k"
+        )
+        val nachher = UltraRobustClassifier.applyUciMove(vorher, "e7e8q")
+        requireNotNull(nachher)
+        assertEquals('Q', nachher[0][4])
+        assertEquals('.', nachher[1][4])
+    }
 }

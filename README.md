@@ -116,7 +116,14 @@
   - trägt die Dauerbeobachtung selbst: rechnet bei jedem Zug des Gegners und tippt den Zug dann
     auch. Ein zweiter Schalter muss dafür nicht eingeschaltet werden;
   - der Bildschirm bleibt dabei unberührt: der Zug wird ausgeführt, nicht angezeigt;
-  - getippt wird erst das Startfeld, dann das Zielfeld, mit 0,3 Sekunden Pause dazwischen. Die
+  - getippt wird erst das Startfeld, dann das Zielfeld, mit 0,35 Sekunden Pause dazwischen. Die
+    Pause ist mit Absicht reichlich: Die erste Berührung wählt die Figur aus, und kommt die zweite
+    zu früh, wird sie verworfen und der Zug findet nicht statt;
+  - bei einer **Umwandlung** kommt eine dritte Berührung auf dasselbe Zielfeld dazu: Dort erscheint
+    die Auswahl der neuen Figur mit der Dame obenauf;
+  - nach der letzten Berührung ist DuLo schon nach 0,1 Sekunden wieder aufnahmebereit. Die
+    Vergleichsbasis wird dabei erst genommen, wenn das Brett zwischen zwei Takten stillsteht - die
+    Zuganimation muss also nicht pauschal abgewartet werden. Die
     Feldmitten kommen aus dem vermessenen Brettrechteck. Blase und Menü werden für die Dauer der
     Berührungen durchlässig geschaltet, sonst fangen sie den eigenen Zug ab, wenn sie gerade über
     dem Brett liegen;

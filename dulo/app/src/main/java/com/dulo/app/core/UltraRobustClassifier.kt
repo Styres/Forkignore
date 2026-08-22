@@ -962,6 +962,25 @@ class UltraRobustClassifier(context: Context? = null) {
         }
 
         /**
+         * Reine Funktion: welche Bildschirmfelder muss der Auto-Zug antippen?
+         *
+         * Ein gewöhnlicher Zug braucht zwei Berührungen: Figur wählen, Ziel wählen. Eine
+         * Umwandlung braucht eine dritte, denn die Oberfläche fragt danach, welche Figur es werden
+         * soll. Diese Auswahl erscheint in aller Regel auf dem Umwandlungsfeld selbst, mit der
+         * Dame obenauf - so machen es die verbreiteten Schachoberflächen. Der dritte Tipp geht
+         * deshalb noch einmal auf dasselbe Feld.
+         *
+         * @param uci Zug in UCI-Schreibweise, bei einer Umwandlung mit fünftem Zeichen
+         * @return Feldnummern in der Reihenfolge, in der getippt wird, oder null bei unbrauchbarem Zug
+         */
+        fun tapCellsForMove(uci: String, isWhitePerspective: Boolean): List<Int>? {
+            if (uci.length < 4) return null
+            val from = screenCellForSquare(uci.substring(0, 2), isWhitePerspective) ?: return null
+            val to = screenCellForSquare(uci.substring(2, 4), isWhitePerspective) ?: return null
+            return if (uci.length >= 5) listOf(from, to, to) else listOf(from, to)
+        }
+
+        /**
          * Reine Funktion: wurde der empfohlene Zug auf dem Brett ausgeführt?
          *
          * Das ist die Abbruchbedingung für den Pfeil und arbeitet bewusst nur auf den beiden

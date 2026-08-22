@@ -115,13 +115,20 @@ class FloatingBubbleService : Service() {
         // gar keine Anzeige mehr.
         private const val MAX_UNDECIDED_RUNS = 3
 
-        // Pause zwischen den beiden Berührungen des Auto-Zugs. Lang genug, dass die Oberfläche
-        // die erste als Auswahl der Figur verarbeitet, kurz genug, um nicht zu bremsen.
-        private const val AUTO_MOVE_DELAY_MS = 160L
+        // Pause zwischen zwei Berührungen des Auto-Zugs.
+        //
+        // Reichlich bemessen, und das mit Absicht: Die erste Berührung wählt die Figur aus, und
+        // die Oberfläche braucht dafür ihren Moment. Kommt die zweite zu früh, wird sie verworfen
+        // und der Zug findet nicht statt. Diese Pause verzögert nur den eigenen Zug um Bruchteile
+        // einer Sekunde, ein verworfener Zug kostet dagegen acht Sekunden bis zum Verfall.
+        private const val AUTO_MOVE_DELAY_MS = 350L
 
-        // Beruhigungszeit nach der letzten Berührung: so lange läuft noch die Zuganimation.
-        // Sie verzögert nicht den eigenen Zug, sondern nur das Erkennen des nächsten gegnerischen.
-        private const val AUTO_MOVE_SETTLE_MS = 350L
+        // Beruhigungszeit nach der letzten Berührung, bevor wieder gemessen wird.
+        //
+        // Bewusst knapp: Sie bestimmt, wie schnell DuLo nach dem eigenen Zug wieder aufnahmebereit
+        // ist. Die Zuganimation muss dafür nicht abgewartet werden - die Vergleichsbasis wird
+        // ohnehin erst genommen, wenn das Brett zwei Takte lang stillsteht (needStableReference).
+        private const val AUTO_MOVE_SETTLE_MS = 100L
 
         // So lange wird auf die Ausführung eines vorgeschlagenen Zuges gewartet, danach gilt er
         // als nicht gespielt und die Stellung wird neu erkannt.
@@ -340,6 +347,17 @@ class FloatingBubbleService : Service() {
      * Durchgänge je Sekunde, ohne dass ein weiterer Versuch etwas brächte.
      */
     private var nextFullScanAt = 0L
+
+    /**
+     * Darf die nächste Vergleichsbasis erst genommen werden, wenn das Brett stillsteht?
+     *
+     * Gesetzt nach dem eigenen Zug. Die Zuganimation läuft dann noch, und ein in diesem Moment
+     * festgehaltenes Bild wäre ein Zwischenstand: Der Rest der Animation sähe danach aus wie ein
+     * Zug des Gegners und würde als solcher in die gemerkte Stellung geschrieben - ab da stimmt
+     * nichts mehr. Statt pauschal zu warten, wird gewartet, bis sich zwischen zwei Takten nichts
+     * mehr ändert. Das ist schneller und zugleich sicherer.
+     */
+    private var needStableReference = false
     /** Beginn des laufenden Analysedurchgangs; Grundlage für den Wachhund gegen hängende Durchgänge */
     @Volatile
     private var analysisStartedAt = 0L
@@ -851,13 +869,13 @@ class FloatingBubbleService : Service() {
      * beobachtet werden. Zwischen den Berührungen liegt eine kurze Pause, sonst wertet die App
      * darunter die zweite womöglich als Doppeltippen.
      */
-    private fun performAutoMove(boardRect: Rect, fromCell: Int, toCell: Int) {
+    private fun performAutoMove(boardRect: Rect, tapCells: List<Int>, isPromotion: Boolean) {
         if (!autoMoveEnabled) return
         if (!DuloAutoMoveService.isAvailable) {
             Log.w(TAG, "Auto-Zug angefordert, aber der Bedienungshilfen-Dienst ist nicht freigegeben")
             return
         }
-        if (fromCell !in 0..63 || toCell !in 0..63) return
+        if (tapCells.isEmpty() || tapCells.any { it !in 0..63 }) return
 
         val stepX = boardRect.width() / 8.0f
         val stepY = boardRect.height() / 8.0f
@@ -869,8 +887,12 @@ class FloatingBubbleService : Service() {
             return (boardRect.left + (col + 0.5f) * stepX) to (boardRect.top + (row + 0.5f) * stepY)
         }
 
-        val points = listOf(centreOf(fromCell), centreOf(toCell))
-        Log.i(TAG, "Auto-Zug tippt auf ${points.map { "(${it.first.toInt()}, ${it.second.toInt()})" }}")
+        val points = tapCells.map { centreOf(it) }
+        Log.i(
+            TAG,
+            "Auto-Zug tippt auf ${points.map { "(${it.first.toInt()}, ${it.second.toInt()})" }}" +
+                (if (isPromotion) " (mit Auswahl der Umwandlungsfigur)" else "")
+        )
 
         // Blase und Menü aus dem Weg: sonst fangen sie die eigene Berührung ab, wenn sie gerade
         // über dem Brett liegen.
@@ -1098,9 +1120,10 @@ class FloatingBubbleService : Service() {
                     }
                 }
                 clearPendingMove()
-                // Von hier an gilt der Bildschirm als neue Vergleichsbasis: alles Weitere ist
-                // der Zug des Gegners.
-                referenceCells = cells
+                // Die neue Vergleichsbasis wird erst genommen, wenn die Zuganimation durch ist.
+                // Sonst zählte deren Rest als Zug des Gegners.
+                referenceCells = null
+                needStableReference = true
                 lastTickCells = cells
                 changePendingTicks = 0
                 stillTicks = 0
@@ -1111,8 +1134,19 @@ class FloatingBubbleService : Service() {
 
         val reference = referenceCells
         if (reference == null) {
+            // Steht noch eine Animation aus, wird gewartet, bis sich zwischen zwei Takten nichts
+            // mehr ändert - dann erst taugt das Bild als Vergleichsbasis.
+            if (needStableReference) {
+                val ruhig = lastTickCells?.let {
+                    !UltraRobustClassifier.boardCellsChanged(it.means, it.stds, cells.means, cells.stds)
+                } ?: false
+                lastTickCells = cells
+                if (!ruhig) return
+                needStableReference = false
+            } else {
+                lastTickCells = cells
+            }
             referenceCells = cells
-            lastTickCells = cells
             return
         }
 
@@ -1220,7 +1254,13 @@ class FloatingBubbleService : Service() {
 
         // Auto-Zug: denselben Zug gleich selbst tippen. Der Pfeil verschwindet danach über den
         // gewöhnlichen Weg, sobald die Figur auf dem Zielfeld angekommen ist.
-        performAutoMove(boardRect, from, to)
+        // Ein fünftes Zeichen im Zug bedeutet Umwandlung - dann ist noch die Figur zu wählen.
+        // Erscheint keine Auswahl, trifft der dritte Tipp nur die eben gezogene Figur und markiert
+        // sie; der Zug steht dann bereits, und die Markierung ist im nächsten Takt wieder weg.
+        val tapCells = UltraRobustClassifier.tapCellsForMove(bestMove, isWhitePerspective)
+        if (tapCells != null) {
+            performAutoMove(boardRect, tapCells, isPromotion = bestMove.length >= 5)
+        }
     }
 
     /**
@@ -1423,6 +1463,8 @@ class FloatingBubbleService : Service() {
     /** Vergleichsbasis und Zähler zurücksetzen; der nächste Takt nimmt das Brett neu auf */
     private fun resetMonitorState() {
         referenceCells = null
+        // Nach einer Analyse kann noch eine Animation laufen; die Basis wartet auf Ruhe
+        needStableReference = true
         lastTickCells = null
         // lastKnownCells bleibt bewusst stehen: das ist kein Vergleichsmaßstab, sondern nur die
         // zuletzt gelesene Abtastung. Sie wird gebraucht, wenn gerade kein neuer Frame kommt -
