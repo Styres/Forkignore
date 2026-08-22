@@ -242,4 +242,75 @@ class BrettVergleichTest {
         assertEquals(false, UltraRobustClassifier.sideFromStartingRows(screen))
         assertTrue(UltraRobustClassifier.isFreshStartPosition(screen))
     }
+
+    @Test
+    fun testZugNachspielenVerschiebtDieFigur() {
+        val nachher = UltraRobustClassifier.applyUciMove(start, "e2e4")
+        requireNotNull(nachher)
+        assertEquals('.', nachher[6][4])
+        assertEquals('P', nachher[4][4])
+        // Der Vergleich mit dem nachgespielten Brett meldet danach keine Veränderung mehr
+        assertEquals(0, UltraRobustClassifier.diffBoards(nachher, nachher).changedSquares)
+    }
+
+    @Test
+    fun testUmwandlungWirdNachgespielt() {
+        val vorher = board(
+            "........",
+            "..P.....",
+            "........",
+            "........",
+            "........",
+            "........",
+            "........",
+            "....K..k"
+        )
+        val nachher = UltraRobustClassifier.applyUciMove(vorher, "c7c8q")
+        requireNotNull(nachher)
+        assertEquals('Q', nachher[0][2])
+        assertEquals('.', nachher[1][2])
+    }
+
+    @Test
+    fun testRochadeWirdMitTurmNachgespielt() {
+        val vorher = board(
+            "....k...",
+            "........",
+            "........",
+            "........",
+            "........",
+            "........",
+            "........",
+            "R...K..R"
+        )
+        val kurz = UltraRobustClassifier.applyUciMove(vorher, "e1g1")
+        requireNotNull(kurz)
+        assertEquals('K', kurz[7][6])
+        assertEquals('R', kurz[7][5])
+        assertEquals('.', kurz[7][7])
+
+        val lang = UltraRobustClassifier.applyUciMove(vorher, "e1c1")
+        requireNotNull(lang)
+        assertEquals('K', lang[7][2])
+        assertEquals('R', lang[7][3])
+        assertEquals('.', lang[7][0])
+    }
+
+    @Test
+    fun testZugVonLeeremFeldWirdAbgelehnt() {
+        assertNull(UltraRobustClassifier.applyUciMove(start, "e4e5"))
+        assertNull(UltraRobustClassifier.applyUciMove(start, "xx"))
+    }
+
+    @Test
+    fun testEigenerZugUndGegnerzugZusammenSindUnklar() {
+        // Genau der Fall, den das Nachspielen verhindert: werden beide Züge zusammen verglichen,
+        // taucht auf beiden Seiten etwas Neues auf und der Ziehende ist nicht mehr bestimmbar.
+        val nachEigenem = requireNotNull(UltraRobustClassifier.applyUciMove(start, "e2e4"))
+        val nachGegner = requireNotNull(UltraRobustClassifier.applyUciMove(nachEigenem, "e7e5"))
+
+        assertNull(UltraRobustClassifier.diffBoards(start, nachGegner).moverIsWhite)
+        // Mit nachgespieltem eigenem Zug ist der Gegnerzug dagegen eindeutig
+        assertEquals(false, UltraRobustClassifier.diffBoards(nachEigenem, nachGegner).moverIsWhite)
+    }
 }

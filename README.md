@@ -55,8 +55,10 @@
   - **wer gezogen hat, entscheidet der Brettvergleich**: die beiden zuletzt angenommenen Stellungen
     werden Feld für Feld verglichen. Die Figur, die auf einem Feld neu auftaucht, benennt den
     Ziehenden - das trägt auch beim Schlagzug, bei dem eine Figur der Gegenfarbe verschwindet;
-  - war es der eigene Zug, verschwindet der Pfeil und es passiert nichts weiter; war es der Gegner,
-    wird die nächste Empfehlung berechnet;
+  - **der Pfeil bleibt stehen, bis der empfohlene Zug ausgeführt ist**: dafür genügt es, die beiden
+    Felder des Pfeils nachzusehen - Startfeld leer, Zielfeld besetzt. Genau wie in der Zuganzeige
+    auf lichess verschwindet der Pfeil in dem Moment, in dem die Figur angekommen ist;
+  - spielt man etwas anderes, fällt das nach ein paar Sekunden auf und es wird neu erkannt;
   - ist der Vergleich **nicht eindeutig** (Animation, mehr als vier veränderte Felder,
     widersprüchliche Farben), wird nichts entschieden und die Vergleichsbasis bleibt stehen. Genau
     das ist wichtig: ein stillschweigendes Übergehen würde den Zug des Gegners verschlucken;
@@ -92,7 +94,7 @@ flowchart TD
 
 ## ♟️ Konfiguration der Engine
 
-Die Engine wird beim Handshake auf maximale Spielstärke bei 2 Sekunden Bedenkzeit pro Zug
+Die Engine wird beim Handshake auf maximale Spielstärke bei höchstens 2 Sekunden Bedenkzeit pro Zug
 eingestellt (siehe `StockfishBridge`). Gesetzt wird nur, was die Engine im Handshake als
 unterstützte Option meldet; alles andere wird übersprungen und in der Diagnose vermerkt.
 
@@ -112,7 +114,7 @@ unterstützte Option meldet; alles andere wird übersprungen und in der Diagnose
 | SyzygyProbeDepth    | 1 (nur mit Tablebases)                                                            |
 | SyzygyProbeLimit    | 5 (nur mit Tablebases)                                                            |
 | Syzygy50MoveRule    | true (nur mit Tablebases)                                                         |
-| Suchbefehl          | `go movetime 2000`; `ucinewgame` nur zu Beginn einer neuen Partie                 |
+| Suchbefehl          | `go depth 30 movetime 2000`; `ucinewgame` nur zu Beginn einer neuen Partie        |
 
 Weitere Punkte der Vorgabe:
 

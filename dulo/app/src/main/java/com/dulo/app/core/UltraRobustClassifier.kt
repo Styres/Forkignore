@@ -806,6 +806,120 @@ class UltraRobustClassifier(context: Context? = null) {
         }
 
         /**
+         * Reine Funktion: Bildschirmfeld (0..63, oben links = 0) zu einem Feldnamen wie "e2".
+         *
+         * Der Pfeil wird in Brettkoordinaten berechnet, abgetastet wird aber in Bildschirmfeldern.
+         * Spielt man Schwarz, steht das Brett gedreht - dann kehren sich Reihe und Linie um.
+         *
+         * @param square           Feldname aus dem UCI-Zug, etwa "e2"
+         * @param isWhitePerspective true, wenn die eigenen (weißen) Figuren unten stehen
+         * @return Feldnummer 0..63 oder null, wenn der Feldname unbrauchbar ist
+         */
+        fun screenCellForSquare(square: String, isWhitePerspective: Boolean): Int? {
+            if (square.length < 2) return null
+            val file = square[0] - 'a'
+            val rank = square[1] - '0'
+            if (file !in 0..7 || rank !in 1..8) return null
+            val row = if (isWhitePerspective) 8 - rank else rank - 1
+            val col = if (isWhitePerspective) file else 7 - file
+            return row * 8 + col
+        }
+
+        /**
+         * Reine Funktion: wurde der empfohlene Zug auf dem Brett ausgeführt?
+         *
+         * Das ist die Abbruchbedingung für den Pfeil und arbeitet bewusst nur auf den beiden
+         * betroffenen Feldern - so wie es ein Mensch prüfen würde: steht die Figur jetzt dort,
+         * wo der Pfeil hinzeigt, und ist ihr Startfeld leer?
+         *
+         * Der Umweg über eine vollständige Neuerkennung entfällt damit; die war zu träge und
+         * zu fehleranfällig, um den Pfeil im richtigen Moment wegzunehmen.
+         *
+         * @param fromCell Bildschirmfeld, von dem gezogen werden soll
+         * @param toCell   Bildschirmfeld, auf das gezogen werden soll
+         * @param occupiedLimit Ab dieser Streuung gilt ein Feld als besetzt
+         */
+        fun moveWasPlayed(
+            referenceMeans: FloatArray,
+            referenceStds: FloatArray,
+            currentMeans: FloatArray,
+            currentStds: FloatArray,
+            fromCell: Int,
+            toCell: Int,
+            occupiedLimit: Float = 12f,
+            meanTolerance: Float = 14f,
+            stdTolerance: Float = 10f
+        ): Boolean {
+            if (fromCell !in 0..63 || toCell !in 0..63) return false
+            if (referenceMeans.size < 64 || currentMeans.size < 64) return false
+            if (referenceStds.size < 64 || currentStds.size < 64) return false
+
+            // Startfeld: war besetzt, ist jetzt leer
+            val fromWasOccupied = referenceStds[fromCell] >= occupiedLimit
+            val fromIsEmpty = currentStds[fromCell] < occupiedLimit
+            if (!fromWasOccupied || !fromIsEmpty) return false
+
+            // Zielfeld: dort steht jetzt eine Figur, und sein Aussehen hat sich geändert.
+            // Beides zusammen schließt aus, dass eine reine Hervorhebung des Bretts genügt.
+            val toIsOccupied = currentStds[toCell] >= occupiedLimit
+            val toChanged = abs(currentMeans[toCell] - referenceMeans[toCell]) > meanTolerance ||
+                abs(currentStds[toCell] - referenceStds[toCell]) > stdTolerance
+            return toIsOccupied && toChanged
+        }
+
+        /**
+         * Reine Funktion: spielt einen UCI-Zug auf einem Brett in Standardausrichtung nach.
+         *
+         * Gebraucht, wenn der eigene Zug über die beiden Pfeilfelder erkannt wurde: Dann ist zwar
+         * klar, dass gezogen wurde, aber das gemerkte Brett stünde noch auf der Stellung davor.
+         * Der nächste Vergleich würde dann den eigenen und den gegnerischen Zug zusammen sehen und
+         * niemanden mehr eindeutig benennen können.
+         *
+         * Rochade und Umwandlung werden mitgeführt; en passant nicht, das fällt beim nächsten
+         * Vergleich als gewöhnliche Veränderung auf.
+         *
+         * @return neues Brett oder null, wenn der Zug unbrauchbar ist
+         */
+        fun applyUciMove(board: Array<CharArray>, uci: String): Array<CharArray>? {
+            if (uci.length < 4) return null
+            val fromFile = uci[0] - 'a'
+            val fromRank = uci[1] - '0'
+            val toFile = uci[2] - 'a'
+            val toRank = uci[3] - '0'
+            if (fromFile !in 0..7 || toFile !in 0..7 || fromRank !in 1..8 || toRank !in 1..8) return null
+            if (board.size < 8) return null
+
+            val fromRow = 8 - fromRank
+            val toRow = 8 - toRank
+            val next = Array(board.size) { r -> board[r].copyOf() }
+            val piece = next[fromRow][fromFile]
+            if (piece == '.') return null
+
+            next[fromRow][fromFile] = '.'
+            // Umwandlung: das fünfte Zeichen nennt die neue Figur, die Farbe bleibt
+            val promoted = if (uci.length >= 5) {
+                if (piece.isUpperCase()) uci[4].uppercaseChar() else uci[4].lowercaseChar()
+            } else {
+                piece
+            }
+            next[toRow][toFile] = promoted
+
+            // Rochade: der König geht zwei Linien weit, der Turm springt mit
+            if ((piece == 'K' || piece == 'k') && fromRow == toRow && kotlin.math.abs(toFile - fromFile) == 2) {
+                if (toFile > fromFile) {
+                    // kurze Rochade: Turm von h auf f
+                    next[toRow][5] = next[toRow][7]
+                    next[toRow][7] = '.'
+                } else {
+                    // lange Rochade: Turm von a auf d
+                    next[toRow][3] = next[toRow][0]
+                    next[toRow][0] = '.'
+                }
+            }
+            return next
+        }
+
+        /**
          * Ergebnis des Brettvergleichs zweier aufeinanderfolgender Erkennungen.
          *
          * @param changedSquares Anzahl der Felder, deren Inhalt sich geändert hat

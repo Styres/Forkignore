@@ -46,6 +46,14 @@ class TransparentCanvasOverlay(private val context: Context) {
     private var isShowing = false
     private val scope = CoroutineScope(Dispatchers.Main)
     private var autoDismissJob: Job? = null
+    /**
+     * Eigener Auftrag für die Störungsmeldung.
+     *
+     * Bewusst getrennt vom Pfeil: früher teilten sich beide einen Auftrag, und dessen Abschluss
+     * (ein `hide()`) riss auch einen inzwischen gezeichneten Pfeil wieder ab. Von außen sah es aus,
+     * als würden Pfeil und Meldung gleichzeitig erscheinen und verschwinden.
+     */
+    private var errorJob: Job? = null
 
     private class OverlayDrawView(context: Context) : View(context) {
         var boardRect: Rect? = null
@@ -202,6 +210,8 @@ class TransparentCanvasOverlay(private val context: Context) {
             initOverlayView()
         }
 
+        errorJob?.cancel()
+        errorJob = null
         overlayView?.apply {
             this.errorMessage = null
             this.statusAlpha = 1f
@@ -234,6 +244,9 @@ class TransparentCanvasOverlay(private val context: Context) {
             initOverlayView()
         }
         val view = overlayView ?: return
+        // Pfeil und Meldung schließen einander aus: die Meldung ersetzt den Pfeil
+        autoDismissJob?.cancel()
+        autoDismissJob = null
         view.errorMessage = reason
         view.boardRect = null
         view.moveInfo = null
@@ -241,12 +254,38 @@ class TransparentCanvasOverlay(private val context: Context) {
         view.postInvalidate()
         setContentVisible(true)
 
-        autoDismissJob?.cancel()
-        autoDismissJob = scope.launch {
+        errorJob?.cancel()
+        errorJob = scope.launch {
             animateStatusAlpha(view, from = 0f, to = 1f, durationMs = FADE_IN_MS)
             delay(STATUS_HOLD_MS)
             animateStatusAlpha(view, from = 1f, to = 0f, durationMs = FADE_OUT_MS)
-            hide()
+            // Nur aufräumen, solange die Meldung noch das ist, was angezeigt wird. Kam
+            // zwischenzeitlich ein Pfeil, bleibt der stehen.
+            if (view.errorMessage != null) {
+                view.errorMessage = null
+                view.statusAlpha = 1f
+                view.postInvalidate()
+            }
+        }
+    }
+
+    /**
+     * Alles wegnehmen und jede laufende Animation abbrechen.
+     *
+     * Wird beim Ausschalten und beim Beenden gebraucht: eine Meldung, die noch in ihrer Haltezeit
+     * steht, darf nicht weiterlaufen, nachdem der Nutzer abgeschaltet hat.
+     */
+    fun dismissAll() {
+        autoDismissJob?.cancel()
+        autoDismissJob = null
+        errorJob?.cancel()
+        errorJob = null
+        overlayView?.apply {
+            errorMessage = null
+            moveInfo = null
+            boardRect = null
+            statusAlpha = 1f
+            postInvalidate()
         }
     }
 
@@ -318,6 +357,8 @@ class TransparentCanvasOverlay(private val context: Context) {
     fun clearSuggestion() {
         autoDismissJob?.cancel()
         autoDismissJob = null
+        errorJob?.cancel()
+        errorJob = null
         overlayView?.apply {
             moveInfo = null
             boardRect = null
@@ -340,6 +381,8 @@ class TransparentCanvasOverlay(private val context: Context) {
     fun hide() {
         autoDismissJob?.cancel()
         autoDismissJob = null
+        errorJob?.cancel()
+        errorJob = null
         overlayView?.let {
             if (isShowing) {
                 windowManager.removeView(it)

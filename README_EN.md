@@ -116,7 +116,7 @@ cd dulo
 
 ## ♟️ Engine Configuration
 
-The engine is configured during the UCI handshake for maximum strength at 2 seconds per move (see
+The engine is configured during the UCI handshake for maximum strength at up to 2 seconds per move (see
 `StockfishBridge`). Only options the engine advertises during the handshake are sent; anything else
 is skipped and noted in the diagnostics.
 
@@ -136,7 +136,7 @@ is skipped and noted in the diagnostics.
 | SyzygyProbeDepth    | 1 (only with tablebases)                                                     |
 | SyzygyProbeLimit    | 5 (only with tablebases)                                                     |
 | Syzygy50MoveRule    | true (only with tablebases)                                                  |
-| Search command      | `go movetime 2000`; `ucinewgame` only at the start of a new game             |
+| Search command      | `go depth 30 movetime 2000`; `ucinewgame` only at the start of a new game    |
 
 - **Binary variant**: if variants such as `libstockfish-vnni512.so`, `-bmi2`, `-avx2`,
   `-armv8-i8mm` or `-armv8-dotprod` ship alongside the generic `libstockfish.so`, the app picks the

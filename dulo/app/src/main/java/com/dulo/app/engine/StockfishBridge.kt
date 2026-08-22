@@ -245,6 +245,25 @@ object StockfishBridge {
     // auf voller Stärke (Threads = Kerne minus 1, großer Hash, warme Transpositionstabelle).
     const val DEFAULT_MOVE_TIME_MS = 2000L
 
+    /**
+     * Obergrenze der Suchtiefe, so wie sie Analysewerkzeuge wie lichess verwenden.
+     *
+     * Gesucht wird mit "go depth D movetime T": Stockfish hört auf, sobald eine der beiden Grenzen
+     * erreicht ist. In einer geklärten Stellung ist die Suche damit früher fertig, ohne dass es
+     * Spielstärke kostet - in einer scharfen Stellung bleiben die vollen zwei Sekunden.
+     */
+    const val MAX_SEARCH_DEPTH = 30
+
+    /**
+     * Reine Funktion: baut den Suchbefehl.
+     *
+     * Beide Grenzen zusammen, weil sie unterschiedliche Fälle abdecken: die Tiefe beendet eine
+     * längst entschiedene Suche früh, die Zeit deckelt eine Stellung, in der die Tiefe nicht
+     * erreicht wird.
+     */
+    fun buildGoCommand(moveTimeMs: Long, maxDepth: Int = MAX_SEARCH_DEPTH): String =
+        "go depth $maxDepth movetime $moveTimeMs"
+
     // Von der laufenden Engine per "option name ..." gemeldete Optionsnamen.
     // Gesetzt wird nur, was die Engine auch kennt (ältere Versionen kennen z. B. kein NumaPolicy).
     private val supportedOptions = mutableSetOf<String>()
@@ -725,7 +744,7 @@ object StockfishBridge {
 
             val sanitizedFen = sanitizeCastlingRights(fen)
             sendCommand("position fen $sanitizedFen")
-            sendCommand("go movetime $moveTimeMs")
+            sendCommand(buildGoCommand(moveTimeMs))
 
             var lastEval: EngineEvaluation? = null
             var bestMoveResult: String? = null
