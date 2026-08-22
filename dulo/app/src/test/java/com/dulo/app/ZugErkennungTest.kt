@@ -66,16 +66,21 @@ class ZugErkennungTest {
     }
 
     @Test
-    fun testFelderUnterDemPfeilStoerenNicht() {
+    fun testHervorhebungAufLeeremFeldStoertNicht() {
+        // Duolingo hebt Start- und Zielfeld des letzten Zuges farbig hervor und nimmt die
+        // vorherige Hervorhebung wieder weg. Ein leeres Feld ändert dabei seine Helligkeit,
+        // ohne dass dort etwas stünde.
+        //
+        // Früher brach die Erkennung genau daran ab - und weil nach jedem Zug eine solche
+        // Hervorhebung auf dem Brett liegt, fiel praktisch jeder Zug durch. Entscheidend ist
+        // allein die Streuung: eine Farbfläche bringt keine Kanten mit, eine Figur schon.
         val (vorherM, vorherS) = brett(mapOf(52 to figur))
         val (nachherM, nachherS) = brett(mapOf(36 to figur))
-        // Auf Feld 20 liegt der Pfeil und hellt das leere Feld deutlich auf
         nachherM[20] = 240f
 
-        assertNull(UltraRobustClassifier.detectMove(vorherM, vorherS, nachherM, nachherS))
         assertEquals(
             UltraRobustClassifier.DetectedMove(52, 36),
-            UltraRobustClassifier.detectMove(vorherM, vorherS, nachherM, nachherS, ignoredCells = setOf(20))
+            UltraRobustClassifier.detectMove(vorherM, vorherS, nachherM, nachherS)
         )
     }
 

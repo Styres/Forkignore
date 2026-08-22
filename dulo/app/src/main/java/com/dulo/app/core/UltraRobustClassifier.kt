@@ -1137,12 +1137,19 @@ class UltraRobustClassifier(context: Context? = null) {
             ignoredCells: Set<Int> = emptySet(),
             occupiedLimit: Float = 12.0f,
             meanTolerance: Float = 14.0f,
-            stdTolerance: Float = 10.0f
+            stdTolerance: Float = 10.0f,
+            // Bekannte Stellung zur Auflösung mehrdeutiger Zielfelder; ohne sie bleibt die
+            // Erkennung streng und liefert bei mehreren Kandidaten lieber null
+            standardBoard: Array<CharArray>? = null,
+            isWhitePerspective: Boolean = true
         ): DetectedMove? {
             if (previousMeans.size != currentMeans.size || previousStds.size != currentStds.size) return null
 
             val emptied = mutableListOf<Int>()
-            val occupied = mutableListOf<Int>()
+            // Klare Zielfelder: vorher leer, jetzt besetzt
+            val strong = mutableListOf<Int>()
+            // Mögliche Zielfelder eines Schlagzugs: vorher und jetzt besetzt, aber anders
+            val weak = mutableListOf<Int>()
 
             for (i in currentMeans.indices) {
                 if (i in ignoredCells) continue
@@ -1153,16 +1160,107 @@ class UltraRobustClassifier(context: Context? = null) {
 
                 when {
                     wasOccupied && !isOccupied -> emptied.add(i)
-                    !wasOccupied && isOccupied -> occupied.add(i)
-                    // Schlagfall: vorher und nachher besetzt, aber der Inhalt ist ein anderer
-                    wasOccupied && isOccupied && contentChanged -> occupied.add(i)
-                    // Ein leeres Feld, dessen Helligkeit sich merklich ändert, ist eine Störung
-                    !wasOccupied && !isOccupied && contentChanged -> return null
+                    !wasOccupied && isOccupied -> strong.add(i)
+                    wasOccupied && isOccupied && contentChanged -> weak.add(i)
+                    // Ein leeres Feld, dessen Helligkeit sich ändert, ist die Zugmarkierung der
+                    // Oberfläche: Duolingo hebt Start- und Zielfeld des letzten Zuges farbig
+                    // hervor und nimmt die vorherige Hervorhebung wieder weg. Das früher hier
+                    // stehende Abbrechen ließ deshalb praktisch jeden Zug durchfallen.
+                    else -> Unit
                 }
             }
 
-            if (emptied.size != 1 || occupied.size != 1) return null
-            return DetectedMove(emptied[0], occupied[0])
+            // Ein Zug räumt genau ein Feld. Zwei geräumte Felder sind eine Rochade oder ein
+            // en passant - dafür ist die vollständige Erkennung zuständig.
+            if (emptied.size != 1) return null
+            val fromCell = emptied[0]
+
+            // Ein klares Zielfeld schlägt jeden Schlagkandidaten: ein stiller Zug ist der Regelfall
+            val candidates = if (strong.size == 1) listOf(strong[0]) else strong + weak
+            if (candidates.isEmpty()) return null
+            if (candidates.size == 1) return DetectedMove(fromCell, candidates[0])
+
+            // Mehrere Kandidaten: das kann die weggenommene Hervorhebung des vorigen Zuges sein.
+            // Aufgelöst wird das über die Gangart der ziehenden Figur - erreichbar ist immer nur
+            // eines der Felder.
+            val board = standardBoard ?: return null
+            val reachable = candidates.filter { candidate ->
+                canPieceReach(board, fromCell, candidate, isWhitePerspective)
+            }
+            return if (reachable.size == 1) DetectedMove(fromCell, reachable[0]) else null
+        }
+
+        /**
+         * Reine Funktion: kann die Figur auf dem Startfeld das Zielfeld überhaupt erreichen?
+         *
+         * Geprüft wird allein die Gangart samt freier Bahn - Fesselungen und Schach bleiben außen
+         * vor. Für den Zweck genügt das: Es geht nur darum, unter mehreren veränderten Feldern das
+         * echte Zielfeld von einer weggenommenen Hervorhebung zu unterscheiden, und die liegt so
+         * gut wie nie auf einem erreichbaren Feld.
+         *
+         * @param fromCell Bildschirmfeld der ziehenden Figur
+         * @param toCell   Bildschirmfeld des möglichen Ziels
+         */
+        fun canPieceReach(
+            standardBoard: Array<CharArray>,
+            fromCell: Int,
+            toCell: Int,
+            isWhitePerspective: Boolean
+        ): Boolean {
+            val fromSquare = squareForScreenCell(fromCell, isWhitePerspective) ?: return false
+            val toSquare = squareForScreenCell(toCell, isWhitePerspective) ?: return false
+            val fromRow = 8 - (fromSquare[1] - '0')
+            val fromCol = fromSquare[0] - 'a'
+            val toRow = 8 - (toSquare[1] - '0')
+            val toCol = toSquare[0] - 'a'
+            if (fromRow == toRow && fromCol == toCol) return false
+
+            val piece = standardBoard.getOrNull(fromRow)?.getOrNull(fromCol) ?: return false
+            if (piece == '.') return false
+            val target = standardBoard.getOrNull(toRow)?.getOrNull(toCol) ?: return false
+            // Auf eine eigene Figur zieht niemand
+            if (target != '.' && target.isUpperCase() == piece.isUpperCase()) return false
+
+            val dRow = toRow - fromRow
+            val dCol = toCol - fromCol
+            val absRow = abs(dRow)
+            val absCol = abs(dCol)
+
+            fun pathIsClear(): Boolean {
+                val stepRow = dRow.compareTo(0)
+                val stepCol = dCol.compareTo(0)
+                var r = fromRow + stepRow
+                var c = fromCol + stepCol
+                while (r != toRow || c != toCol) {
+                    if (standardBoard.getOrNull(r)?.getOrNull(c) != '.') return false
+                    r += stepRow
+                    c += stepCol
+                }
+                return true
+            }
+
+            return when (piece.lowercaseChar()) {
+                'n' -> (absRow == 1 && absCol == 2) || (absRow == 2 && absCol == 1)
+                'k' -> absRow <= 1 && absCol <= 1
+                'r' -> (dRow == 0 || dCol == 0) && pathIsClear()
+                'b' -> absRow == absCol && pathIsClear()
+                'q' -> (dRow == 0 || dCol == 0 || absRow == absCol) && pathIsClear()
+                'p' -> {
+                    // Weiße Bauern laufen zu kleineren Reihenindizes (Richtung Reihe 8)
+                    val forward = if (piece.isUpperCase()) -1 else 1
+                    val startRow = if (piece.isUpperCase()) 6 else 1
+                    when {
+                        // Schlagen: ein Feld schräg, dort muss etwas stehen
+                        absCol == 1 && dRow == forward -> target != '.'
+                        // Ziehen: gerade aus, das Zielfeld muss leer sein
+                        dCol == 0 && dRow == forward -> target == '.'
+                        dCol == 0 && dRow == 2 * forward && fromRow == startRow ->
+                            target == '.' && standardBoard[fromRow + forward][fromCol] == '.'
+                        else -> false
+                    }
+                }
+                else -> false
+            }
         }
 
         /**

@@ -58,8 +58,18 @@
   - das ist nicht nur schneller, es beseitigt die eigentliche Fehlerquelle: Wird die Stellung bei
     jedem Zug neu aus dem Bild abgeleitet, sammeln sich Fehleinordnungen an, bis nichts mehr
     zusammenpasst. Fortgeschrieben bleibt sie so lange richtig, wie die Züge stimmen;
+  - **die Zugmarkierung der Oberfläche wird mitgedacht**: Duolingo färbt Start- und Zielfeld des
+    letzten Zuges ein und nimmt die vorherige Einfärbung wieder weg. Bei jedem Zug ändern dadurch
+    vier Felder ihr Aussehen, obwohl nur zwei zum Zug gehören. Leere Felder, die nur ihre Farbe
+    wechseln, zählen deshalb nicht mehr als Veränderung - entscheidend ist die Streuung, denn eine
+    Farbfläche bringt keine Kanten mit, eine Figur schon;
+  - bleiben mehrere Zielfelder möglich, entscheidet die **Gangart der ziehenden Figur**: erreichbar
+    ist immer nur eines davon;
   - passt der Zug nicht in dieses Muster (Rochade, en passant, unklare Aufnahme), übernimmt die
-    vollständige Erkennung als Rückfallebene.
+    vollständige Erkennung als Rückfallebene;
+  - über allem wacht eine **Aufsichtsuhr**: geschieht zwölf Sekunden lang gar nichts mehr, wird die
+    Buchführung verworfen und die Stellung frisch vom Bildschirm gelesen. Jede Sackgasse ist damit
+    höchstens ein Aussetzer von wenigen Sekunden.
   - Beim Einschalten legt DuLo die Seiten fest: was unten auf den beiden Reihen steht, sind die eigenen
     Figuren, oben steht der Gegner. Ob die eigenen hell oder dunkel sind, entscheidet die
     Helligkeitsclusterung - daraus ergibt sich die eigene Farbe. Sie wird bei jeder neuen Grundstellung neu bestimmt, denn man spielt mal Weiß, mal Schwarz.

@@ -126,6 +126,9 @@ class FloatingBubbleService : Service() {
         // als nicht gespielt und die Stellung wird neu erkannt.
         private const val PENDING_MOVE_TIMEOUT_MS = 8000L
 
+        // Geschieht so lange gar nichts mehr, wird die Buchführung verworfen und frisch erkannt
+        private const val STALL_TIMEOUT_MS = 12000L
+
         // Sicherheitsnetz: spätestens nach so vielen Takten (rund 2,5 Sekunden) wird ohnehin
         // nachgesehen, auch wenn der Feldvergleich nichts gemeldet hat. Damit bleibt ein Pfeil
         // selbst im schlechtesten Fall nicht länger stehen. Die Engine läuft dabei nur, wenn der
@@ -244,6 +247,18 @@ class FloatingBubbleService : Service() {
      * warten. Nach der Frist wird er verworfen und neu erkannt.
      */
     private var pendingSince = 0L
+
+    /**
+     * Wann zuletzt etwas vorangegangen ist: ein abgelesener Zug, eine Berechnung, ein
+     * ausgeführter Zug.
+     *
+     * Aufsichtsuhr für alles, was hier sonst noch schiefgehen kann. Die Beobachtung hängt an
+     * mehreren Bedingungen (Veränderung erkannt, Figuren stehen still, Zug eindeutig), und jede
+     * davon kann in einem unglücklichen Zustand dauerhaft falsch bleiben. Statt jede einzelne
+     * Sackgasse zu erraten, wird schlicht gemessen, ob überhaupt noch etwas geschieht - und wenn
+     * nicht, die Stellung frisch vom Bildschirm gelesen.
+     */
+    private var lastProgressAt = 0L
     // Beim Einschalten wird die eigene Farbe aus der Ausgangsstellung bestimmt und für die Sitzung festgehalten
     private var sideEstablished = false
     /** Helligkeit und Streuung der 64 Felder eines Frames */
@@ -856,6 +871,7 @@ class FloatingBubbleService : Service() {
         sideEstablished = false
         clearPendingMove()
         resetMonitorState()
+        markProgress()
         startAnalysis(force = false)
         startMonitoring()
     }
@@ -913,6 +929,23 @@ class FloatingBubbleService : Service() {
 
         ticksSinceAnalysis++
 
+        // Aufsichtsuhr: geschieht über längere Zeit gar nichts mehr, wird die Buchführung
+        // verworfen und die Stellung frisch vom Bildschirm gelesen. Damit ist jede Sackgasse
+        // höchstens ein Aussetzer von wenigen Sekunden - egal, wodurch sie entstanden ist.
+        val now = System.currentTimeMillis()
+        if (lastProgressAt == 0L) lastProgressAt = now
+        if (now - lastProgressAt > STALL_TIMEOUT_MS) {
+            Log.w(TAG, "Seit ${(now - lastProgressAt) / 1000} Sekunden kein Fortschritt, Stellung wird neu erkannt")
+            markProgress()
+            clearPendingMove()
+            lastAcceptedBoard = null
+            referenceCells = null
+            lastTickCells = null
+            undecidedRuns = 0
+            startAnalysis(force = true, drawArrow = false)
+            return
+        }
+
         val rect = lastBoardRect
         if (rect == null) {
             // Noch kein Brett bekannt (die erste Analyse lief ins Leere): erneut versuchen
@@ -954,6 +987,7 @@ class FloatingBubbleService : Service() {
             )
             if (played) {
                 Log.i(TAG, "Empfohlener Zug wurde ausgeführt, Pfeil wird weggenommen")
+                markProgress()
                 // Das gemerkte Brett um den eigenen Zug fortschreiben. Ohne das sähe der nächste
                 // Vergleich den eigenen und den gegnerischen Zug zusammen und könnte niemanden
                 // mehr eindeutig benennen - die Anzeige bliebe stehen.
@@ -1088,12 +1122,26 @@ class FloatingBubbleService : Service() {
      */
     private suspend fun registerPendingMove(bestMove: String, isWhitePerspective: Boolean, boardRect: Rect) {
         clearPendingMove()
-        if (bestMove.length < 4) return
+
+        // Sonderantworten der Engine sind keine Züge: Partie vorbei oder Stellung unbrauchbar.
+        // Ohne diesen Zweig liefe die Beobachtung ins Leere und wartete auf einen Zug, den es
+        // gar nicht gibt.
+        if (bestMove.length < 4 || bestMove.startsWith("(")) {
+            Log.i(TAG, "Kein ausführbarer Zug ($bestMove), es wird nichts beobachtet")
+            return
+        }
         val from = UltraRobustClassifier.screenCellForSquare(bestMove.substring(0, 2), isWhitePerspective)
         val to = UltraRobustClassifier.screenCellForSquare(bestMove.substring(2, 4), isWhitePerspective)
-        if (from == null || to == null) return
+        if (from == null || to == null) {
+            Log.w(TAG, "Zug $bestMove ließ sich keinem Feld zuordnen")
+            return
+        }
 
-        val cells = captureBoardCells(boardRect) ?: lastKnownCells ?: return
+        val cells = captureBoardCells(boardRect) ?: lastKnownCells
+        if (cells == null) {
+            Log.w(TAG, "Keine Feldabtastung für $bestMove verfügbar, der Zug wird nicht beobachtet")
+            return
+        }
         pendingFromCell = from
         pendingToCell = to
         pendingMoveUci = bestMove
@@ -1143,7 +1191,11 @@ class FloatingBubbleService : Service() {
         val myColourIsWhite = sessionLockedPerspective ?: return false
 
         val detected = UltraRobustClassifier.detectMove(
-            reference.means, reference.stds, cells.means, cells.stds
+            reference.means, reference.stds, cells.means, cells.stds,
+            // Die bekannte Stellung löst mehrdeutige Zielfelder auf: die weggenommene
+            // Hervorhebung des vorigen Zuges liegt so gut wie nie auf einem erreichbaren Feld
+            standardBoard = board,
+            isWhitePerspective = myColourIsWhite
         ) ?: return false
 
         val uci = UltraRobustClassifier.uciFromScreenCells(
@@ -1156,6 +1208,7 @@ class FloatingBubbleService : Service() {
 
         val nextBoard = UltraRobustClassifier.applyUciMove(board, uci) ?: return false
         lastAcceptedBoard = nextBoard
+        markProgress()
         Log.i(TAG, "Zug abgelesen: $uci von ${if (moverIsWhite) "Weiß" else "Schwarz"} (ohne Neuerkennung)")
 
         // Die Stellung hat sich geändert: ab hier gilt der aktuelle Bildschirm als Vergleichsbasis
@@ -1242,6 +1295,11 @@ class FloatingBubbleService : Service() {
     }
 
     /** Der gezeigte Zug ist erledigt: die Beobachtung der beiden Felder endet */
+    /** Merkt, dass gerade etwas vorangegangen ist - die Aufsichtsuhr beginnt von vorn */
+    private fun markProgress() {
+        lastProgressAt = System.currentTimeMillis()
+    }
+
     private fun clearPendingMove() {
         autoMoveBusyUntil = 0L
         pendingSince = 0L
@@ -1742,6 +1800,7 @@ class FloatingBubbleService : Service() {
                 screenBitmap?.recycle()
                 if (analysisDecided) {
                     // Der Durchgang hat etwas entschieden: der nächste Takt nimmt das Brett neu auf.
+                    markProgress()
                     resetMonitorState()
                     undecidedRuns = 0
                 } else {
