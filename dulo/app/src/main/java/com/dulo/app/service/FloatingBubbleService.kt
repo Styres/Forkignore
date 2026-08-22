@@ -167,7 +167,6 @@ class FloatingBubbleService : Service() {
     // Kleines Menü an der Blase: Schalter für die Dauerbeobachtung und Beenden-Knopf
     private var menuView: View? = null
     private var menuParams: WindowManager.LayoutParams? = null
-    private var analyseToggle: DuloToggleView? = null
     private var autoMoveToggle: DuloToggleView? = null
 
     /**
@@ -558,16 +557,24 @@ class FloatingBubbleService : Service() {
             setPadding(0, 0, 0, 0)
         }
 
-        // Schalter im Stil der Systemkacheln: Pille mit weißem Knopf, darunter "Off" bzw. "On"
-        val toggle = DuloToggleView(this).apply {
-            title = "Hilfe"
-            setOn(autoAnalyseEnabled, animate = false)
-            onSwitched = { on -> setAutoAnalyse(on) }
+        // Einmalknopf: fragt die Engine genau einmal und zeichnet den Pfeil.
+        val bestMoveButton = TextView(this).apply {
+            text = "Bester Zug"
+            setTextColor(Color.rgb(180, 255, 210))
+            textSize = 11f
+            gravity = Gravity.CENTER
+            setPadding(0, dp(10), 0, dp(10))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(16).toFloat()
+                setColor(Color.rgb(24, 34, 28))
+                setStroke(dp(1), Color.rgb(0, 150, 80))
+            }
+            setOnClickListener { requestSingleSuggestion() }
         }
-        analyseToggle = toggle
 
-        // Auto-Zug: DuLo tippt den empfohlenen Zug selbst. Braucht die Freigabe in den
-        // Bedienungshilfen, sonst kann keine App Berührungen an eine fremde App schicken.
+        // Auto-Zug: DuLo rechnet fortlaufend und tippt den Zug selbst - ohne Pfeil.
+        // Braucht die Freigabe in den Bedienungshilfen, sonst kann keine App Berührungen
+        // an eine fremde App schicken.
         val autoMove = DuloToggleView(this).apply {
             title = "Auto"
             setOn(autoMoveEnabled, animate = false)
@@ -590,7 +597,10 @@ class FloatingBubbleService : Service() {
             setOnClickListener { destroyAssistant() }
         }
 
-        container.addView(toggle)
+        container.addView(
+            bestMoveButton,
+            LinearLayout.LayoutParams(dp(BUBBLE_SIZE_DP), LinearLayout.LayoutParams.WRAP_CONTENT)
+        )
         container.addView(
             autoMove,
             LinearLayout.LayoutParams(
@@ -652,7 +662,6 @@ class FloatingBubbleService : Service() {
         } catch (_: Exception) {
         }
         menuView = null
-        analyseToggle = null
         autoMoveToggle = null
     }
 
@@ -666,6 +675,8 @@ class FloatingBubbleService : Service() {
     private fun setAutoMove(enabled: Boolean) {
         if (!enabled) {
             autoMoveEnabled = false
+            // Mit dem Auto-Zug endet auch die Dauerbeobachtung: sie läuft nur für ihn
+            setAutoAnalyse(false)
             Toast.makeText(this, "Auto-Zug aus", Toast.LENGTH_SHORT).show()
             return
         }
@@ -682,8 +693,42 @@ class FloatingBubbleService : Service() {
             return
         }
 
+        if (!isProjectionAlive()) {
+            autoMoveEnabled = false
+            autoMoveToggle?.setOn(false, animate = true)
+            requestReAuthorization()
+            return
+        }
+
         autoMoveEnabled = true
         Toast.makeText(this, "Auto-Zug an", Toast.LENGTH_SHORT).show()
+        // Der Auto-Zug bringt die Dauerbeobachtung selbst mit: erst die Stellung aufnehmen,
+        // dann bei jedem Zug des Gegners rechnen und tippen.
+        setAutoAnalyse(true)
+    }
+
+    /**
+     * Knopf "Bester Zug": genau eine Empfehlung, als Pfeil auf dem Brett.
+     *
+     * Bewusst ein Einmalknopf und kein Schalter - wer nur nachsehen will, was hier gut wäre,
+     * braucht keine Dauerbeobachtung. Der Pfeil bleibt stehen, bis der Zug ausgeführt ist.
+     */
+    private fun requestSingleSuggestion() {
+        if (!isProjectionAlive()) {
+            requestReAuthorization()
+            return
+        }
+        if (isAnalyzing) {
+            Toast.makeText(this, "Rechnet noch", Toast.LENGTH_SHORT).show()
+            return
+        }
+        // Ohne laufende Beobachtung muss die Farbe für diese eine Stellung neu bestimmt werden
+        if (!autoAnalyseEnabled) {
+            sideEstablished = false
+            lastAcceptedBoard = null
+        }
+        clearPendingMove()
+        startAnalysis(force = true)
     }
 
     /** Systemeinstellungen für die Bedienungshilfen öffnen */
@@ -734,10 +779,10 @@ class FloatingBubbleService : Service() {
     // ================= Dauerbeobachtung =================
 
     /**
-     * Schalter im Menü.
-     * An: sofort einmal die Engine fragen und danach das Brett im Takt beobachten - jedes Mal,
-     * wenn eine eigene Figur ihr Feld gewechselt hat, wird erneut gerechnet.
-     * Aus: Beobachtung stoppen und den Pfeil ausblenden.
+     * Dauerbeobachtung starten oder stoppen.
+     *
+     * Wird vom Auto-Zug getragen: Der Auto-Betrieb rechnet fortlaufend selbst mit, eine eigene
+     * "Hilfe" muss dafür nicht mehr eingeschaltet werden.
      */
     private fun setAutoAnalyse(enabled: Boolean) {
         if (autoAnalyseEnabled == enabled) return
@@ -750,13 +795,13 @@ class FloatingBubbleService : Service() {
             // Ausschalten darf nichts mehr auf dem Bildschirm nachklingen.
             transparentOverlay?.dismissAll()
             transparentOverlay?.hide()
-            Toast.makeText(this, "Analyse aus", Toast.LENGTH_SHORT).show()
             return
         }
 
         if (!isProjectionAlive()) {
             autoAnalyseEnabled = false
-            analyseToggle?.setOn(false, animate = true)
+            autoMoveEnabled = false
+            autoMoveToggle?.setOn(false, animate = true)
             requestReAuthorization()
             return
         }
@@ -768,8 +813,7 @@ class FloatingBubbleService : Service() {
         sideEstablished = false
         clearPendingMove()
         resetMonitorState()
-        Toast.makeText(this, "Analyse an", Toast.LENGTH_SHORT).show()
-        startAnalysis(force = true)
+        startAnalysis(force = false)
         startMonitoring()
     }
 
@@ -904,13 +948,15 @@ class FloatingBubbleService : Service() {
         }
         if (!analyseNow) return
 
-        // Wer gezogen hat, entscheidet ausschließlich die vollständige Erkennung über den
-        // Brettvergleich. Eine zweite, billigere Abkürzung an dieser Stelle gab es früher;
-        // sie hat sich als Fehlerquelle erwiesen: griff sie daneben, blendete sie den Pfeil
-        // als vermeintlich eigenen Zug aus und der Zug des Gegners ging verloren.
+        // Erst der billige Weg: lässt sich der gespielte Zug direkt aus den beiden Aufnahmen
+        // ablesen, wird die bekannte Stellung einfach fortgeschrieben. Das ist der Kern der
+        // Erkennung - siehe [applyIncrementalMove].
+        if (tryIncrementalMove(reference, cells)) return
+
+        // Sonst die vollständige Erkennung: Bildschirmfoto, Brett vermessen, 64 Felder einordnen.
         Log.i(
             TAG,
-            "Analyse ausgelöst (ruhige Takte=$stillTicks, wartende Takte=$changePendingTicks," +
+            "Vollständige Erkennung ausgelöst (ruhige Takte=$stillTicks, wartende Takte=$changePendingTicks," +
                 " Takte seit Analyse=$ticksSinceAnalysis, ergebnislose Durchgänge=$undecidedRuns)"
         )
         startAnalysis(force = false)
@@ -1003,6 +1049,115 @@ class FloatingBubbleService : Service() {
             return
         }
         withContext(Dispatchers.Main) { transparentOverlay?.showError(reason) }
+    }
+
+    /**
+     * Kern der Erkennung: den gespielten Zug ablesen und die bekannte Stellung fortschreiben.
+     *
+     * Der Gedanke dahinter: Ein Zug verändert genau zwei Felder. Welche das sind, verraten schon
+     * die billigen Feldabtastungen - das Startfeld wird leer, das Zielfeld besetzt. Welche Figur
+     * dort stand, steht bereits in der gemerkten Stellung. Damit ist der Zug vollständig bekannt,
+     * ganz ohne Bildschirmfoto, Brettvermessung und Musterabgleich.
+     *
+     * Das ist nicht nur schneller, es beseitigt auch die eigentliche Fehlerquelle: Wird die
+     * Stellung bei jedem Zug neu aus dem Bild abgeleitet, sammeln sich Fehleinordnungen an, bis
+     * nichts mehr zusammenpasst. Fortgeschrieben wird die Stellung dagegen aus sich selbst heraus
+     * und bleibt so lange richtig, wie die Züge stimmen.
+     *
+     * Alles, was nicht in dieses Muster passt (Rochade mit vier Feldern, en passant, unklare
+     * Aufnahme), liefert false - dann übernimmt die vollständige Erkennung.
+     *
+     * @return true, wenn der Zug abgelesen und verarbeitet wurde
+     */
+    private suspend fun tryIncrementalMove(reference: BoardCells, cells: BoardCells): Boolean {
+        val board = lastAcceptedBoard ?: return false
+        val myColourIsWhite = sessionLockedPerspective ?: return false
+
+        val detected = UltraRobustClassifier.detectMove(
+            reference.means, reference.stds, cells.means, cells.stds
+        ) ?: return false
+
+        val uci = UltraRobustClassifier.uciFromScreenCells(
+            detected.fromCell, detected.toCell, myColourIsWhite, board
+        ) ?: return false
+
+        val fromSquare = uci.substring(0, 2)
+        val movingPiece = board[8 - (fromSquare[1] - '0')][fromSquare[0] - 'a']
+        val moverIsWhite = movingPiece.isUpperCase()
+
+        val nextBoard = UltraRobustClassifier.applyUciMove(board, uci) ?: return false
+        lastAcceptedBoard = nextBoard
+        Log.i(TAG, "Zug abgelesen: $uci von ${if (moverIsWhite) "Weiß" else "Schwarz"} (ohne Neuerkennung)")
+
+        // Die Stellung hat sich geändert: ab hier gilt der aktuelle Bildschirm als Vergleichsbasis
+        referenceCells = cells
+        lastTickCells = cells
+        changePendingTicks = 0
+        stillTicks = 0
+        ticksSinceAnalysis = 0
+        undecidedRuns = 0
+
+        if (moverIsWhite == myColourIsWhite) {
+            // Eigener Zug: die Empfehlung ist erledigt
+            clearPendingMove()
+            lastShownMove = null
+            transparentOverlay?.clearSuggestion()
+            return true
+        }
+
+        // Der Gegner hat gezogen: jetzt bin ich am Zug und es wird gerechnet
+        val position = UltraRobustClassifier.buildFenFromStandardBoard(
+            standardBoard = nextBoard,
+            activeIsWhite = myColourIsWhite,
+            boardRect = lastBoardRect ?: Rect()
+        )
+        evaluateAndPresent(position, force = false)
+        return true
+    }
+
+    /**
+     * Engine fragen und das Ergebnis anzeigen bzw. ausführen.
+     *
+     * Gemeinsamer Abschluss beider Wege - der fortgeschriebenen Stellung und der vollständigen
+     * Erkennung. Ob ein Pfeil gezeichnet wird, hängt allein davon ab, ob die Empfehlung von Hand
+     * angefordert wurde: Im Auto-Betrieb wird der Zug getippt statt gezeigt.
+     */
+    private suspend fun evaluateAndPresent(res: UltraRobustClassifier.DetectionResult, force: Boolean) {
+        // Vorgegebene Bedenkzeit: go depth 30 movetime 2000
+        val eval = withTimeout(ANALYSIS_TIMEOUT_MS) {
+            StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = StockfishBridge.DEFAULT_MOVE_TIME_MS)
+        }
+        lastFen = res.fullFen
+
+        if (eval.bestMove == "(invalid)") {
+            reportError("Unmögliche Stellung erkannt (Könige nebeneinander oder Figuren fehlerhaft)", force)
+            return
+        }
+
+        val isTrueFallback = eval.depth <= 0 &&
+            eval.bestMove != "(checkmate)" && eval.bestMove != "(stalemate)"
+        Log.i(
+            TAG,
+            "Zug=${eval.bestMove} Tiefe=${eval.depth}" + (if (isTrueFallback) " [Engine-Fallback]" else "")
+        )
+
+        // Der Pfeil gehört zur angeforderten Empfehlung. Im Auto-Betrieb bleibt der Bildschirm
+        // unberührt - dort wird der Zug ausgeführt, nicht angezeigt.
+        if (force) {
+            val moveSignature = "${eval.bestMove}@${if (res.isWhitePerspective) "w" else "b"}"
+            lastShownMove = moveSignature
+            transparentOverlay?.showSuggestion(
+                boardRect = res.boardRect,
+                moveInfo = eval,
+                isWhitePerspective = res.isWhitePerspective,
+                // Der Pfeil bleibt stehen, bis der Zug ausgeführt ist
+                autoDismiss = false
+            )
+        }
+
+        // Die beiden Felder des Zuges merken: daran wird erkannt, wann er ausgeführt ist,
+        // und darauf tippt der Auto-Zug.
+        registerPendingMove(eval.bestMove, res.isWhitePerspective, res.boardRect)
     }
 
     /** Der gezeigte Zug ist erledigt: die Beobachtung der beiden Felder endet */
@@ -1215,7 +1370,8 @@ class FloatingBubbleService : Service() {
 
         if (!isProjectionAlive()) {
             autoAnalyseEnabled = false
-            analyseToggle?.setOn(false, animate = true)
+            autoMoveEnabled = false
+            autoMoveToggle?.setOn(false, animate = true)
             stopMonitoring()
             requestReAuthorization()
             return
@@ -1466,51 +1622,13 @@ class FloatingBubbleService : Service() {
                             lastAnalysedFen = res.fullFen
                         }
 
-                        // Vorgegebene Bedenkzeit: go movetime 2000
-                        val eval = withTimeout(ANALYSIS_TIMEOUT_MS) {
-                            StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = StockfishBridge.DEFAULT_MOVE_TIME_MS)
-                        }
+                        evaluateAndPresent(res, force)
 
-                        // Sentinel der Erkennung (Befund aus bug_19/superbug): eine von der FEN-Vorprüfung abgefangene unmögliche Stellung ist weder ein Engine-Fehler noch ein Fall für den Fallback,
-                        // deshalb wird kein Pfeil gezeichnet, sondern die rote Fehlertafel mit dem fehlerhaften FEN angezeigt
-                        if (eval.bestMove == "(invalid)") {
-                            reportError("Unmögliche Stellung erkannt (Könige nebeneinander oder Figuren fehlerhaft)", force)
-                            lastFen = res.fullFen
-                            return@launch
-                        }
-
-                        // Kommt dieselbe Empfehlung wie eben heraus, bleibt der bestehende Pfeil
-                        // einfach stehen. Ein Neuzeichnen wäre für das Auge ein zweiter Pfeil.
-                        val moveSignature = "${eval.bestMove}@${if (res.isWhitePerspective) "w" else "b"}"
-                        if (!force && moveSignature == lastShownMove && transparentOverlay?.hasVisibleSuggestion() == true) {
-                            Log.i(TAG, "Gleiche Empfehlung wie zuletzt (${eval.bestMove}), Pfeil bleibt stehen")
-                            lastFen = res.fullFen
-                            return@launch
-                        }
-                        lastShownMove = moveSignature
-
-                        transparentOverlay?.showSuggestion(
-                            boardRect = res.boardRect,
-                            moveInfo = eval,
-                            isWhitePerspective = res.isWhitePerspective,
-                            // In der Dauerbeobachtung bleibt der Pfeil stehen, bis der eigene Zug ausgeführt ist
-                            autoDismiss = !autoAnalyseEnabled
-                        )
-                        lastFen = res.fullFen
-
-                        // Die beiden Felder des Pfeils merken. Ab jetzt genügt es, diese zwei Felder
-                        // im Takt nachzusehen, um den Pfeil im richtigen Moment wegzunehmen.
-                        registerPendingMove(eval.bestMove, res.isWhitePerspective, res.boardRect)
-
-                        // Befunde nur ins Protokoll, der Bildschirm bleibt ruhig
-                        val isTrueFallback = eval.depth <= 0 &&
-                            eval.bestMove != "(checkmate)" && eval.bestMove != "(stalemate)"
                         Log.i(
                             TAG,
-                            "Zug=${eval.bestMove} Tiefe=${eval.depth} Perspektive=${if (res.isWhitePerspective) "Weiß" else "Schwarz"}" +
+                            "Erkennung: Perspektive=${if (res.isWhitePerspective) "Weiß" else "Schwarz"}" +
                                 " (${detailedResp.perspectiveReason}, ${String.format("%.2f", detailedResp.perspectiveConfidence)})" +
-                                " Sim=${String.format("%.3f", detailedResp.medianSim)}" +
-                                (if (isTrueFallback) " [Engine-Fallback]" else "")
+                                " Sim=${String.format("%.3f", detailedResp.medianSim)}"
                         )
                     }
                     is UltraRobustClassifier.ClassificationResponse.Rejected -> {

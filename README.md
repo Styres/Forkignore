@@ -44,10 +44,22 @@
   - Liefert Bewertung (Centipawns / Matt), besten Zug und die zweitbeste Antwort.
 - 🎨 **Blase am Bildschirmrand, Menü und transparentes Overlay**
   - Der Vordergrunddienst `FloatingBubbleService` zeigt DuLo als frei verschiebbare Blase mit abgerundeten Ecken;
-  - ein Tippen öffnet ein kleines Menü mit einem Schalter im Stil der Systemkacheln (**Off** / **On**, animiert) und dem Knopf **Beenden**;
+  - ein Tippen öffnet ein kleines Menü mit drei Bedienelementen: dem Einmalknopf **Bester Zug**,
+    dem Schalter **Auto** im Stil der Systemkacheln (**Off** / **On**, animiert) und **Beenden**;
+  - **Bester Zug** fragt die Engine genau einmal und zeichnet den Pfeil - für den Blick zwischendurch,
+    ohne dass dafür etwas dauerhaft mitlaufen muss;
   - `TransparentCanvasOverlay` zeichnet nur den Pfeil und die beiden hervorgehobenen Felder über das Duolingo-Brett, Berührungen gehen hindurch;
   - geht etwas schief, steht dort schlicht **Something went wrong :(** statt einer technischen Fehlertafel.
-- 🔁 **Dauerbeobachtung statt Antippen**
+- 🔁 **Dauerbeobachtung: die Stellung wird fortgeschrieben, nicht neu erraten**
+  - Der Kern: Ein Zug verändert genau zwei Felder. Welche das sind, verraten schon die billigen
+    Feldabtastungen - Startfeld leer, Zielfeld besetzt. Welche Figur dort stand, steht bereits in
+    der gemerkten Stellung. Damit ist der Zug vollständig bekannt, **ohne Bildschirmfoto,
+    Brettvermessung und Musterabgleich**;
+  - das ist nicht nur schneller, es beseitigt die eigentliche Fehlerquelle: Wird die Stellung bei
+    jedem Zug neu aus dem Bild abgeleitet, sammeln sich Fehleinordnungen an, bis nichts mehr
+    zusammenpasst. Fortgeschrieben bleibt sie so lange richtig, wie die Züge stimmen;
+  - passt der Zug nicht in dieses Muster (Rochade, en passant, unklare Aufnahme), übernimmt die
+    vollständige Erkennung als Rückfallebene.
   - Beim Einschalten legt DuLo die Seiten fest: was unten auf den beiden Reihen steht, sind die eigenen
     Figuren, oben steht der Gegner. Ob die eigenen hell oder dunkel sind, entscheidet die
     Helligkeitsclusterung - daraus ergibt sich die eigene Farbe. Sie wird bei jeder neuen Grundstellung neu bestimmt, denn man spielt mal Weiß, mal Schwarz.
@@ -79,8 +91,12 @@
   - die volle Erkennung läuft an, sobald die Figuren zwei Takte lang stillstehen - spätestens aber nach
     rund drei Sekunden, damit dauerhafte Animationen der Oberfläche sie nicht aufhalten.
 - 🤖 **Auto-Zug (Schalter „Auto", standardmäßig aus)**
-  - DuLo tippt den empfohlenen Zug selbst: erst das Startfeld, dann das Zielfeld, mit 0,3 Sekunden
-    Pause dazwischen. Die Feldmitten kommen aus demselben vermessenen Brettrechteck wie der Pfeil.
+  - trägt die Dauerbeobachtung selbst: rechnet bei jedem Zug des Gegners und tippt den Zug dann
+    auch. Ein zweiter Schalter muss dafür nicht eingeschaltet werden;
+  - **ohne Pfeil** - im Auto-Betrieb bleibt der Bildschirm unberührt, der Zug wird ausgeführt statt
+    angezeigt;
+  - getippt wird erst das Startfeld, dann das Zielfeld, mit 0,3 Sekunden Pause dazwischen. Die
+    Feldmitten kommen aus demselben vermessenen Brettrechteck wie der Pfeil.
   - Dafür ist ein **Bedienungshilfen-Dienst** nötig: Unter Android darf eine App Berührungen nur
     über `AccessibilityService.dispatchGesture` an eine andere App schicken. DuLo muss deshalb
     einmalig unter **Einstellungen › Bedienungshilfen** freigegeben werden; ohne Freigabe springt

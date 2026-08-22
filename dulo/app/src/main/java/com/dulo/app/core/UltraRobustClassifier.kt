@@ -826,6 +826,82 @@ class UltraRobustClassifier(context: Context? = null) {
         }
 
         /**
+         * Reine Funktion: Umkehrung von [screenCellForSquare] - Bildschirmfeld zu Feldname.
+         *
+         * @param cell 0..63, oben links = 0
+         */
+        fun squareForScreenCell(cell: Int, isWhitePerspective: Boolean): String? {
+            if (cell !in 0..63) return null
+            val row = cell / 8
+            val col = cell % 8
+            val rank = if (isWhitePerspective) 8 - row else row + 1
+            val file = if (isWhitePerspective) col else 7 - col
+            return "${'a' + file}${rank}"
+        }
+
+        /**
+         * Reine Funktion: macht aus zwei Bildschirmfeldern einen UCI-Zug.
+         *
+         * Erreicht ein Bauer die letzte Reihe, wird die Umwandlung in eine Dame angehängt - das
+         * ist praktisch immer die Wahl, und die Oberfläche wandelt ohnehin selbst um.
+         *
+         * @param standardBoard Brett in Standardausrichtung, um die ziehende Figur nachzusehen
+         */
+        fun uciFromScreenCells(
+            fromCell: Int,
+            toCell: Int,
+            isWhitePerspective: Boolean,
+            standardBoard: Array<CharArray>
+        ): String? {
+            val fromSquare = squareForScreenCell(fromCell, isWhitePerspective) ?: return null
+            val toSquare = squareForScreenCell(toCell, isWhitePerspective) ?: return null
+            val fromRow = 8 - (fromSquare[1] - '0')
+            val fromCol = fromSquare[0] - 'a'
+            val piece = standardBoard.getOrNull(fromRow)?.getOrNull(fromCol) ?: return null
+            if (piece == '.') return null
+
+            val toRank = toSquare[1] - '0'
+            val promotes = (piece == 'P' && toRank == 8) || (piece == 'p' && toRank == 1)
+            return fromSquare + toSquare + if (promotes) "q" else ""
+        }
+
+        /**
+         * Reine Funktion: baut das FEN unmittelbar aus einem Brett in Standardausrichtung.
+         *
+         * Gebraucht für die fortgeschriebene Stellung: dort steht das Brett bereits richtig herum,
+         * und wer am Zug ist, ergibt sich aus dem Spielverlauf statt aus der Blickrichtung.
+         */
+        fun buildFenFromStandardBoard(
+            standardBoard: Array<CharArray>,
+            activeIsWhite: Boolean,
+            boardRect: Rect = Rect()
+        ): DetectionResult {
+            val activeColor = if (activeIsWhite) "w" else "b"
+            val boardFen = standardBoard.joinToString("/") { compressRow(it) }
+            val castling = computeCastlingRights(standardBoard)
+            val occupied = standardBoard.sumOf { row -> row.count { it != '.' } }
+
+            // rawBoard ist die Bildschirmansicht: bei schwarzer Sicht steht das Brett gedreht
+            val rawBoard = if (activeIsWhite) {
+                standardBoard
+            } else {
+                Array(8) { r -> CharArray(8) { c -> standardBoard[7 - r][7 - c] } }
+            }
+
+            return DetectionResult(
+                boardFen = boardFen,
+                fullFen = "$boardFen $activeColor $castling - 0 1",
+                activeColor = activeColor,
+                isWhitePerspective = activeIsWhite,
+                rawBoard = rawBoard,
+                standardBoard = standardBoard,
+                boardRect = boardRect,
+                medianSim = 1.0f,
+                occupiedCount = occupied
+            )
+        }
+
+        /**
          * Reine Funktion: wurde der empfohlene Zug auf dem Brett ausgeführt?
          *
          * Das ist die Abbruchbedingung für den Pfeil und arbeitet bewusst nur auf den beiden
