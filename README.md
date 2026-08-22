@@ -46,8 +46,8 @@
   - Der Vordergrunddienst `FloatingBubbleService` zeigt DuLo als frei verschiebbare Blase mit abgerundeten Ecken;
   - ein Tippen öffnet ein kleines Menü mit drei Bedienelementen: dem Einmalknopf **Bester Zug**,
     dem Schalter **Auto** im Stil der Systemkacheln (**Off** / **On**, animiert) und **Beenden**;
-  - **Bester Zug** fragt die Engine genau einmal und zeichnet den Pfeil - für den Blick zwischendurch,
-    ohne dass dafür etwas dauerhaft mitlaufen muss;
+  - **Bester Zug** fragt die Engine genau einmal und zeigt den Pfeil zwei Sekunden lang - für den
+    Blick zwischendurch, ohne dass dafür etwas dauerhaft mitlaufen muss;
   - `TransparentCanvasOverlay` zeichnet nur den Pfeil und die beiden hervorgehobenen Felder über das Duolingo-Brett, Berührungen gehen hindurch;
   - geht etwas schief, steht dort schlicht **Something went wrong :(** statt einer technischen Fehlertafel.
 - 🔁 **Dauerbeobachtung: die Stellung wird fortgeschrieben, nicht neu erraten**
@@ -96,7 +96,15 @@
   - **ohne Pfeil** - im Auto-Betrieb bleibt der Bildschirm unberührt, der Zug wird ausgeführt statt
     angezeigt;
   - getippt wird erst das Startfeld, dann das Zielfeld, mit 0,3 Sekunden Pause dazwischen. Die
-    Feldmitten kommen aus demselben vermessenen Brettrechteck wie der Pfeil.
+    Feldmitten kommen aus demselben vermessenen Brettrechteck wie der Pfeil;
+  - **während getippt wird, ruht die Beobachtung**: Die angetippte Figur wird hervorgehoben, und
+    Duolingo blendet Punkte auf den möglichen Zielfeldern ein - für die Feldabtastung sehen diese
+    Punkte aus wie Figuren. Ein in diesem Moment abgelesener Zug wäre erfunden und würde die
+    gemerkte Stellung verderben;
+  - wird ein vorgeschlagener Zug nicht ausgeführt (abgelehnt, danebengetippt, doch nicht am Zug),
+    gilt er nach acht Sekunden als verfallen und die Stellung wird neu erkannt;
+  - ergibt die fortgeschriebene Stellung etwas Unmögliches, wird sie verworfen und frisch vom
+    Bildschirm gelesen.
   - Dafür ist ein **Bedienungshilfen-Dienst** nötig: Unter Android darf eine App Berührungen nur
     über `AccessibilityService.dispatchGesture` an eine andere App schicken. DuLo muss deshalb
     einmalig unter **Einstellungen › Bedienungshilfen** freigegeben werden; ohne Freigabe springt

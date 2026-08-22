@@ -38,6 +38,9 @@ class TransparentCanvasOverlay(private val context: Context) {
         const val FADE_IN_MS = 220L
         const val STATUS_HOLD_MS = 5000L
         const val FADE_OUT_MS = 450L
+
+        // Standzeit eines angeforderten Pfeils, bevor er von selbst verschwindet
+        const val ARROW_HOLD_MS = 2000L
     }
 
 
@@ -203,8 +206,10 @@ class TransparentCanvasOverlay(private val context: Context) {
         boardRect: Rect,
         moveInfo: StockfishBridge.EngineEvaluation,
         isWhitePerspective: Boolean,
-        // false = der Pfeil bleibt stehen (Dauerbeobachtung), bis die nächste Analyse ihn ersetzt
-        autoDismiss: Boolean = true
+        // false = der Pfeil bleibt stehen, bis er ausdrücklich weggenommen wird
+        autoDismiss: Boolean = true,
+        // Standzeit des Pfeils, wenn er sich selbst wieder ausblendet
+        dismissAfterMs: Long = ARROW_HOLD_MS
     ) {
         if (overlayView == null) {
             initOverlayView()
@@ -225,8 +230,10 @@ class TransparentCanvasOverlay(private val context: Context) {
         autoDismissJob?.cancel()
         autoDismissJob = if (autoDismiss) {
             scope.launch {
-                delay(5000)
-                hide()
+                delay(dismissAfterMs)
+                // Nur den Pfeil wegnehmen, nicht das Fenster abreißen: das erneute Anlegen
+                // blitzt sichtbar auf.
+                clearSuggestion()
             }
         } else {
             null

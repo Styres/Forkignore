@@ -119,6 +119,13 @@ class FloatingBubbleService : Service() {
         // Pause nach jeder Berührung des Auto-Zugs
         private const val AUTO_MOVE_DELAY_MS = 300L
 
+        // Beruhigungszeit nach der letzten Berührung: so lange läuft noch die Zuganimation
+        private const val AUTO_MOVE_SETTLE_MS = 700L
+
+        // So lange wird auf die Ausführung eines vorgeschlagenen Zuges gewartet, danach gilt er
+        // als nicht gespielt und die Stellung wird neu erkannt.
+        private const val PENDING_MOVE_TIMEOUT_MS = 8000L
+
         // Sicherheitsnetz: spätestens nach so vielen Takten (rund 2,5 Sekunden) wird ohnehin
         // nachgesehen, auch wenn der Feldvergleich nichts gemeldet hat. Damit bleibt ein Pfeil
         // selbst im schlechtesten Fall nicht länger stehen. Die Engine läuft dabei nur, wenn der
@@ -178,6 +185,20 @@ class FloatingBubbleService : Service() {
     @Volatile
     private var autoMoveEnabled = false
 
+    /**
+     * Läuft gerade eine Tippfolge des Auto-Zugs?
+     *
+     * Während der beiden Berührungen ist das Brett in einem Zwischenzustand: Die angetippte Figur
+     * wird hervorgehoben, und Duolingo blendet Punkte auf den möglichen Zielfeldern ein. Diese
+     * Punkte sehen für die Feldabtastung aus wie Figuren. Wird in diesem Moment ein Zug abgelesen,
+     * landet ein erfundener Zug in der gemerkten Stellung - und ab da stimmt nichts mehr.
+     *
+     * Deshalb ruht die Beobachtung, solange getippt wird, plus einer kurzen Beruhigungszeit für
+     * die Zuganimation danach.
+     */
+    @Volatile
+    private var autoMoveBusyUntil = 0L
+
     // Dauerbeobachtung: läuft der Schalter, wird das Brett im Takt POLL_INTERVAL_MS abgeklopft
     @Volatile
     private var autoAnalyseEnabled = false
@@ -215,6 +236,14 @@ class FloatingBubbleService : Service() {
     private var pendingMoveUci: String? = null
     /** Feldabtastung zu dem Zeitpunkt, an dem der Pfeil gezeichnet wurde */
     private var pendingMoveReference: BoardCells? = null
+    /**
+     * Wann der ausstehende Zug eingetragen wurde.
+     *
+     * Wird er nicht ausgeführt - etwa weil die Oberfläche ihn ablehnt, weil man doch nicht am Zug
+     * war, oder weil eine Berührung danebenging - bliebe die Beobachtung sonst für immer darauf
+     * warten. Nach der Frist wird er verworfen und neu erkannt.
+     */
+    private var pendingSince = 0L
     // Beim Einschalten wird die eigene Farbe aus der Ausgangsstellung bestimmt und für die Sitzung festgehalten
     private var sideEstablished = false
     /** Helligkeit und Streuung der 64 Felder eines Frames */
@@ -728,7 +757,7 @@ class FloatingBubbleService : Service() {
             lastAcceptedBoard = null
         }
         clearPendingMove()
-        startAnalysis(force = true)
+        startAnalysis(force = true, drawArrow = true)
     }
 
     /** Systemeinstellungen für die Bedienungshilfen öffnen */
@@ -771,8 +800,22 @@ class FloatingBubbleService : Service() {
 
         val points = listOf(centreOf(fromCell), centreOf(toCell))
         Log.i(TAG, "Auto-Zug tippt auf ${points.map { "(${it.first.toInt()}, ${it.second.toInt()})" }}")
+
+        // Die Beobachtung ruht, bis beide Berührungen durch sind und die Zuganimation abgelaufen
+        // ist. Reichlich bemessen, denn ein zu früh abgelesener Zwischenzustand kostet die ganze
+        // Partie: er wandert als erfundener Zug in die gemerkte Stellung.
+        autoMoveBusyUntil = System.currentTimeMillis() +
+            points.size * AUTO_MOVE_DELAY_MS + AUTO_MOVE_SETTLE_MS
+
         DuloAutoMoveService.tapSequence(points, AUTO_MOVE_DELAY_MS) { ok ->
-            if (!ok) Log.w(TAG, "Auto-Zug konnte nicht vollständig ausgeführt werden")
+            if (!ok) {
+                Log.w(TAG, "Auto-Zug konnte nicht vollständig ausgeführt werden")
+                // Nicht weiter blockieren: die gewöhnliche Erkennung soll sofort wieder greifen
+                autoMoveBusyUntil = 0L
+                return@tapSequence
+            }
+            // Ab der letzten Berührung noch die Beruhigungszeit abwarten
+            autoMoveBusyUntil = System.currentTimeMillis() + AUTO_MOVE_SETTLE_MS
         }
     }
 
@@ -858,12 +901,22 @@ class FloatingBubbleService : Service() {
         if (!autoAnalyseEnabled) return
         if (!isProjectionAlive()) return
 
+        // Solange der Auto-Zug tippt, wird nichts abgelesen: das Brett zeigt gerade Hervorhebungen
+        // und Zielpunkte, keine Stellung.
+        if (System.currentTimeMillis() < autoMoveBusyUntil) {
+            // Die Vergleichsbasis wird dabei laufend nachgezogen, damit der eigene Zug hinterher
+            // nicht als Veränderung des Gegners zählt.
+            lastTickCells = null
+            stillTicks = 0
+            return
+        }
+
         ticksSinceAnalysis++
 
         val rect = lastBoardRect
         if (rect == null) {
             // Noch kein Brett bekannt (die erste Analyse lief ins Leere): erneut versuchen
-            startAnalysis(force = true)
+            startAnalysis(force = true, drawArrow = false)
             return
         }
 
@@ -874,6 +927,17 @@ class FloatingBubbleService : Service() {
             return
         }
         lastKnownCells = cells
+
+        // Wird der ausstehende Zug nicht ausgeführt, darf die Beobachtung nicht ewig darauf
+        // warten: verwerfen und die Stellung neu erkennen.
+        if (pendingSince > 0L && System.currentTimeMillis() - pendingSince > PENDING_MOVE_TIMEOUT_MS) {
+            Log.i(TAG, "Ausstehender Zug wurde nicht ausgeführt, Stellung wird neu erkannt")
+            clearPendingMove()
+            lastAcceptedBoard = null
+            transparentOverlay?.clearSuggestion()
+            startAnalysis(force = true, drawArrow = false)
+            return
+        }
 
         // Der Pfeil steht: warten, bis genau dieser Zug ausgeführt ist. Geprüft werden nur die
         // beiden betroffenen Felder - Startfeld leer, Zielfeld besetzt. Erst dann verschwindet
@@ -948,10 +1012,14 @@ class FloatingBubbleService : Service() {
         }
         if (!analyseNow) return
 
-        // Erst der billige Weg: lässt sich der gespielte Zug direkt aus den beiden Aufnahmen
-        // ablesen, wird die bekannte Stellung einfach fortgeschrieben. Das ist der Kern der
-        // Erkennung - siehe [applyIncrementalMove].
-        if (tryIncrementalMove(reference, cells)) return
+        // Steht noch ein Zug aus, entscheidet allein die Prüfung seiner beiden Felder weiter oben.
+        // Ein zweiter Ableseversuch daneben würde die Hervorhebungen der Oberfläche als Zug
+        // missdeuten. Bleibt der Zug lange aus, greift weiter unten die vollständige Erkennung.
+        if (pendingMoveReference == null) {
+            // Der billige Weg: lässt sich der gespielte Zug direkt aus den beiden Aufnahmen
+            // ablesen, wird die bekannte Stellung einfach fortgeschrieben.
+            if (tryIncrementalMove(reference, cells)) return
+        }
 
         // Sonst die vollständige Erkennung: Bildschirmfoto, Brett vermessen, 64 Felder einordnen.
         Log.i(
@@ -1030,6 +1098,7 @@ class FloatingBubbleService : Service() {
         pendingToCell = to
         pendingMoveUci = bestMove
         pendingMoveReference = cells
+        pendingSince = System.currentTimeMillis()
         Log.i(TAG, "Pfeil zeigt $bestMove, beobachtet werden die Felder $from und $to")
 
         // Auto-Zug: denselben Zug gleich selbst tippen. Der Pfeil verschwindet danach über den
@@ -1111,7 +1180,14 @@ class FloatingBubbleService : Service() {
             activeIsWhite = myColourIsWhite,
             boardRect = lastBoardRect ?: Rect()
         )
-        evaluateAndPresent(position, force = false)
+        // Ergibt die fortgeschriebene Stellung etwas Unmögliches, ist die Buchführung entgleist.
+        // Dann wird sie verworfen und im nächsten Takt frisch vom Bildschirm erkannt - besser ein
+        // Durchgang Verzögerung als eine Partie lang auf einer falschen Stellung zu rechnen.
+        if (!evaluateAndPresent(position, drawArrow = false)) {
+            Log.w(TAG, "Fortgeschriebene Stellung ist unmöglich, sie wird neu vom Bildschirm erkannt")
+            lastAcceptedBoard = null
+            clearPendingMove()
+        }
         return true
     }
 
@@ -1122,7 +1198,10 @@ class FloatingBubbleService : Service() {
      * Erkennung. Ob ein Pfeil gezeichnet wird, hängt allein davon ab, ob die Empfehlung von Hand
      * angefordert wurde: Im Auto-Betrieb wird der Zug getippt statt gezeigt.
      */
-    private suspend fun evaluateAndPresent(res: UltraRobustClassifier.DetectionResult, force: Boolean) {
+    private suspend fun evaluateAndPresent(
+        res: UltraRobustClassifier.DetectionResult,
+        drawArrow: Boolean
+    ): Boolean {
         // Vorgegebene Bedenkzeit: go depth 30 movetime 2000
         val eval = withTimeout(ANALYSIS_TIMEOUT_MS) {
             StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = StockfishBridge.DEFAULT_MOVE_TIME_MS)
@@ -1130,8 +1209,8 @@ class FloatingBubbleService : Service() {
         lastFen = res.fullFen
 
         if (eval.bestMove == "(invalid)") {
-            reportError("Unmögliche Stellung erkannt (Könige nebeneinander oder Figuren fehlerhaft)", force)
-            return
+            reportError("Unmögliche Stellung erkannt (Könige nebeneinander oder Figuren fehlerhaft)", drawArrow)
+            return false
         }
 
         val isTrueFallback = eval.depth <= 0 &&
@@ -1143,25 +1222,29 @@ class FloatingBubbleService : Service() {
 
         // Der Pfeil gehört zur angeforderten Empfehlung. Im Auto-Betrieb bleibt der Bildschirm
         // unberührt - dort wird der Zug ausgeführt, nicht angezeigt.
-        if (force) {
+        if (drawArrow) {
             val moveSignature = "${eval.bestMove}@${if (res.isWhitePerspective) "w" else "b"}"
             lastShownMove = moveSignature
             transparentOverlay?.showSuggestion(
                 boardRect = res.boardRect,
                 moveInfo = eval,
                 isWhitePerspective = res.isWhitePerspective,
-                // Der Pfeil bleibt stehen, bis der Zug ausgeführt ist
-                autoDismiss = false
+                // Der Knopf liefert einen Blick, keine Dauereinblendung: nach zwei Sekunden ist
+                // der Pfeil wieder weg.
+                autoDismiss = true
             )
         }
 
         // Die beiden Felder des Zuges merken: daran wird erkannt, wann er ausgeführt ist,
         // und darauf tippt der Auto-Zug.
         registerPendingMove(eval.bestMove, res.isWhitePerspective, res.boardRect)
+        return true
     }
 
     /** Der gezeigte Zug ist erledigt: die Beobachtung der beiden Felder endet */
     private fun clearPendingMove() {
+        autoMoveBusyUntil = 0L
+        pendingSince = 0L
         pendingFromCell = -1
         pendingToCell = -1
         pendingMoveUci = null
@@ -1365,7 +1448,7 @@ class FloatingBubbleService : Service() {
      *        ob sich eine eigene Figur bewegt hat. false in der Dauerbeobachtung: dort bricht die
      *        Analyse vor dem Engine-Aufruf ab, wenn die eigenen Figuren unverändert stehen.
      */
-    private fun startAnalysis(force: Boolean) {
+    private fun startAnalysis(force: Boolean, drawArrow: Boolean = false) {
         if (isAnalyzing) return
 
         if (!isProjectionAlive()) {
@@ -1622,7 +1705,7 @@ class FloatingBubbleService : Service() {
                             lastAnalysedFen = res.fullFen
                         }
 
-                        evaluateAndPresent(res, force)
+                        evaluateAndPresent(res, drawArrow)
 
                         Log.i(
                             TAG,
