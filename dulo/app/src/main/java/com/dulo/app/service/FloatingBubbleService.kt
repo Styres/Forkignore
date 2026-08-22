@@ -321,6 +321,10 @@ class FloatingBubbleService : Service() {
     private var pendingToCell = -1
     /** Der gezeigte Zug in UCI-Schreibweise; damit wird das gemerkte Brett fortgeschrieben */
     private var pendingMoveUci: String? = null
+    /** Die Felder, auf die für diesen Zug getippt wurde - für einen zweiten Versuch */
+    private var pendingTapCells: List<Int>? = null
+    /** Wie oft der Zug schon erneut getippt wurde (höchstens einmal) */
+    private var pendingRetries = 0
     /** Feldabtastung zu dem Zeitpunkt, an dem der Pfeil gezeichnet wurde */
     private var pendingMoveReference: BoardCells? = null
     /**
@@ -1310,7 +1314,12 @@ class FloatingBubbleService : Service() {
         // höchstens ein Aussetzer von wenigen Sekunden - egal, wodurch sie entstanden ist.
         val now = System.currentTimeMillis()
         if (lastProgressAt == 0L) lastProgressAt = now
-        if (now - lastProgressAt > STALL_TIMEOUT_MS && !awaitingBoardChange) {
+        // Nach einer entschiedenen Partie wird länger zugewartet, aber nicht unbefristet: Das
+        // Kennzeichen dafür wird erst gelöscht, wenn sich das Brett verändert - und diese Prüfung
+        // liegt weiter unten. Bliebe die Vergleichsbasis zwischendurch leer, käme sie nie zustande
+        // und die Aufsichtsuhr wäre für immer aus.
+        val stillstandsfrist = if (awaitingBoardChange) STALL_TIMEOUT_MS * 5 else STALL_TIMEOUT_MS
+        if (now - lastProgressAt > stillstandsfrist) {
             Log.w(TAG, "Seit ${(now - lastProgressAt) / 1000} Sekunden kein Fortschritt, Stellung wird neu erkannt")
             markProgress()
             clearPendingMove()
@@ -1352,22 +1361,48 @@ class FloatingBubbleService : Service() {
                 )
             } ?: false
 
-            clearPendingMove()
-            if (unveraendert) {
-                Log.i(TAG, "Getippter Zug kam nicht an, Brett unverändert - es wird auf den Gegner gewartet")
-                referenceCells = cells
-                lastTickCells = cells
-                changePendingTicks = 0
-                stillTicks = 0
-                ticksSinceAnalysis = 0
-                markProgress()
+            if (!unveraendert) {
+                // Auf dem Brett hat sich etwas getan, nur nicht der erwartete Zug: neu erkennen.
+                Log.i(TAG, "Ausstehender Zug wurde nicht ausgeführt, Stellung wird neu erkannt")
+                clearPendingMove()
+                lastAcceptedBoard = null
+                castlingRights = null
+                startAnalysis(force = true)
                 return
             }
 
-            Log.i(TAG, "Ausstehender Zug wurde nicht ausgeführt, Stellung wird neu erkannt")
-            lastAcceptedBoard = null
-            castlingRights = null
-            startAnalysis(force = true)
+            // Das Brett steht unverändert. Dafür gibt es drei Erklärungen, und sie brauchen
+            // verschiedene Antworten:
+            //   1. Wir waren gar nicht am Zug - dann ist Warten richtig.
+            //   2. Die Berührung ging daneben - dann hilft ein zweiter Versuch.
+            //   3. Die gemerkte Stellung ist veraltet, etwa weil ein Schlagzug des Gegners
+            //      übersehen wurde. Dann steht dort eine Figur, die es nicht mehr gibt, der
+            //      getippte Zug ist unmöglich, und beide Seiten warten aufeinander.
+            //
+            // Fall 3 war die Sackgasse: Es wurde pauschal auf den Gegner gewartet, und weil das
+            // als Fortschritt galt, griff auch die Aufsichtsuhr nicht mehr. Nur Aus- und
+            // Einschalten half. Deshalb wird jetzt gestuft vorgegangen.
+            val zugWiederholen = pendingMoveUci
+            val felder = pendingTapCells
+            if (pendingRetries == 0 && zugWiederholen != null && felder != null && lastBoardRect != null) {
+                pendingRetries++
+                pendingSince = System.currentTimeMillis()
+                Log.i(TAG, "Zug $zugWiederholen kam nicht an, zweiter Versuch")
+                performAutoMove(lastBoardRect!!, felder, isPromotion = zugWiederholen.length >= 5)
+                return
+            }
+
+            // Auch der zweite Versuch blieb wirkungslos: Die gemerkte Stellung wird gegen den
+            // Bildschirm geprüft, statt weiter auf gut Glück zu warten. Bewusst ohne markProgress,
+            // damit die Aufsichtsuhr scharf bleibt.
+            Log.i(TAG, "Zug kam auch im zweiten Versuch nicht an, Stellung wird gegen den Bildschirm geprüft")
+            clearPendingMove()
+            referenceCells = cells
+            lastTickCells = cells
+            changePendingTicks = 0
+            stillTicks = 0
+            ticksSinceAnalysis = 0
+            startAnalysis(force = false)
             return
         }
 
@@ -1550,6 +1585,7 @@ class FloatingBubbleService : Service() {
         // Erscheint keine Auswahl, trifft der dritte Tipp nur die eben gezogene Figur und markiert
         // sie; der Zug steht dann bereits, und die Markierung ist im nächsten Takt wieder weg.
         val tapCells = UltraRobustClassifier.tapCellsForMove(bestMove, isWhitePerspective)
+        pendingTapCells = tapCells
         if (tapCells != null) {
             performAutoMove(boardRect, tapCells, isPromotion = bestMove.length >= 5)
         }
@@ -1738,6 +1774,8 @@ class FloatingBubbleService : Service() {
     private fun clearPendingMove() {
         autoMoveBusyUntil = 0L
         pendingSince = 0L
+        pendingTapCells = null
+        pendingRetries = 0
         pendingFromCell = -1
         pendingToCell = -1
         pendingMoveUci = null

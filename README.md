@@ -152,8 +152,13 @@
     Duolingo blendet Punkte auf den möglichen Zielfeldern ein - für die Feldabtastung sehen diese
     Punkte aus wie Figuren. Ein in diesem Moment abgelesener Zug wäre erfunden und würde die
     gemerkte Stellung verderben;
-  - wird ein vorgeschlagener Zug nicht ausgeführt (abgelehnt, danebengetippt, doch nicht am Zug),
-    gilt er nach acht Sekunden als verfallen und die Stellung wird neu erkannt;
+  - wird ein vorgeschlagener Zug nicht ausgeführt, wird **gestuft** vorgegangen. Steht das Brett
+    unverändert, gibt es dafür drei Erklärungen, und sie brauchen verschiedene Antworten: Man war
+    nicht am Zug (warten ist richtig), die Berührung ging daneben (ein zweiter Versuch hilft), oder
+    die gemerkte Stellung ist veraltet - etwa weil ein Schlagzug des Gegners übersehen wurde. Dann
+    steht dort eine Figur, die es nicht mehr gibt, der getippte Zug ist unmöglich, und **beide
+    Seiten warten aufeinander**. Deshalb: erst ein zweiter Tippversuch, dann ein Abgleich mit dem
+    Bildschirm - und nie mehr pauschales Warten;
   - ergibt die fortgeschriebene Stellung etwas Unmögliches, wird sie verworfen und frisch vom
     Bildschirm gelesen.
   - Dafür ist ein **Bedienungshilfen-Dienst** nötig: Unter Android darf eine App Berührungen nur
