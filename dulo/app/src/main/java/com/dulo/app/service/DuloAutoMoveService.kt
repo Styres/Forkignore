@@ -120,14 +120,16 @@ class DuloAutoMoveService : AccessibilityService() {
             // Rekursiv statt in einer Schleife: jede Geste muss abgeschlossen sein, bevor die
             // nächste losgeht - sonst verwirft Android die zweite.
             fun step(index: Int) {
-                if (index >= points.size) {
-                    onDone(true)
-                    return
-                }
                 val (x, y) = points[index]
                 service.tap(x, y) { ok ->
                     if (!ok) {
                         onDone(false)
+                        return@tap
+                    }
+                    // Nach der letzten Berührung gibt es nichts mehr abzuwarten - die Pause gehört
+                    // zwischen zwei Berührungen, nicht ans Ende.
+                    if (index + 1 >= points.size) {
+                        onDone(true)
                         return@tap
                     }
                     service.mainHandler.postDelayed({ step(index + 1) }, delayMs)

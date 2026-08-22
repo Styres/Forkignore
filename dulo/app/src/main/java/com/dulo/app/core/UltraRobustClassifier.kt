@@ -1040,6 +1040,13 @@ class UltraRobustClassifier(context: Context? = null) {
             }
             next[toRow][toFile] = promoted
 
+            // En passant: ein Bauer zieht schräg auf ein leeres Feld. Geschlagen wird dann der
+            // Bauer neben dem Startfeld, nicht der auf dem Zielfeld. Ohne diesen Zweig bliebe ein
+            // Geisterbauer stehen und die fortgeschriebene Stellung wäre unbrauchbar.
+            if ((piece == 'P' || piece == 'p') && fromFile != toFile && board[toRow][toFile] == '.') {
+                next[fromRow][toFile] = '.'
+            }
+
             // Rochade: der König geht zwei Linien weit, der Turm springt mit
             if ((piece == 'K' || piece == 'k') && fromRow == toRow && kotlin.math.abs(toFile - fromFile) == 2) {
                 if (toFile > fromFile) {
@@ -1248,6 +1255,63 @@ class UltraRobustClassifier(context: Context? = null) {
                 canPieceReach(board, fromCell, candidate, isWhitePerspective)
             }
             return if (reachable.size == 1) DetectedMove(fromCell, reachable[0]) else null
+        }
+
+        /**
+         * Reine Funktion: liest eine Rochade aus zwei Aufnahmen ab.
+         *
+         * Eine Rochade räumt zwei Felder (König und Turm) und belegt zwei neue. [detectMove]
+         * verlangt bewusst genau ein geräumtes Feld und liefert deshalb null - ohne diesen Zweig
+         * fiele jede Rochade in die vollständige Erkennung, und genau dort entstehen die Fehler,
+         * die die Buchführung verderben.
+         *
+         * Erkannt wird sie an ihrem festen Muster: König und Turm stehen auf ihren Ausgangsfeldern,
+         * und die vier veränderten Felder passen zu einer der vier möglichen Rochaden. Zurück kommt
+         * der Königszug in UCI-Schreibweise - den Turm zieht [applyUciMove] von selbst mit.
+         *
+         * @return Königszug wie "e1g1" oder null
+         */
+        fun detectCastling(
+            previousStds: FloatArray,
+            currentStds: FloatArray,
+            standardBoard: Array<CharArray>,
+            isWhitePerspective: Boolean,
+            occupiedLimit: Float = 12.0f
+        ): String? {
+            if (previousStds.size < 64 || currentStds.size < 64) return null
+
+            // Die vier Rochaden als Feldnamen: König von, König nach, Turm von, Turm nach
+            val patterns = listOf(
+                listOf("e1", "g1", "h1", "f1"),
+                listOf("e1", "c1", "a1", "d1"),
+                listOf("e8", "g8", "h8", "f8"),
+                listOf("e8", "c8", "a8", "d8")
+            )
+
+            for (pattern in patterns) {
+                val (kingFrom, kingTo, rookFrom, rookTo) = pattern
+                val kingRow = 8 - (kingFrom[1] - '0')
+                val king = standardBoard.getOrNull(kingRow)?.getOrNull(kingFrom[0] - 'a') ?: continue
+                val rookRow = 8 - (rookFrom[1] - '0')
+                val rook = standardBoard.getOrNull(rookRow)?.getOrNull(rookFrom[0] - 'a') ?: continue
+
+                // Stehen König und Turm überhaupt noch zu Hause?
+                val expectKing = if (kingFrom[1] == '1') 'K' else 'k'
+                val expectRook = if (rookFrom[1] == '1') 'R' else 'r'
+                if (king != expectKing || rook != expectRook) continue
+
+                val cells = pattern.map { screenCellForSquare(it, isWhitePerspective) ?: return null }
+                val (kingFromCell, kingToCell, rookFromCell, rookToCell) = cells
+
+                val geraeumt = previousStds[kingFromCell] >= occupiedLimit &&
+                    currentStds[kingFromCell] < occupiedLimit &&
+                    previousStds[rookFromCell] >= occupiedLimit &&
+                    currentStds[rookFromCell] < occupiedLimit
+                val belegt = currentStds[kingToCell] >= occupiedLimit &&
+                    currentStds[rookToCell] >= occupiedLimit
+                if (geraeumt && belegt) return kingFrom + kingTo
+            }
+            return null
         }
 
         /**

@@ -234,10 +234,6 @@ class FloatingBubbleService : Service() {
      */
     private var castlingRights: String? = null
 
-    // Zuletzt tatsächlich gezeichneter Pfeil (Zug + Brettperspektive). Steht schon derselbe Pfeil
-    // auf dem Bildschirm, wird er nicht neu gezeichnet - ein erneutes Zeichnen sähe wie eine
-    // zweite, dritte Empfehlung aus, obwohl es dieselbe ist.
-    private var lastShownMove: String? = null
 
     /**
      * Bildschirmfelder des gerade gezeigten Zuges (Start und Ziel), sonst -1.
@@ -618,21 +614,6 @@ class FloatingBubbleService : Service() {
             setPadding(0, 0, 0, 0)
         }
 
-        // Einmalknopf: fragt die Engine genau einmal und zeichnet den Pfeil.
-        val bestMoveButton = TextView(this).apply {
-            text = "Bester Zug"
-            setTextColor(Color.rgb(180, 255, 210))
-            textSize = 11f
-            gravity = Gravity.CENTER
-            setPadding(0, dp(10), 0, dp(10))
-            background = GradientDrawable().apply {
-                cornerRadius = dp(16).toFloat()
-                setColor(Color.rgb(24, 34, 28))
-                setStroke(dp(1), Color.rgb(0, 150, 80))
-            }
-            setOnClickListener { requestSingleSuggestion() }
-        }
-
         // Auto-Zug: DuLo rechnet fortlaufend und tippt den Zug selbst - ohne Pfeil.
         // Braucht die Freigabe in den Bedienungshilfen, sonst kann keine App Berührungen
         // an eine fremde App schicken.
@@ -658,17 +639,7 @@ class FloatingBubbleService : Service() {
             setOnClickListener { destroyAssistant() }
         }
 
-        container.addView(
-            bestMoveButton,
-            LinearLayout.LayoutParams(dp(BUBBLE_SIZE_DP), LinearLayout.LayoutParams.WRAP_CONTENT)
-        )
-        container.addView(
-            autoMove,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = gap }
-        )
+        container.addView(autoMove)
         container.addView(
             destroyButton,
             LinearLayout.LayoutParams(dp(BUBBLE_SIZE_DP), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
@@ -768,30 +739,6 @@ class FloatingBubbleService : Service() {
         setAutoAnalyse(true)
     }
 
-    /**
-     * Knopf "Bester Zug": genau eine Empfehlung, als Pfeil auf dem Brett.
-     *
-     * Bewusst ein Einmalknopf und kein Schalter - wer nur nachsehen will, was hier gut wäre,
-     * braucht keine Dauerbeobachtung. Der Pfeil bleibt stehen, bis der Zug ausgeführt ist.
-     */
-    private fun requestSingleSuggestion() {
-        if (!isProjectionAlive()) {
-            requestReAuthorization()
-            return
-        }
-        if (isAnalyzing) {
-            Toast.makeText(this, "Rechnet noch", Toast.LENGTH_SHORT).show()
-            return
-        }
-        // Ohne laufende Beobachtung muss die Farbe für diese eine Stellung neu bestimmt werden
-        if (!autoAnalyseEnabled) {
-            sideEstablished = false
-            lastAcceptedBoard = null
-        }
-        clearPendingMove()
-        startAnalysis(force = true, drawArrow = true)
-    }
-
     /** Systemeinstellungen für die Bedienungshilfen öffnen */
     private fun openAccessibilitySettings() {
         try {
@@ -802,6 +749,31 @@ class FloatingBubbleService : Service() {
         } catch (e: Exception) {
             Log.w(TAG, "Einstellungen für Bedienungshilfen ließen sich nicht öffnen: ${e.message}")
         }
+    }
+
+    /**
+     * Blase und Menü für die Dauer des Tippens berührungsdurchlässig schalten.
+     *
+     * Der Bedienungshilfen-Dienst schickt die Berührung an den Bildschirmpunkt - empfangen wird sie
+     * vom obersten Fenster an dieser Stelle. Liegt die Blase gerade über dem Brett, fängt sie den
+     * eigenen Zug ab und das Spiel darunter bekommt nichts davon mit. Die Blase lässt sich frei
+     * verschieben, also ist das keine Randerscheinung, sondern passiert früher oder später.
+     */
+    private fun setOverlayTouchable(touchable: Boolean) {
+        fun apply(view: View?, params: WindowManager.LayoutParams?) {
+            if (view == null || params == null) return
+            val flag = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            val updated = if (touchable) params.flags and flag.inv() else params.flags or flag
+            if (updated == params.flags) return
+            params.flags = updated
+            try {
+                windowManager.updateViewLayout(view, params)
+            } catch (e: Exception) {
+                Log.w(TAG, "Berührungsverhalten ließ sich nicht umstellen: ${e.message}")
+            }
+        }
+        apply(bubbleView, bubbleParams)
+        apply(menuView, menuParams)
     }
 
     /**
@@ -833,13 +805,20 @@ class FloatingBubbleService : Service() {
         val points = listOf(centreOf(fromCell), centreOf(toCell))
         Log.i(TAG, "Auto-Zug tippt auf ${points.map { "(${it.first.toInt()}, ${it.second.toInt()})" }}")
 
+        // Blase und Menü aus dem Weg: sonst fangen sie die eigene Berührung ab, wenn sie gerade
+        // über dem Brett liegen.
+        setOverlayTouchable(false)
+
         // Die Beobachtung ruht, bis beide Berührungen durch sind und die Zuganimation abgelaufen
         // ist. Reichlich bemessen, denn ein zu früh abgelesener Zwischenzustand kostet die ganze
         // Partie: er wandert als erfundener Zug in die gemerkte Stellung.
+        // Vorläufige Sperre bis zur Rückmeldung: eine Pause zwischen den Berührungen plus
+        // Beruhigungszeit. Die Rückmeldung setzt sie danach genauer.
         autoMoveBusyUntil = System.currentTimeMillis() +
-            points.size * AUTO_MOVE_DELAY_MS + AUTO_MOVE_SETTLE_MS
+            (points.size - 1) * AUTO_MOVE_DELAY_MS + AUTO_MOVE_SETTLE_MS
 
         DuloAutoMoveService.tapSequence(points, AUTO_MOVE_DELAY_MS) { ok ->
+            setOverlayTouchable(true)
             if (!ok) {
                 Log.w(TAG, "Auto-Zug konnte nicht vollständig ausgeführt werden")
                 // Nicht weiter blockieren: die gewöhnliche Erkennung soll sofort wieder greifen
@@ -884,7 +863,6 @@ class FloatingBubbleService : Service() {
         // Beim Einschalten immer rechnen und die eigene Farbe aus der Ausgangsstellung neu bestimmen
         lastAcceptedBoard = null
         castlingRights = null
-        lastShownMove = null
         sideEstablished = false
         clearPendingMove()
         resetMonitorState()
@@ -960,14 +938,14 @@ class FloatingBubbleService : Service() {
             referenceCells = null
             lastTickCells = null
             undecidedRuns = 0
-            startAnalysis(force = true, drawArrow = false)
+            startAnalysis(force = true)
             return
         }
 
         val rect = lastBoardRect
         if (rect == null) {
             // Noch kein Brett bekannt (die erste Analyse lief ins Leere): erneut versuchen
-            startAnalysis(force = true, drawArrow = false)
+            startAnalysis(force = true)
             return
         }
 
@@ -991,23 +969,42 @@ class FloatingBubbleService : Service() {
         // Wird der ausstehende Zug nicht ausgeführt, darf die Beobachtung nicht ewig darauf
         // warten: verwerfen und die Stellung neu erkennen.
         if (pendingSince > 0L && System.currentTimeMillis() - pendingSince > PENDING_MOVE_TIMEOUT_MS) {
-            Log.i(TAG, "Ausstehender Zug wurde nicht ausgeführt, Stellung wird neu erkannt")
+            // Hat sich das Brett seither überhaupt nicht gerührt, wurde der Zug nicht angenommen -
+            // fast immer, weil man noch gar nicht am Zug war. Ein erneutes Tippen desselben Zuges
+            // wäre sinnlos und wiederholte sich alle acht Sekunden. Stattdessen wird der Zug
+            // fallengelassen und auf den Gegner gewartet; die gemerkte Stellung stimmt ja weiter.
+            val unveraendert = pendingMoveReference?.let { vorher ->
+                !UltraRobustClassifier.boardCellsChanged(
+                    vorher.means, vorher.stds, cells.means, cells.stds
+                )
+            } ?: false
+
             clearPendingMove()
+            if (unveraendert) {
+                Log.i(TAG, "Getippter Zug kam nicht an, Brett unverändert - es wird auf den Gegner gewartet")
+                referenceCells = cells
+                lastTickCells = cells
+                changePendingTicks = 0
+                stillTicks = 0
+                ticksSinceAnalysis = 0
+                markProgress()
+                return
+            }
+
+            Log.i(TAG, "Ausstehender Zug wurde nicht ausgeführt, Stellung wird neu erkannt")
             lastAcceptedBoard = null
-            transparentOverlay?.clearSuggestion()
-            startAnalysis(force = true, drawArrow = false)
+            castlingRights = null
+            startAnalysis(force = true)
             return
         }
 
         // Der Pfeil steht: warten, bis genau dieser Zug ausgeführt ist. Geprüft werden nur die
         // beiden betroffenen Felder - Startfeld leer, Zielfeld besetzt. Erst dann verschwindet
         // der Pfeil, und erst dann wird auf den Gegner gewartet.
-        // Der Schnellweg misst zwei Felder im laufenden Bild. Er setzt voraus, dass kein Pfeil
-        // im aufgenommenen Bild liegt - der läge sonst genau auf diesen beiden Feldern.
-        // Zwei Fälle sind unbedenklich: Das Gerät hält sich an FLAG_SECURE, oder es ist ohnehin
-        // kein Pfeil gezeichnet (im Auto-Betrieb der Normalfall).
-        val arrowInFrame = !secureCaptureOk && transparentOverlay?.hasVisibleSuggestion() == true
-        val pendingReference = if (arrowInFrame) null else pendingMoveReference
+        // Auf dem Brett liegt nichts von DuLo: gezeichnet wird nur die Störungsmeldung in der
+        // Bildschirmmitte, und die trägt FLAG_SECURE. Die beiden Felder lassen sich also
+        // unabhängig vom Verhalten des Geräts messen.
+        val pendingReference = pendingMoveReference
         if (pendingReference != null && pendingFromCell >= 0 && pendingToCell >= 0) {
             val played = UltraRobustClassifier.moveWasPlayed(
                 pendingReference.means, pendingReference.stds,
@@ -1034,7 +1031,6 @@ class FloatingBubbleService : Service() {
                     }
                 }
                 clearPendingMove()
-                transparentOverlay?.clearSuggestion()
                 // Von hier an gilt der Bildschirm als neue Vergleichsbasis: alles Weitere ist
                 // der Zug des Gegners.
                 referenceCells = cells
@@ -1197,8 +1193,8 @@ class FloatingBubbleService : Service() {
      * Wurde in der Zwischenzeit abgeschaltet, wird nichts mehr eingeblendet: eine Meldung, die
      * nach dem Ausschalten auf dem Bildschirm auftaucht, ist nur noch störend.
      */
-    private suspend fun reportError(reason: String, force: Boolean) {
-        if (!force && !autoAnalyseEnabled) {
+    private suspend fun reportError(reason: String) {
+        if (!autoAnalyseEnabled) {
             Log.i(TAG, "Störung nach dem Ausschalten unterdrückt: $reason")
             return
         }
@@ -1227,17 +1223,23 @@ class FloatingBubbleService : Service() {
         val board = lastAcceptedBoard ?: return false
         val myColourIsWhite = sessionLockedPerspective ?: return false
 
-        val detected = UltraRobustClassifier.detectMove(
-            reference.means, reference.stds, cells.means, cells.stds,
-            // Die bekannte Stellung löst mehrdeutige Zielfelder auf: die weggenommene
-            // Hervorhebung des vorigen Zuges liegt so gut wie nie auf einem erreichbaren Feld
-            standardBoard = board,
-            isWhitePerspective = myColourIsWhite
-        ) ?: return false
+        // Erst die Rochade: Sie räumt zwei Felder und passt deshalb nicht in das Muster eines
+        // gewöhnlichen Zuges. Ohne diesen Zweig fiele sie in die vollständige Erkennung.
+        val uci = UltraRobustClassifier.detectCastling(
+            reference.stds, cells.stds, board, myColourIsWhite
+        ) ?: run {
+            val detected = UltraRobustClassifier.detectMove(
+                reference.means, reference.stds, cells.means, cells.stds,
+                // Die bekannte Stellung löst mehrdeutige Zielfelder auf: die weggenommene
+                // Hervorhebung des vorigen Zuges liegt so gut wie nie auf einem erreichbaren Feld
+                standardBoard = board,
+                isWhitePerspective = myColourIsWhite
+            ) ?: return false
 
-        val uci = UltraRobustClassifier.uciFromScreenCells(
-            detected.fromCell, detected.toCell, myColourIsWhite, board
-        ) ?: return false
+            UltraRobustClassifier.uciFromScreenCells(
+                detected.fromCell, detected.toCell, myColourIsWhite, board
+            ) ?: return false
+        }
 
         val fromSquare = uci.substring(0, 2)
         val movingPiece = board[8 - (fromSquare[1] - '0')][fromSquare[0] - 'a']
@@ -1264,8 +1266,6 @@ class FloatingBubbleService : Service() {
         if (moverIsWhite == myColourIsWhite) {
             // Eigener Zug: die Empfehlung ist erledigt
             clearPendingMove()
-            lastShownMove = null
-            transparentOverlay?.clearSuggestion()
             return true
         }
 
@@ -1285,7 +1285,7 @@ class FloatingBubbleService : Service() {
             // Ergibt die fortgeschriebene Stellung etwas Unmögliches, ist die Buchführung entgleist.
             // Dann wird sie verworfen und im nächsten Takt frisch vom Bildschirm erkannt - besser
             // ein Durchgang Verzögerung als eine Partie lang auf einer falschen Stellung zu rechnen.
-            if (!evaluateAndPresent(position, drawArrow = false)) {
+            if (!evaluateAndPresent(position)) {
                 Log.w(TAG, "Fortgeschriebene Stellung ist unmöglich, sie wird neu vom Bildschirm erkannt")
                 lastAcceptedBoard = null
                 clearPendingMove()
@@ -1309,17 +1309,14 @@ class FloatingBubbleService : Service() {
      * Erkennung. Ob ein Pfeil gezeichnet wird, hängt allein davon ab, ob die Empfehlung von Hand
      * angefordert wurde: Im Auto-Betrieb wird der Zug getippt statt gezeigt.
      */
-    private suspend fun evaluateAndPresent(
-        res: UltraRobustClassifier.DetectionResult,
-        drawArrow: Boolean
-    ): Boolean {
+    private suspend fun evaluateAndPresent(res: UltraRobustClassifier.DetectionResult): Boolean {
         // Vorgegebene Bedenkzeit: go depth 30 movetime 2000
         val eval = withTimeout(ANALYSIS_TIMEOUT_MS) {
             StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = StockfishBridge.DEFAULT_MOVE_TIME_MS)
         }
 
         if (eval.bestMove == "(invalid)") {
-            reportError("Unmögliche Stellung erkannt (Könige nebeneinander oder Figuren fehlerhaft)", drawArrow)
+            reportError("Unmögliche Stellung erkannt (Könige nebeneinander oder Figuren fehlerhaft)")
             return false
         }
 
@@ -1329,21 +1326,6 @@ class FloatingBubbleService : Service() {
             TAG,
             "Zug=${eval.bestMove} Tiefe=${eval.depth}" + (if (isTrueFallback) " [Engine-Fallback]" else "")
         )
-
-        // Der Pfeil gehört zur angeforderten Empfehlung. Im Auto-Betrieb bleibt der Bildschirm
-        // unberührt - dort wird der Zug ausgeführt, nicht angezeigt.
-        if (drawArrow) {
-            val moveSignature = "${eval.bestMove}@${if (res.isWhitePerspective) "w" else "b"}"
-            lastShownMove = moveSignature
-            transparentOverlay?.showSuggestion(
-                boardRect = res.boardRect,
-                moveInfo = eval,
-                isWhitePerspective = res.isWhitePerspective,
-                // Der Knopf liefert einen Blick, keine Dauereinblendung: nach zwei Sekunden ist
-                // der Pfeil wieder weg.
-                autoDismiss = true
-            )
-        }
 
         // Die beiden Felder des Zuges merken: daran wird erkannt, wann er ausgeführt ist,
         // und darauf tippt der Auto-Zug.
@@ -1576,10 +1558,9 @@ class FloatingBubbleService : Service() {
         lastAcceptedBoard = null
         castlingRights = null
         clearPendingMove()
-        transparentOverlay?.clearSuggestion()
         resetMonitorState()
         markProgress()
-        if (autoAnalyseEnabled) startAnalysis(force = true, drawArrow = false)
+        if (autoAnalyseEnabled) startAnalysis(force = true)
 
         Toast.makeText(
             this,
@@ -1596,7 +1577,7 @@ class FloatingBubbleService : Service() {
      *        ob sich eine eigene Figur bewegt hat. false in der Dauerbeobachtung: dort bricht die
      *        Analyse vor dem Engine-Aufruf ab, wenn die eigenen Figuren unverändert stehen.
      */
-    private fun startAnalysis(force: Boolean, drawArrow: Boolean = false) {
+    private fun startAnalysis(force: Boolean) {
         if (isAnalyzing) return
 
         if (!isProjectionAlive()) {
@@ -1650,7 +1631,7 @@ class FloatingBubbleService : Service() {
                 // Umgang mit zugeschnittenen Frames (negative Ränder bzw. Überlauf): nur melden, nicht erzwingen - ein Rect außerhalb des Bildes würde beim Zuschneiden eine Ausnahme werfen,
                 // und ein unvollständiges Bild ist ohnehin nicht zuverlässig erkennbar; stattdessen erscheinen die Fehlertafel und der rote Rahmen
                 if (locateResult.isCropped) {
-                    reportError("Brett unvollständig im Bild", force)
+                    reportError("Brett unvollständig im Bild")
                     return@launch
                 }
 
@@ -1750,7 +1731,6 @@ class FloatingBubbleService : Service() {
                                 if (sideEstablished && sessionLockedPerspective != sideFromRows) {
                                     // Farbwechsel: alles, was sich auf die alte Partie bezog, ist hinfällig
                                     lastAcceptedBoard = null
-                                    lastShownMove = null
                                 }
                                 sessionLockedPerspective = sideFromRows
                                 sideEstablished = true
@@ -1840,16 +1820,14 @@ class FloatingBubbleService : Service() {
                                 // Eigener Zug ausgeführt: die Empfehlung ist erledigt, Pfeil weg,
                                 // und es wird gewartet, bis der Gegner gezogen hat.
                                 Log.i(TAG, "Eigener Zug erkannt, Pfeil wird ausgeblendet")
-                                lastShownMove = null
                                 clearPendingMove()
-                                withContext(Dispatchers.Main) { transparentOverlay?.clearSuggestion() }
                                 return@launch
                             }
 
                             // Der Gegner hat gezogen: jetzt bin ich am Zug und es wird gerechnet.
                         }
 
-                        evaluateAndPresent(res, drawArrow)
+                        evaluateAndPresent(res)
 
                         Log.i(
                             TAG,
@@ -1860,12 +1838,11 @@ class FloatingBubbleService : Service() {
                     }
                     is UltraRobustClassifier.ClassificationResponse.Rejected -> {
                         reportError(
-                            "Vom Gatter abgewiesen: ${detailedResp.reason} (Sim=${String.format("%.3f", detailedResp.medianSim)}, belegt=${detailedResp.occupiedCount})",
-                            force
+                            "Vom Gatter abgewiesen: ${detailedResp.reason} (Sim=${String.format("%.3f", detailedResp.medianSim)}, belegt=${detailedResp.occupiedCount})"
                         )
                     }
                     null -> {
-                        reportError("Der Klassifikator ist nicht initialisiert", force)
+                        reportError("Der Klassifikator ist nicht initialisiert")
                     }
                 }
             } catch (e: TimeoutCancellationException) {
@@ -1875,7 +1852,7 @@ class FloatingBubbleService : Service() {
                 Log.w(TAG, "Analyse hat zu lange gedauert und wurde abgebrochen")
             } catch (e: Exception) {
                 Log.w(TAG, "Analyse abgebrochen: ${e.javaClass.simpleName}: ${e.message}")
-                reportError("Ausnahme in der Analyse: ${e.javaClass.simpleName}", force)
+                reportError("Ausnahme in der Analyse: ${e.javaClass.simpleName}")
             } finally {
                 if (!secureCaptureOk) {
                     // Nur im Rückfallverfahren war überhaupt etwas ausgeblendet

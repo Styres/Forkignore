@@ -24,7 +24,7 @@
 
 <p align="center">
   <strong>DuLo ist ein Android-Assistent, der die Stellung im Schachmodus von Duolingo direkt auf dem Bildschirm auswertet.</strong><br>
-  Er verbindet eine genaue Vermessung des Bretts per Bildverarbeitung, die eingebettete Stockfish-16-Engine mit NNUE-Netz und ein transparentes Overlay, das den besten Zug als Pfeil über das Brett zeichnet.
+  Er verbindet eine genaue Vermessung des Bretts per Bildverarbeitung, die eingebettete Stockfish-16-Engine mit NNUE-Netz und einen Bedienungshilfen-Dienst, der den besten Zug selbst auf das Brett tippt.
 </p>
 
 ---
@@ -44,11 +44,10 @@
   - Liefert Bewertung (Centipawns / Matt), besten Zug und die zweitbeste Antwort.
 - 🎨 **Blase am Bildschirmrand, Menü und transparentes Overlay**
   - Der Vordergrunddienst `FloatingBubbleService` zeigt DuLo als frei verschiebbare Blase mit abgerundeten Ecken;
-  - ein Tippen öffnet ein kleines Menü mit drei Bedienelementen: dem Einmalknopf **Bester Zug**,
-    dem Schalter **Auto** im Stil der Systemkacheln (**Off** / **On**, animiert) und **Beenden**;
-  - **Bester Zug** fragt die Engine genau einmal und zeigt den Pfeil zwei Sekunden lang - für den
-    Blick zwischendurch, ohne dass dafür etwas dauerhaft mitlaufen muss;
-  - `TransparentCanvasOverlay` zeichnet nur den Pfeil und die beiden hervorgehobenen Felder über das Duolingo-Brett, Berührungen gehen hindurch;
+  - ein Tippen öffnet ein kleines Menü mit dem Schalter **Auto** im Stil der Systemkacheln
+    (**Off** / **On**, animiert) und dem Knopf **Beenden**;
+  - auf das Brett zeichnet DuLo nichts: `TransparentCanvasOverlay` zeigt nur eine ruhige Kachel in
+    der Bildschirmmitte, wenn etwas schiefgeht, und reicht Berührungen durch;
   - geht etwas schief, steht dort schlicht **Something went wrong :(** statt einer technischen Fehlertafel.
 - 🔁 **Dauerbeobachtung: die Stellung wird fortgeschrieben, nicht neu erraten**
   - Der Kern: Ein Zug verändert genau zwei Felder. Welche das sind, verraten schon die billigen
@@ -85,9 +84,8 @@
   - **wer gezogen hat, entscheidet der Brettvergleich**: die beiden zuletzt angenommenen Stellungen
     werden Feld für Feld verglichen. Die Figur, die auf einem Feld neu auftaucht, benennt den
     Ziehenden - das trägt auch beim Schlagzug, bei dem eine Figur der Gegenfarbe verschwindet;
-  - **der Pfeil bleibt stehen, bis der empfohlene Zug ausgeführt ist**: dafür genügt es, die beiden
-    Felder des Pfeils nachzusehen - Startfeld leer, Zielfeld besetzt. Genau wie in der Zuganzeige
-    auf lichess verschwindet der Pfeil in dem Moment, in dem die Figur angekommen ist;
+  - **der Zug gilt als ausgeführt, sobald er auf dem Brett steht**: dafür genügt es, seine beiden
+    Felder nachzusehen - Startfeld leer, Zielfeld besetzt;
   - spielt man etwas anderes, fällt das nach ein paar Sekunden auf und es wird neu erkannt;
   - verglichen wird nur **leer / hell / dunkel**, nicht die Figurenart: welche Figur auf einem Feld
     steht, verwechselt der Musterabgleich gelegentlich, und eine einzelne Verwechslung auf einem
@@ -111,10 +109,11 @@
 - 🤖 **Auto-Zug (Schalter „Auto", standardmäßig aus)**
   - trägt die Dauerbeobachtung selbst: rechnet bei jedem Zug des Gegners und tippt den Zug dann
     auch. Ein zweiter Schalter muss dafür nicht eingeschaltet werden;
-  - **ohne Pfeil** - im Auto-Betrieb bleibt der Bildschirm unberührt, der Zug wird ausgeführt statt
-    angezeigt;
+  - der Bildschirm bleibt dabei unberührt: der Zug wird ausgeführt, nicht angezeigt;
   - getippt wird erst das Startfeld, dann das Zielfeld, mit 0,3 Sekunden Pause dazwischen. Die
-    Feldmitten kommen aus demselben vermessenen Brettrechteck wie der Pfeil;
+    Feldmitten kommen aus dem vermessenen Brettrechteck. Blase und Menü werden für die Dauer der
+    Berührungen durchlässig geschaltet, sonst fangen sie den eigenen Zug ab, wenn sie gerade über
+    dem Brett liegen;
   - **während getippt wird, ruht die Beobachtung**: Die angetippte Figur wird hervorgehoben, und
     Duolingo blendet Punkte auf den möglichen Zielfeldern ein - für die Feldabtastung sehen diese
     Punkte aus wie Figuren. Ein in diesem Moment abgelesener Zug wäre erfunden und würde die
@@ -143,8 +142,8 @@ flowchart TD
     C -->|Kosinus-Abgleich zweier Regionen| D[2-Means-Clustering: Schwarz oder Weiß]
     D -->|Regelprüfung und Qualitätsgatter| E[Gültiges FEN]
     E -->|UCI über eine Pipe| F[Stockfish 16 + NNUE]
-    F -->|Bester Zug und Bewertung| G[TransparentCanvasOverlay]
-    G --> H[Pfeil und Bewertung auf dem Duolingo-Brett]
+    F -->|Bester Zug| G[DuloAutoMoveService]
+    G --> H[Berührung auf Start- und Zielfeld]
 ```
 
 ---
@@ -258,15 +257,17 @@ cd dulo
    den Dienst, das Bild leuchtet dann mit grünem Rahmen; ein weiteres Tippen beendet ihn wieder.
 3. **Duolingo öffnen** und ein Schachlevel starten.
 4. **Menü öffnen**: Kurz auf die Blase tippen. Es erscheinen:
-   - der **Schalter** (steht auf **Off**): ein Tippen schiebt den Knopf animiert nach rechts, die Spur
-     wird grün und die Beschriftung wechselt auf **On**. Ab dann wird die Engine sofort gefragt und
-     danach jedes Mal erneut, sobald der Gegner gezogen hat. Der Pfeil bleibt stehen, bis der nächste
-     Zug erkannt wird. Zurück auf **Off** beendet die Beobachtung und blendet den Pfeil aus.
+   - der Schalter **Auto** (steht auf **Off**): ein Tippen schiebt den Knopf animiert nach rechts, die
+     Spur wird grün und die Beschriftung wechselt auf **On**. Ab dann rechnet DuLo bei jedem Zug des
+     Gegners und tippt den besten Zug selbst auf das Brett. Zurück auf **Off** beendet alles.
    - **Beenden**: schließt das Menü und stoppt DuLo samt Bildschirmaufnahme vollständig, so als hätte
      man die App über die Systemeinstellungen beendet.
-5. **Farbe umschalten**: Zeigt der Pfeil einmal Züge für die gegnerischen Figuren, schaltet ein
-   langer Druck auf die Blase die eigene Farbe um. Diese Einstellung bleibt dann bestehen, bis
-   erneut lange gedrückt oder der Dienst neu gestartet wird.
+5. **Bedienungshilfen freigeben**: Beim ersten Einschalten von **Auto** springt der Schalter zurück
+   und die Systemeinstellungen öffnen sich. Dort **Bedienungshilfen › DuLo** aktivieren - ohne diese
+   Freigabe darf keine App Berührungen an eine andere App schicken.
+6. **Farbe umschalten**: Spielt DuLo einmal für die falsche Seite, schaltet ein langer Druck auf die
+   Blase die eigene Farbe um. Die fortgeschriebene Stellung wird dabei verworfen und neu erkannt,
+   denn mit der Blickrichtung dreht sich die Zuordnung der Felder.
 
 DuLo schreibt keine Screenshots auf die Platte und legt nichts in der Zwischenablage ab; alles bleibt
 im Arbeitsspeicher des Geräts.
