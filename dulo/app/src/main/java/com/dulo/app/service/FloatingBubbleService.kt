@@ -139,6 +139,15 @@ class FloatingBubbleService : Service() {
         // Geschieht so lange gar nichts mehr, wird die Buchführung verworfen und frisch erkannt
         private const val STALL_TIMEOUT_MS = 12000L
 
+        // So oft darf die Aufnahme in Folge fehlen, bevor DuLo aufgibt
+        private const val MAX_PROJECTION_FAILURES = 5
+
+        // Takt der Aufsicht über die Beobachtungsschleife
+        private const val LOOP_SUPERVISOR_INTERVAL_MS = 2000L
+
+        // Bleibt der Herzschlag der Schleife so lange aus, gilt sie als tot
+        private const val LOOP_DEAD_AFTER_MS = 3000L
+
         // So lange wird höchstens auf einen frischen Frame gewartet
         private const val FRAME_WAIT_MS = 400L
 
@@ -159,9 +168,16 @@ class FloatingBubbleService : Service() {
         private const val SWEEP_TICKS = 18
 
 
+        // Ab dieser Dauer gilt eine laufende Analyse als hängengeblieben und ihre Sperre wird
+        // gelöst. Deutlich über der Obergrenze eines Durchgangs, damit zuerst dessen eigene
+        // Zeitgrenze greift und dies hier nur der letzte Rückhalt ist.
+        private const val STUCK_ANALYSIS_MS = 12_000L
+
         // Obergrenze für einen kompletten Analysedurchgang (Aufnahme, Erkennung, Bedenkzeit).
-        // Reichlich bemessen: die Bedenkzeit sind 2 Sekunden, alles Übrige liegt im Millisekundenbereich.
-        private const val ANALYSIS_TIMEOUT_MS = 20_000L
+        // Reichlich bemessen: die Bedenkzeit sind 2 Sekunden, alles Übrige liegt im
+        // Millisekundenbereich. Muss unter STUCK_ANALYSIS_MS bleiben, damit ein Durchgang sich
+        // selbst beendet, bevor der Rückhalt eingreift.
+        private const val ANALYSIS_TIMEOUT_MS = 8000L
     }
 
     private lateinit var windowManager: WindowManager
@@ -388,6 +404,36 @@ class FloatingBubbleService : Service() {
      * Brettausschnitt, an dem die Berührungen des Auto-Zugs hängen.
      */
     private var movesSinceVerification = 0
+
+    /**
+     * Zeitpunkt des letzten Takts der Beobachtungsschleife.
+     *
+     * Herzschlag für die Aufsicht: Bleibt er stehen, läuft die Schleife nicht mehr - gleich ob sie
+     * beendet wurde, hängt oder gar nicht erst angelaufen ist.
+     */
+    @Volatile
+    private var lastTickAt = 0L
+
+    /**
+     * Wie oft die Aufnahme in Folge nicht verfügbar war.
+     *
+     * Ein einzelner Aussetzer ist normal, solange die Aufnahmefläche gerade neu angelegt wird.
+     * Erst wenn es dabei bleibt, ist die Freigabe wirklich weg.
+     */
+    private var projectionFailures = 0
+
+    /**
+     * Aufsicht über die Beobachtungsschleife.
+     *
+     * Der Nutzer hat berichtet: Nach dem Einschalten kommt zuverlässig ein Zug, danach manchmal
+     * keiner mehr - bis er aus- und wieder einschaltet, dann wieder genau ein Zug. Genau dieses
+     * Muster entsteht, wenn die Schleife nicht mehr läuft: Der erste Zug stammt nämlich nicht aus
+     * ihr, sondern unmittelbar aus dem Einschalten. Alles Weitere hängt an der Schleife.
+     *
+     * Statt darauf zu warten, die eine Ursache zu finden, übernimmt die Aufsicht das, was der
+     * Nutzer bisher von Hand getan hat: Steht der Herzschlag, wird die Schleife neu angeworfen.
+     */
+    private var loopSupervisorJob: Job? = null
     /** Beginn des laufenden Analysedurchgangs; Grundlage für den Wachhund gegen hängende Durchgänge */
     @Volatile
     private var analysisStartedAt = 0L
@@ -1086,8 +1132,10 @@ class FloatingBubbleService : Service() {
         markProgress()
         awaitingBoardChange = false
         fallbackReported = false
+        projectionFailures = 0
         startAnalysis(force = false)
         startMonitoring()
+        startLoopSupervisor()
     }
 
     /**
@@ -1099,6 +1147,7 @@ class FloatingBubbleService : Service() {
     private fun startMonitoring() {
         monitorJob?.cancel()
         resetMonitorState()
+        lastTickAt = System.currentTimeMillis()
         monitorJob = serviceScope.launch {
             while (isActive && autoAnalyseEnabled) {
                 delay(POLL_INTERVAL_MS)
@@ -1119,17 +1168,60 @@ class FloatingBubbleService : Service() {
                     Log.w(TAG, "Takt der Beobachtung fehlgeschlagen: ${e.javaClass.simpleName}: ${e.message}")
                 }
             }
+            // Bisher endete die Schleife lautlos. Wer hinterher wissen wollte, warum nichts mehr
+            // geschah, fand nichts im Protokoll.
+            Log.w(
+                TAG,
+                "Beobachtungsschleife beendet (aktiv=$isActive, Auto an=$autoAnalyseEnabled)"
+            )
+        }
+    }
+
+    /**
+     * Wirft die Beobachtungsschleife wieder an, wenn ihr Herzschlag ausbleibt.
+     *
+     * Bewusst schlicht gehalten und ohne Aufnahme, Erkennung oder Engine: Was hier läuft, darf
+     * nicht an denselben Dingen scheitern wie die Schleife, die es beaufsichtigt.
+     */
+    private fun startLoopSupervisor() {
+        loopSupervisorJob?.cancel()
+        loopSupervisorJob = serviceScope.launch {
+            while (isActive) {
+                delay(LOOP_SUPERVISOR_INTERVAL_MS)
+                if (!autoAnalyseEnabled) continue
+
+                val job = monitorJob
+                val stillerHerzschlag = System.currentTimeMillis() - lastTickAt > LOOP_DEAD_AFTER_MS
+                val jobTot = job == null || !job.isActive
+
+                if (jobTot || stillerHerzschlag) {
+                    Log.w(
+                        TAG,
+                        "Beobachtung reagiert nicht (Auftrag tot=$jobTot, letzter Takt vor " +
+                            "${System.currentTimeMillis() - lastTickAt} ms), sie wird neu gestartet"
+                    )
+                    // Eine hängengebliebene Sperre würde die neue Schleife sofort wieder blockieren
+                    isAnalyzing = false
+                    clearPendingMove()
+                    setOverlayTouchable(true)
+                    markProgress()
+                    startMonitoring()
+                }
+            }
         }
     }
 
     /** Ein einzelner Takt der Dauerbeobachtung */
     private suspend fun monitorTick() {
+        lastTickAt = System.currentTimeMillis()
         if (isAnalyzing) {
             // Wachhund: bleibt ein Durchgang hängen (Engine, Aufnahme, Systemdienst), wird die
             // Sperre nach der Obergrenze von Hand gelöst. Ohne das stand isAnalyzing für immer
             // und die Beobachtung reagierte auf nichts mehr.
-            if (System.currentTimeMillis() - analysisStartedAt > ANALYSIS_TIMEOUT_MS + 10_000L) {
-                Log.w(TAG, "Analyse hängt seit über ${(ANALYSIS_TIMEOUT_MS + 10_000L) / 1000} Sekunden, Sperre wird gelöst")
+            // Straffer als die Obergrenze eines Durchgangs: Eine hängende Sperre legt die ganze
+            // Beobachtung still, und länger als ein paar Sekunden darf das nicht dauern.
+            if (System.currentTimeMillis() - analysisStartedAt > STUCK_ANALYSIS_MS) {
+                Log.w(TAG, "Analyse hängt seit über ${STUCK_ANALYSIS_MS / 1000} Sekunden, Sperre wird gelöst")
                 isAnalyzing = false
             }
             return
@@ -1646,6 +1738,8 @@ class FloatingBubbleService : Service() {
     }
 
     private fun stopMonitoring() {
+        loopSupervisorJob?.cancel()
+        loopSupervisorJob = null
         monitorJob?.cancel()
         monitorJob = null
         clearPendingMove()
@@ -1823,13 +1917,22 @@ class FloatingBubbleService : Service() {
         if (isAnalyzing) return
 
         if (!isProjectionAlive()) {
-            autoAnalyseEnabled = false
-            autoMoveEnabled = false
-            autoMoveToggle?.setOn(false, animate = true)
-            stopMonitoring()
-            requestReAuthorization()
+            // Nicht beim ersten Aussetzer aufgeben. Die Aufnahmefläche ist kurzzeitig nicht
+            // vorhanden, während sie neu angelegt wird - etwa nach einer Drehung. Wer hier sofort
+            // abschaltet, beendet die Beobachtungsschleife (ihre Bedingung hängt an
+            // autoAnalyseEnabled), und danach hilft nur noch Aus- und Einschalten von Hand.
+            projectionFailures++
+            Log.w(TAG, "Aufnahme gerade nicht verfügbar (Versuch $projectionFailures)")
+            if (projectionFailures >= MAX_PROJECTION_FAILURES) {
+                autoAnalyseEnabled = false
+                autoMoveEnabled = false
+                autoMoveToggle?.setOn(false, animate = true)
+                stopMonitoring()
+                requestReAuthorization()
+            }
             return
         }
+        projectionFailures = 0
 
         isAnalyzing = true
         analysisStartedAt = System.currentTimeMillis()

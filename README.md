@@ -90,6 +90,14 @@
     bringt zugleich den Brettausschnitt auf den neuesten Stand, an dem die Berührungen hängen;
   - ein **unverändertes Brett gilt nicht als Stillstand**: Der Gegner überlegt, das ist der
     Normalfall und kein Grund einzugreifen;
+  - über der Beobachtungsschleife wacht eine **Aufsicht**: Die Schleife meldet bei jedem Takt einen
+    Herzschlag; bleibt er drei Sekunden aus oder ist ihr Auftrag beendet, wird sie neu angeworfen.
+    Der erste Zug nach dem Einschalten stammt nämlich nicht aus der Schleife, sondern unmittelbar
+    aus dem Einschalten - hörte sie auf, kam genau ein Zug und danach keiner mehr, bis der Nutzer
+    von Hand aus- und wieder einschaltete. Die Aufsicht übernimmt jetzt genau das;
+  - ein einzelner Aussetzer der Aufnahme schaltet nichts mehr ab: Die Aufnahmefläche ist kurz nicht
+    vorhanden, während sie neu angelegt wird. Erst nach fünf Fehlversuchen in Folge gilt die
+    Freigabe als verloren;
   - über allem wacht eine **Aufsichtsuhr**: geschieht zwölf Sekunden lang gar nichts mehr, wird die
     Buchführung verworfen und die Stellung frisch vom Bildschirm gelesen. Jede Sackgasse ist damit
     höchstens ein Aussetzer von wenigen Sekunden.
