@@ -919,27 +919,6 @@ class UltraRobustClassifier(context: Context? = null) {
         }
 
         /**
-         * Reine Funktion: Felder, über die der eingezeichnete Pfeil läuft.
-         *
-         * Start- und Zielfeld sind hervorgehoben, dazwischen liegt der Pfeilschaft; auf diesen Feldern
-         * ist ein Vergleich der Helligkeit wertlos. Abgetastet wird die Strecke in Vierteln einer
-         * Feldbreite, damit auch gestreifte Felder erfasst werden.
-         *
-         * @return Feldindizes (Zeile * 8 + Spalte) im Bildschirmraster
-         */
-        fun cellsCoveredByArrow(fromRow: Int, fromCol: Int, toRow: Int, toCol: Int): Set<Int> {
-            val covered = mutableSetOf<Int>()
-            val steps = 32
-            for (step in 0..steps) {
-                val t = step / steps.toFloat()
-                val row = (fromRow + (toRow - fromRow) * t).roundToInt()
-                val col = (fromCol + (toCol - fromCol) * t).roundToInt()
-                if (row in 0..7 && col in 0..7) covered.add(row * 8 + col)
-            }
-            return covered
-        }
-
-        /**
          * Reine Funktion: mittlerer Helligkeitsabstand zweier eingedampfter Brettausschnitte.
          *
          * Die Dauerbeobachtung vergleicht damit aufeinanderfolgende Frames, ohne jedes Mal die

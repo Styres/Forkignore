@@ -75,20 +75,4 @@ class FeldVergleichTest {
         )
     }
 
-    @Test
-    fun testPfeilfelderEntlangDerStrecke() {
-        // Waagerechter Pfeil von Feld (3,1) nach (3,5): alle Felder dazwischen zählen dazu
-        val felder = UltraRobustClassifier.cellsCoveredByArrow(3, 1, 3, 5)
-        assertEquals(setOf(3 * 8 + 1, 3 * 8 + 2, 3 * 8 + 3, 3 * 8 + 4, 3 * 8 + 5), felder)
-    }
-
-    @Test
-    fun testPfeilfelderBeimSpringerzug() {
-        // Springerzug von (7,1) nach (5,2): Start und Ziel müssen enthalten sein
-        val felder = UltraRobustClassifier.cellsCoveredByArrow(7, 1, 5, 2)
-        assertTrue(felder.contains(7 * 8 + 1))
-        assertTrue(felder.contains(5 * 8 + 2))
-        // und nichts außerhalb des Bretts
-        assertTrue(felder.all { it in 0..63 })
-    }
 }

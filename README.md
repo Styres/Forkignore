@@ -58,8 +58,9 @@
   - dafür verfolgt DuLo **fünfmal pro Sekunde jede Figurenposition**: je Feld werden Streuung (steht
     dort eine Figur?) und Helligkeit (hell oder dunkel?) gelesen, direkt aus dem Frame-Puffer und ohne
     Vollbild-Kopie;
-  - die Felder unter dem gezeichneten Pfeil bleiben beim Vergleich außen vor, sonst würde die Zeichnung
-    selbst als Veränderung zählen;
+  - der gezeichnete Pfeil stört den Vergleich nicht: die Vergleichsbasis entsteht erst nach dem
+    Zeichnen, er steht also in beiden Aufnahmen gleich und hebt sich auf. Gerade die Felder unter dem
+    Pfeil sind die wichtigsten, denn dort führt man den empfohlenen Zug aus;
   - die volle Erkennung läuft an, sobald die Figuren zwei Takte lang stillstehen - spätestens aber nach
     rund drei Sekunden, damit dauerhafte Animationen der Oberfläche sie nicht aufhalten;
   - zusätzlich sieht ein Sicherheitsnetz alle paar Sekunden von sich aus nach. Die Engine läuft dabei

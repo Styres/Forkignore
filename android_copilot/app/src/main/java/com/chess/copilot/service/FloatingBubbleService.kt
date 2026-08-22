@@ -104,10 +104,12 @@ class FloatingBubbleService : Service() {
         // Duolingo animiert nach einem Zug gern weiter (Hervorhebungen, Maskottchen).
         private const val MAX_PENDING_TICKS = 15
 
-        // Sicherheitsnetz: spätestens nach so vielen Takten wird ohnehin nachgesehen,
-        // auch wenn der Bildvergleich nichts gemeldet hat. Die Engine läuft dabei nur,
-        // wenn der Gegner tatsächlich gezogen hat - der Durchlauf kostet also wenig.
-        private const val SWEEP_TICKS = 25
+        // Sicherheitsnetz: spätestens nach so vielen Takten (rund 2,5 Sekunden) wird ohnehin
+        // nachgesehen, auch wenn der Feldvergleich nichts gemeldet hat. Damit bleibt ein Pfeil
+        // selbst im schlechtesten Fall nicht länger stehen. Die Engine läuft dabei nur, wenn der
+        // Gegner tatsächlich gezogen hat, und das Overlay wird nicht mehr abgerissen - der
+        // Durchlauf kostet also kaum etwas.
+        private const val SWEEP_TICKS = 12
 
         // Kantenlänge des Rasters, auf das der Brettausschnitt zum Vergleich eingedampft wird
         private const val FINGERPRINT_GRID = 12
@@ -188,27 +190,12 @@ class FloatingBubbleService : Service() {
      * sich nichts geändert hat - die zuletzt gelesenen Felder gelten dann weiter.
      */
     private var lastKnownCells: BoardCells? = null
-    // Felder, auf denen der eingezeichnete Pfeil liegt; dort ist ein Helligkeitsvergleich wertlos
-    private var arrowCells: Set<Int> = emptySet()
     // Wie viele Takte am Stück weichen die Felder schon von der Vergleichsbasis ab
     private var changePendingTicks = 0
     // Wie viele Takte am Stück stehen die Figuren schon still
     private var stillTicks = 0
     // Takte seit der letzten Analyse (für das Sicherheitsnetz)
     private var ticksSinceAnalysis = 0
-
-    /**
-     * Zuletzt gezeichneter Pfeil. Für jede Aufnahme wird das Overlay kurz ausgeblendet; ergibt die
-     * Analyse danach, dass der Gegner noch am Zug ist, wird derselbe Pfeil wieder eingeblendet,
-     * statt den Nutzer ohne Hinweis zurückzulassen.
-     */
-    private class ArrowSnapshot(
-        val boardRect: Rect,
-        val eval: StockfishBridge.EngineEvaluation,
-        val isWhitePerspective: Boolean
-    )
-
-    private var lastArrow: ArrowSnapshot? = null
 
     private val serviceJob = Job()
     private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
@@ -588,7 +575,6 @@ class FloatingBubbleService : Service() {
 
         if (!enabled) {
             stopMonitoring()
-            arrowCells = emptySet()
             transparentOverlay?.hide()
             Toast.makeText(this, "Analyse aus", Toast.LENGTH_SHORT).show()
             return
@@ -653,11 +639,11 @@ class FloatingBubbleService : Service() {
 
                 // Steht auf einem Feld etwas anderes als bei der letzten Analyse?
                 val changedSinceAnalysis = UltraRobustClassifier.boardCellsChanged(
-                    reference.means, reference.stds, cells.means, cells.stds, arrowCells
+                    reference.means, reference.stds, cells.means, cells.stds
                 )
                 // Und stehen die Figuren gerade still, ist die Zuganimation also durch?
                 val sameAsLastTick = lastTickCells?.let {
-                    !UltraRobustClassifier.boardCellsChanged(it.means, it.stds, cells.means, cells.stds, arrowCells)
+                    !UltraRobustClassifier.boardCellsChanged(it.means, it.stds, cells.means, cells.stds)
                 } ?: false
                 lastTickCells = cells
 
@@ -676,7 +662,7 @@ class FloatingBubbleService : Service() {
                 // Empfehlung erledigt, der Pfeil kommt weg und die Engine bleibt außen vor.
                 // Erst der Zug des Gegners löst die vollständige Erkennung samt Berechnung aus.
                 val detected = UltraRobustClassifier.detectMove(
-                    reference.means, reference.stds, cells.means, cells.stds, arrowCells
+                    reference.means, reference.stds, cells.means, cells.stds
                 )
                 val board = trackedScreenBoard
                 val mover = if (detected != null && board != null) {
@@ -695,14 +681,10 @@ class FloatingBubbleService : Service() {
                     if (movedByMe) {
                         // Eigener Zug: Brett fortschreiben, Pfeil ausblenden, keine Berechnung
                         trackedScreenBoard = UltraRobustClassifier.applyMoveToScreenBoard(board!!, detected)
-                        lastArrow = null
-                        arrowCells = emptySet()
                         transparentOverlay?.hide()
-                        referenceCells = cells
-                        lastTickCells = cells
-                        changePendingTicks = 0
-                        stillTicks = 0
-                        ticksSinceAnalysis = 0
+                        // Ohne Pfeil sieht das Brett anders aus: die Vergleichsbasis wird im
+                        // nächsten Takt frisch genommen, sonst gälte allein das Ausblenden als Zug.
+                        resetMonitorState()
                         continue
                     }
                 }
@@ -855,36 +837,6 @@ class FloatingBubbleService : Service() {
             try { image?.close() } catch (_: Exception) {}
             isCapturingFrame = false
         }
-    }
-
-    /** Den zuletzt berechneten Pfeil unverändert wieder einblenden */
-    private fun restoreLastArrow() {
-        val snapshot = lastArrow ?: return
-        transparentOverlay?.showSuggestion(
-            boardRect = snapshot.boardRect,
-            moveInfo = snapshot.eval,
-            isWhitePerspective = snapshot.isWhitePerspective,
-            autoDismiss = !autoAnalyseEnabled
-        )
-    }
-
-    /**
-     * Rechnet einen UCI-Zug in die Bildschirmfelder um, über die der gezeichnete Pfeil läuft.
-     * Leere Menge, wenn es kein normaler Zug ist (Matt, Patt, abgewiesene Stellung).
-     */
-    private fun arrowCellsFor(uci: String, isWhitePerspective: Boolean): Set<Int> {
-        if (uci.length < 4 || uci[0] !in 'a'..'h' || uci[2] !in 'a'..'h') return emptySet()
-        val fromRank = uci[1] - '0'
-        val toRank = uci[3] - '0'
-        if (fromRank !in 1..8 || toRank !in 1..8) return emptySet()
-        val fromCol = uci[0] - 'a'
-        val toCol = uci[2] - 'a'
-
-        val fromRow = if (isWhitePerspective) 8 - fromRank else fromRank - 1
-        val fromScreenCol = if (isWhitePerspective) fromCol else 7 - fromCol
-        val toRow = if (isWhitePerspective) 8 - toRank else toRank - 1
-        val toScreenCol = if (isWhitePerspective) toCol else 7 - toCol
-        return UltraRobustClassifier.cellsCoveredByArrow(fromRow, fromScreenCol, toRow, toScreenCol)
     }
 
     /** Beendet DuLo vollständig: Beobachtung, Menü, Overlay, Bildschirmaufnahme und Dienst */
@@ -1126,13 +1078,10 @@ class FloatingBubbleService : Service() {
                                 // Der eigene Zug ist ausgeführt: die Empfehlung ist erledigt. Pfeil weg und
                                 // warten, bis der Gegner gezogen hat.
                                 lastOwnSquares = ownSquares
-                                lastArrow = null
-                                arrowCells = emptySet()
                                 withContext(Dispatchers.Main) { transparentOverlay?.hide() }
-                            } else {
-                                // Es hat sich nichts Entscheidendes getan: den bisherigen Pfeil wieder zeigen
-                                restoreLastArrow()
                             }
+                            // Sonst hat sich nichts Entscheidendes getan: der bisherige Pfeil wird
+                            // am Ende dieses Durchlaufs ohnehin wieder sichtbar geschaltet.
                             return@launch
                         }
                         lastOpponentSquares = opponentSquares
@@ -1158,13 +1107,6 @@ class FloatingBubbleService : Service() {
                             // In der Dauerbeobachtung bleibt der Pfeil stehen, bis der nächste Zug erkannt wird
                             autoDismiss = !autoAnalyseEnabled
                         )
-                        lastArrow = ArrowSnapshot(
-                            boardRect = Rect(res.boardRect),
-                            eval = eval,
-                            isWhitePerspective = res.isWhitePerspective
-                        )
-                        // Felder unter dem Pfeil merken: dort verfälscht die Zeichnung jeden Vergleich
-                        arrowCells = arrowCellsFor(eval.bestMove, res.isWhitePerspective)
                         lastFen = res.fullFen
 
                         // Befunde nur ins Protokoll, der Bildschirm bleibt ruhig
