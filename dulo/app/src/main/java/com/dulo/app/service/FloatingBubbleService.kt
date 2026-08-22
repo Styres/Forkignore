@@ -96,6 +96,28 @@ class FloatingBubbleService : Service() {
         // Ab dieser Druckdauer gilt eine Berührung der Blase als langer Druck (Perspektive umschalten)
         private const val LONG_PRESS_MS = 500L
 
+        /*
+         * Zeitgefüge - bitte vor jeder Änderung an den Zeitwerten lesen.
+         *
+         * Die Werte hängen voneinander ab, und ein einzelner zu knapper Wert richtet mehr Schaden
+         * an als gar keine Überwachung. Ein Beispiel aus der Praxis: Die Frist der Aufsicht stand
+         * einmal auf 3 Sekunden, während ein gewöhnlicher Takt mit Bedenkzeit und Erkennung
+         * regelmäßig länger dauert. Die Aufsicht hielt die gesunde Schleife für tot und brach die
+         * Berechnung mitten im Zug ab; die Engine kam aus dem Tritt und es zog der Regelgenerator.
+         *
+         * Diese Ordnung muss gelten:
+         *
+         *   Dauer eines Takts mit Berechnung  <  LOOP_DEAD_AFTER_MS  <  STUCK_ANALYSIS_MS
+         *   ANALYSIS_TIMEOUT_MS               <  STUCK_ANALYSIS_MS
+         *   Tippfolge + Zuganimation          <  PENDING_MOVE_TIMEOUT_MS
+         *
+         * Dazu zwei Regeln, die sich nicht aus Zahlen ergeben:
+         *   - Der Herzschlag der Schleife zählt nur, solange gerade nicht gerechnet wird.
+         *     Ein rechnender Takt ist beschäftigt, nicht tot.
+         *   - Der allererste Engine-Aufruf zahlt den Prozessstart samt Entpacken der Binary und
+         *     Handshake mit. ANALYSIS_TIMEOUT_MS muss das aushalten.
+         */
+
         // Takt der Dauerbeobachtung: rund zwölfmal pro Sekunde wird jede Figurenposition
         // nachgesehen. Der Takt kostet fast nichts (gut zweitausend Bildpunkte), bestimmt aber
         // unmittelbar, wie schnell der Zug des Gegners auffällt.
@@ -139,8 +161,10 @@ class FloatingBubbleService : Service() {
         // Geschieht so lange gar nichts mehr, wird die Buchführung verworfen und frisch erkannt
         private const val STALL_TIMEOUT_MS = 12000L
 
-        // So oft darf die Aufnahme in Folge fehlen, bevor DuLo aufgibt
-        private const val MAX_PROJECTION_FAILURES = 5
+        // So viele Takte in Folge darf die Aufnahme fehlen, bevor DuLo aufgibt.
+        // Bei 80 ms je Takt sind das gut vier Sekunden - lang genug für das Neuanlegen der
+        // Aufnahmefläche, kurz genug, um nicht endlos stumm weiterzulaufen.
+        private const val PROJECTION_DEAD_TICKS = 50
 
         // Takt der Aufsicht über die Beobachtungsschleife
         private const val LOOP_SUPERVISOR_INTERVAL_MS = 2000L
@@ -418,10 +442,11 @@ class FloatingBubbleService : Service() {
     private var lastTickAt = 0L
 
     /**
-     * Wie oft die Aufnahme in Folge nicht verfügbar war.
+     * Wie viele Takte in Folge die Aufnahme nicht verfügbar war.
      *
-     * Ein einzelner Aussetzer ist normal, solange die Aufnahmefläche gerade neu angelegt wird.
-     * Erst wenn es dabei bleibt, ist die Freigabe wirklich weg.
+     * Ein kurzer Aussetzer ist normal, solange die Aufnahmefläche gerade neu angelegt wird. Erst
+     * wenn es dabei bleibt, ist die Freigabe wirklich weg. Gezählt wird ausschließlich im Takt -
+     * er läuft fortlaufend und ist die einzige Stelle, an der sich das verlässlich abzählen lässt.
      */
     private var projectionFailures = 0
 
@@ -1159,6 +1184,9 @@ class FloatingBubbleService : Service() {
                 // beendet, und die App wirkte danach eingefroren.
                 try {
                     monitorTick()
+                    // Auch am Ende: Ein langer Takt (Erkennung samt Bedenkzeit) darf danach nicht
+                    // noch als versäumter Herzschlag nachwirken.
+                    lastTickAt = System.currentTimeMillis()
                 } catch (e: TimeoutCancellationException) {
                     // withTimeout wirft eine CancellationException - sie darf hier aber nicht als
                     // Abbruch der Schleife durchgehen. Sonst beendete eine einzige zu lange
@@ -1211,8 +1239,10 @@ class FloatingBubbleService : Service() {
                         "Beobachtung reagiert nicht (Auftrag tot=$jobTot, Analyse hängt=$analyseHaengt," +
                             " letzter Takt vor ${jetzt - lastTickAt} ms), sie wird neu gestartet"
                     )
-                    // Eine hängengebliebene Sperre würde die neue Schleife sofort wieder blockieren
-                    isAnalyzing = false
+                    // Die Sperre nur lösen, wenn sie tatsächlich hängt. Läuft daneben noch eine
+                    // gültige Berechnung, würde ein blindes Zurücksetzen eine zweite danebenlaufen
+                    // lassen, und beide fassten dieselben Felder an.
+                    if (analyseHaengt) isAnalyzing = false
                     clearPendingMove()
                     setOverlayTouchable(true)
                     markProgress()
@@ -1238,7 +1268,23 @@ class FloatingBubbleService : Service() {
             return
         }
         if (!autoAnalyseEnabled) return
-        if (!isProjectionAlive()) return
+
+        // Fehlt die Aufnahme, kann kein Takt etwas ausrichten. Ein kurzer Aussetzer ist normal,
+        // während die Aufnahmefläche neu angelegt wird - bleibt sie weg, würde die Schleife sonst
+        // stumm weiterlaufen, ohne dass irgendetwas darauf hindeutet.
+        if (!isProjectionAlive()) {
+            projectionFailures++
+            if (projectionFailures == PROJECTION_DEAD_TICKS) {
+                Log.w(TAG, "Aufnahme fehlt dauerhaft, Auto-Zug wird beendet")
+                autoAnalyseEnabled = false
+                autoMoveEnabled = false
+                autoMoveToggle?.setOn(false, animate = true)
+                setOverlayTouchable(true)
+                requestReAuthorization()
+            }
+            return
+        }
+        projectionFailures = 0
 
         // Sicherheitsnetz: Blieb die Rückmeldung der Tippfolge aus, wären Blase und Menü dauerhaft
         // nicht mehr zu bedienen. Ist die Sperre längst abgelaufen, werden sie zurückgeholt.
@@ -1932,18 +1978,11 @@ class FloatingBubbleService : Service() {
             // vorhanden, während sie neu angelegt wird - etwa nach einer Drehung. Wer hier sofort
             // abschaltet, beendet die Beobachtungsschleife (ihre Bedingung hängt an
             // autoAnalyseEnabled), und danach hilft nur noch Aus- und Einschalten von Hand.
-            projectionFailures++
-            Log.w(TAG, "Aufnahme gerade nicht verfügbar (Versuch $projectionFailures)")
-            if (projectionFailures >= MAX_PROJECTION_FAILURES) {
-                autoAnalyseEnabled = false
-                autoMoveEnabled = false
-                autoMoveToggle?.setOn(false, animate = true)
-                stopMonitoring()
-                requestReAuthorization()
-            }
+            // Ob die Freigabe endgültig weg ist, entscheidet allein der Takt - er läuft ohnehin
+            // fortlaufend und ist die einzige Stelle, an der sich das verlässlich abzählen lässt.
+            Log.w(TAG, "Aufnahme gerade nicht verfügbar, dieser Durchgang entfällt")
             return
         }
-        projectionFailures = 0
 
         isAnalyzing = true
         analysisStartedAt = System.currentTimeMillis()
