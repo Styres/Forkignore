@@ -289,7 +289,12 @@ class TransparentCanvasOverlay(private val context: Context) {
             layoutType,
             WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    // FLAG_SECURE nimmt dieses Fenster von der Bildschirmaufnahme aus. Damit
+                    // landet der eigene Pfeil nicht in dem Bild, das gleich erkannt wird - und
+                    // genau deshalb muss er für die Aufnahme nicht mehr ausgeblendet werden.
+                    // Ob das Gerät sich daran hält, prüft der Dienst einmalig nach (secureCaptureOk).
+                    WindowManager.LayoutParams.FLAG_SECURE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -301,6 +306,24 @@ class TransparentCanvasOverlay(private val context: Context) {
         }
         windowManager.addView(overlayView, params)
         isShowing = true
+    }
+
+    /**
+     * Nimmt den Pfeil weg, lässt das Fenster aber stehen.
+     *
+     * Bewusst nicht [hide]: das entfernt das Fenster aus dem WindowManager, und das erneute
+     * Anlegen beim nächsten Zug blitzt sichtbar auf. Das Fenster ist durchsichtig und für die
+     * Bildschirmaufnahme ohnehin unsichtbar - es darf einfach stehenbleiben.
+     */
+    fun clearSuggestion() {
+        autoDismissJob?.cancel()
+        autoDismissJob = null
+        overlayView?.apply {
+            moveInfo = null
+            boardRect = null
+            errorMessage = null
+            postInvalidate()
+        }
     }
 
     /**

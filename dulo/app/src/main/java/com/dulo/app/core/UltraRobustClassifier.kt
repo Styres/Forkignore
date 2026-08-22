@@ -806,17 +806,99 @@ class UltraRobustClassifier(context: Context? = null) {
         }
 
         /**
-         * Reine Funktion: Hat der Gegner seit der letzten Analyse gezogen? Dann ist man selbst am Zug.
+         * Ergebnis des Brettvergleichs zweier aufeinanderfolgender Erkennungen.
          *
-         * Entscheidend ist, ob eine gegnerische Figur auf einem Feld auftaucht, das vorher nicht von
-         * ihm besetzt war. Damit zählt jeder gegnerische Zug, auch ein Schlagfall auf einem eigenen
-         * Feld, eine Rochade oder eine Umwandlung.
-         *
-         * Bewusst nicht gezählt wird der Fall, dass gegnerische Figuren nur verschwinden: das passiert,
-         * wenn man selbst schlägt, und danach ist der Gegner am Zug, nicht man selbst.
+         * @param changedSquares Anzahl der Felder, deren Inhalt sich geändert hat
+         * @param moverIsWhite   true = Weiß hat gezogen, false = Schwarz, null = nicht eindeutig
          */
-        fun opponentMovedSince(previousSquares: Set<String>, currentSquares: Set<String>): Boolean {
-            return currentSquares.any { it !in previousSquares }
+        data class BoardDiff(val changedSquares: Int, val moverIsWhite: Boolean?)
+
+        /**
+         * Reine Funktion: vergleicht zwei erkannte Bretter und sagt, wer gezogen hat.
+         *
+         * Das ist der Kern der Zugerkennung und ersetzt die frühere Zählweise über Feldmengen.
+         * Der Unterschied ist entscheidend: gezählt wird nicht mehr, wie viele Felder einer Farbe
+         * neu belegt sind, sondern es wird die Figur benannt, die auf einem Feld neu aufgetaucht
+         * ist. Deren Farbe ist die Farbe des Ziehenden - das gilt für einen stillen Zug ebenso wie
+         * für einen Schlagzug, bei dem eine Figur der Gegenfarbe verschwindet.
+         *
+         * Bewusst zurückhaltend: Alles, was nicht zu einem einzelnen Zug passt (kein oder mehr als
+         * vier veränderte Felder, widersprüchliche Farben unter den neuen Figuren), liefert
+         * `moverIsWhite = null`. Der Dienst wartet dann auf eine saubere Aufnahme, statt auf
+         * gut Glück zu rechnen. Vier Felder deckt die Rochade ab.
+         *
+         * @param previous Brett der letzten angenommenen Erkennung (Standardausrichtung)
+         * @param current  Brett der aktuellen Erkennung (Standardausrichtung)
+         */
+        fun diffBoards(previous: Array<CharArray>, current: Array<CharArray>): BoardDiff {
+            var changed = 0
+            var appearedWhite = 0
+            var appearedBlack = 0
+            var vacatedWhite = 0
+            var vacatedBlack = 0
+
+            for (r in 0 until 8) {
+                for (c in 0 until 8) {
+                    val before = previous.getOrNull(r)?.getOrNull(c) ?: '.'
+                    val after = current.getOrNull(r)?.getOrNull(c) ?: '.'
+                    if (before == after) continue
+                    changed++
+
+                    // Neu belegt oder mit einer anderen Figur belegt: das ist ein Zielfeld.
+                    // Die Farbe der dort stehenden Figur ist die Farbe des Ziehenden.
+                    if (after != '.') {
+                        if (after.isUpperCase()) appearedWhite++ else appearedBlack++
+                    }
+                    // Geräumt: Startfeld eines Zuges oder geschlagene Figur
+                    if (before != '.') {
+                        if (before.isUpperCase()) vacatedWhite++ else vacatedBlack++
+                    }
+                }
+            }
+
+            if (changed == 0) return BoardDiff(0, null)
+            // Mehr als eine Rochade an Veränderung kann kein einzelner Zug sein: dann hat die
+            // Erkennung gepatzt oder es lief eine Animation über das Brett.
+            if (changed > 4) return BoardDiff(changed, null)
+
+            // Eindeutig ist der Zug, wenn alle neu aufgetauchten Figuren dieselbe Farbe haben.
+            val mover = when {
+                appearedWhite > 0 && appearedBlack == 0 -> true
+                appearedBlack > 0 && appearedWhite == 0 -> false
+                // Nichts neu belegt (nur geräumt, etwa bei einer verdeckten Figur):
+                // dann entscheidet die geräumte Farbe, sofern auch die eindeutig ist.
+                appearedWhite == 0 && appearedBlack == 0 && vacatedWhite > 0 && vacatedBlack == 0 -> true
+                appearedWhite == 0 && appearedBlack == 0 && vacatedBlack > 0 && vacatedWhite == 0 -> false
+                else -> null
+            }
+            return BoardDiff(changed, mover)
+        }
+
+        /**
+         * Reine Funktion: steht hier die Grundstellung einer neuen Partie?
+         *
+         * Wird gebraucht, um die eigene Farbe zwischen zwei Partien neu zu bestimmen - der Nutzer
+         * spielt mal Weiß, mal Schwarz, und eine einmal gesetzte Sperre wäre in der nächsten Partie
+         * womöglich falsch. Geprüft wird die Bildschirmansicht: die beiden äußeren Reihen sind voll
+         * besetzt, die vier mittleren leer.
+         *
+         * @param screenBoard Brett so, wie es auf dem Bildschirm steht (row 0 = oben, row 7 = unten)
+         */
+        fun isFreshStartPosition(screenBoard: Array<CharArray>): Boolean {
+            if (screenBoard.size < 8) return false
+            var outerOccupied = 0
+            var middleOccupied = 0
+            for (r in 0 until 8) {
+                val row = screenBoard.getOrNull(r) ?: return false
+                if (row.size < 8) return false
+                for (c in 0 until 8) {
+                    if (row[c] == '.') continue
+                    if (r <= 1 || r >= 6) outerOccupied++ else middleOccupied++
+                }
+            }
+            // Ein bis zwei Fehlerkennungen in den vollen Reihen sind hinnehmbar, das Mittelfeld
+            // muss aber leer sein - sonst ist die Partie längst im Gange.
+            return outerOccupied >= 30 && middleOccupied == 0
         }
 
         /**

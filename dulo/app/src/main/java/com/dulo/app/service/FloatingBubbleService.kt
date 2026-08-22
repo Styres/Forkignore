@@ -44,21 +44,26 @@ import com.dulo.app.engine.StockfishBridge
 import com.dulo.app.ui.DuloToggleView
 import com.dulo.app.ui.MainActivity
 import com.dulo.app.ui.TransparentCanvasOverlay
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.io.File
 
 /**
  * Dienst für die Blase am Bildschirmrand (Floating Bubble)
  * Vordergrunddienst nach den Vorgaben von Android 14
  * Kernmechanik:
- * 1. Keine Selbstverschmutzung durch das Overlay: Blase und transparente Ebene werden vor der Aufnahme kurz ausgeblendet und danach wieder eingeblendet
+ * 1. Keine Selbstverschmutzung durch das Overlay: Blase, Menü und Zeichenebene tragen FLAG_SECURE und
+ *    erscheinen deshalb gar nicht erst in der Bildschirmaufnahme - sie bleiben durchgehend sichtbar.
+ *    Hält sich ein Gerät nicht daran, wird das einmalig gemessen und auf kurzes Ausblenden zurückgefallen
  * 2. Dauerhaft geöffnetes VirtualDisplay, dessen Übergangsframes fortlaufend verworfen werden - so entfällt das Abmelden der Sitzung pro Klick und der erste Frame ist nie veraltet
  * 3. Geräteunabhängiges Kopieren der Pixel über pixelStride
  * 4. Diagnosedateien direkt auf dem Gerät (filesDir/debug/)
@@ -113,6 +118,10 @@ class FloatingBubbleService : Service() {
 
         // Kantenlänge des Rasters, auf das der Brettausschnitt zum Vergleich eingedampft wird
         private const val FINGERPRINT_GRID = 12
+
+        // Obergrenze für einen kompletten Analysedurchgang (Aufnahme, Erkennung, Bedenkzeit).
+        // Reichlich bemessen: die Bedenkzeit sind 2 Sekunden, alles Übrige liegt im Millisekundenbereich.
+        private const val ANALYSIS_TIMEOUT_MS = 20_000L
     }
 
     private lateinit var windowManager: WindowManager
@@ -157,11 +166,15 @@ class FloatingBubbleService : Service() {
 
     // Zuletzt erfolgreich lokalisiertes Brett; darauf bezieht sich der Vergleich der Frames
     private var lastBoardRect: Rect? = null
-    // Felder der gegnerischen Figuren aus der letzten Analyse. Steht dort später eine gegnerische
-    // Figur auf einem neuen Feld, hat der Gegner gezogen und man ist selbst wieder am Zug.
-    private var lastOpponentSquares: Set<String>? = null
-    // Felder der eigenen Figuren aus der letzten Analyse: daran wird der eigene Zug erkannt
-    private var lastOwnSquares: Set<String>? = null
+    /**
+     * Brett der letzten angenommenen Erkennung (Standardausrichtung, Weiß unten).
+     *
+     * Daran wird der nächste Zug abgelesen: die Figur, die auf einem Feld neu auftaucht, benennt
+     * den Ziehenden. Erneuert wird dieses Brett ausschließlich, wenn ein Zug eindeutig zugeordnet
+     * werden konnte - eine unklare Aufnahme darf die Basis nicht überschreiben, sonst verschwindet
+     * der Zug des Gegners darin und die Anzeige bleibt stehen.
+     */
+    private var lastAcceptedBoard: Array<CharArray>? = null
     // Stellung der letzten Berechnung: dieselbe Stellung wird kein zweites Mal gerechnet
     private var lastAnalysedFen: String? = null
 
@@ -171,12 +184,6 @@ class FloatingBubbleService : Service() {
     private var lastShownMove: String? = null
     // Beim Einschalten wird die eigene Farbe aus der Ausgangsstellung bestimmt und für die Sitzung festgehalten
     private var sideEstablished = false
-    /**
-     * Brett aus der letzten vollständigen Erkennung, so wie es auf dem Bildschirm steht.
-     * Damit lässt sich zu einem erkannten Zug sofort sagen, wessen Figur gezogen ist - ohne dafür
-     * das ganze Brett erneut zu erkennen.
-     */
-    private var trackedScreenBoard: Array<CharArray>? = null
     /** Helligkeit und Streuung der 64 Felder eines Frames */
     private class BoardCells(val means: FloatArray, val stds: FloatArray)
 
@@ -203,6 +210,30 @@ class FloatingBubbleService : Service() {
     private var stillTicks = 0
     // Takte seit der letzten Analyse (für das Sicherheitsnetz)
     private var ticksSinceAnalysis = 0
+    /**
+     * Wie viele Durchgänge hintereinander zu keinem Ergebnis kamen.
+     *
+     * Wiederholt sich das, taugt die Aufnahme nicht: dann wird der Abstand zwischen den Versuchen
+     * gestreckt, statt fünfmal pro Sekunde dieselbe unklare Stellung durchzurechnen.
+     */
+    private var undecidedRuns = 0
+    /** Beginn des laufenden Analysedurchgangs; Grundlage für den Wachhund gegen hängende Durchgänge */
+    @Volatile
+    private var analysisStartedAt = 0L
+
+    /**
+     * Bleibt das Overlay bei der Aufnahme außen vor?
+     *
+     * Die Fenster von Pfeil, Blase und Menü tragen FLAG_SECURE und werden deshalb nicht in die
+     * Bildschirmaufnahme komponiert. Trifft das zu, muss für eine Aufnahme gar nichts mehr
+     * ausgeblendet werden - die Anzeige steht dann ununterbrochen.
+     *
+     * Weil sich nicht jedes Gerät gleich verhält, wird die Annahme einmal je Sitzung nachgemessen
+     * (siehe [runSecureCaptureSelfTest]) und im Zweifel auf das alte Verfahren zurückgefallen.
+     */
+    @Volatile
+    private var secureCaptureOk = true
+    private var secureCaptureChecked = false
 
     private val serviceJob = Job()
     private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
@@ -406,7 +437,10 @@ class FloatingBubbleService : Service() {
             size,
             size,
             layoutType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                // Nicht mit aufnehmen: die Blase darf das erkannte Bild nicht verfälschen
+                WindowManager.LayoutParams.FLAG_SECURE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -532,7 +566,9 @@ class FloatingBubbleService : Service() {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             layoutType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                // Nicht mit aufnehmen: das Menü darf das erkannte Bild nicht verfälschen
+                WindowManager.LayoutParams.FLAG_SECURE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -595,12 +631,10 @@ class FloatingBubbleService : Service() {
         }
 
         // Beim Einschalten immer rechnen und die eigene Farbe aus der Ausgangsstellung neu bestimmen
-        lastOpponentSquares = null
-        lastOwnSquares = null
+        lastAcceptedBoard = null
         lastAnalysedFen = null
         lastShownMove = null
         sideEstablished = false
-        trackedScreenBoard = null
         resetMonitorState()
         Toast.makeText(this, "Analyse an", Toast.LENGTH_SHORT).show()
         startAnalysis(force = true)
@@ -619,100 +653,150 @@ class FloatingBubbleService : Service() {
         monitorJob = serviceScope.launch {
             while (isActive && autoAnalyseEnabled) {
                 delay(POLL_INTERVAL_MS)
-                if (isAnalyzing || !autoAnalyseEnabled) continue
-                if (!isProjectionAlive()) continue
-
-                ticksSinceAnalysis++
-
-                val rect = lastBoardRect
-                if (rect == null) {
-                    // Noch kein Brett bekannt (die erste Analyse lief ins Leere): erneut versuchen
-                    startAnalysis(force = true)
-                    continue
+                // Ein einzelner Fehlschlag darf die Schleife nicht beenden. Genau das ist zuvor
+                // passiert: eine Ausnahme in einem Takt hat den ganzen Job stillschweigend
+                // beendet, und die App wirkte danach eingefroren.
+                try {
+                    monitorTick()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "Takt der Beobachtung fehlgeschlagen: ${e.javaClass.simpleName}: ${e.message}")
                 }
-
-                // Kommt kein neuer Frame, hat sich nichts bewegt: die zuletzt gelesenen Felder gelten weiter
-                val cells = captureBoardCells(rect) ?: lastKnownCells
-                if (cells == null) {
-                    if (ticksSinceAnalysis >= SWEEP_TICKS) startAnalysis(force = false)
-                    continue
-                }
-                lastKnownCells = cells
-
-                val reference = referenceCells
-                if (reference == null) {
-                    referenceCells = cells
-                    lastTickCells = cells
-                    continue
-                }
-
-                // Steht auf einem Feld etwas anderes als bei der letzten Analyse?
-                val changedSinceAnalysis = UltraRobustClassifier.boardCellsChanged(
-                    reference.means, reference.stds, cells.means, cells.stds
-                )
-                // Und stehen die Figuren gerade still, ist die Zuganimation also durch?
-                val sameAsLastTick = lastTickCells?.let {
-                    !UltraRobustClassifier.boardCellsChanged(it.means, it.stds, cells.means, cells.stds)
-                } ?: false
-                lastTickCells = cells
-
-                stillTicks = if (sameAsLastTick) stillTicks + 1 else 0
-                changePendingTicks = if (changedSinceAnalysis) changePendingTicks + 1 else 0
-
-                val standsStill = stillTicks >= STILL_TICKS_REQUIRED
-                // Ohne Veränderung auf dem Brett wird nicht analysiert. Das ist wichtig für die
-                // Anzeige: jede Analyse muss den Pfeil für die Aufnahme kurz ausblenden, und dieses
-                // wiederholte Aufblitzen wirkte, als würde derselbe Zug mehrfach angezeigt.
-                // Das Sicherheitsnetz greift deshalb nur, wenn sich tatsächlich etwas geändert hat,
-                // die Erkennung den Zug aber nicht einordnen konnte.
-                val analyseNow = changedSinceAnalysis &&
-                    (standsStill || changePendingTicks >= MAX_PENDING_TICKS || ticksSinceAnalysis >= SWEEP_TICKS)
-                if (!analyseNow) continue
-
-                // Neue Erkennungsmethode: erst nachsehen, ob sich der Zug direkt ablesen lässt.
-                // Ein gewöhnlicher Zug verändert genau zwei Felder - Startfeld leer, Zielfeld besetzt.
-                // Steht auf dem Startfeld eine eigene Figur, war es der eigene Zug: dann ist die
-                // Empfehlung erledigt, der Pfeil kommt weg und die Engine bleibt außen vor.
-                // Erst der Zug des Gegners löst die vollständige Erkennung samt Berechnung aus.
-                val detected = UltraRobustClassifier.detectMove(
-                    reference.means, reference.stds, cells.means, cells.stds
-                )
-                val board = trackedScreenBoard
-                val mover = if (detected != null && board != null) {
-                    board[detected.fromCell / 8][detected.fromCell % 8]
-                } else {
-                    '.'
-                }
-
-                if (detected != null && mover != '.' && sessionLockedPerspective != null) {
-                    val movedByMe = mover.isUpperCase() == sessionLockedPerspective
-                    Log.i(
-                        TAG,
-                        "Zug abgelesen: Feld ${detected.fromCell} -> ${detected.toCell}, Figur '$mover'," +
-                            " eigener Zug=$movedByMe"
-                    )
-                    if (movedByMe) {
-                        // Eigener Zug: Brett fortschreiben, Pfeil ausblenden, keine Berechnung
-                        trackedScreenBoard = UltraRobustClassifier.applyMoveToScreenBoard(board!!, detected)
-                        lastShownMove = null
-                        transparentOverlay?.hide()
-                        // Ohne Pfeil sieht das Brett anders aus: die Vergleichsbasis wird im
-                        // nächsten Takt frisch genommen, sonst gälte allein das Ausblenden als Zug.
-                        resetMonitorState()
-                        continue
-                    }
-                }
-
-                Log.i(
-                    TAG,
-                    "Analyse ausgelöst (verändert=$changedSinceAnalysis, ruhige Takte=$stillTicks," +
-                        " wartende Takte=$changePendingTicks, Takte seit Analyse=$ticksSinceAnalysis," +
-                        " Zug ablesbar=${detected != null})"
-                )
-                startAnalysis(force = false)
             }
         }
     }
+
+    /** Ein einzelner Takt der Dauerbeobachtung */
+    private suspend fun monitorTick() {
+        if (isAnalyzing) {
+            // Wachhund: bleibt ein Durchgang hängen (Engine, Aufnahme, Systemdienst), wird die
+            // Sperre nach der Obergrenze von Hand gelöst. Ohne das stand isAnalyzing für immer
+            // und die Beobachtung reagierte auf nichts mehr.
+            if (System.currentTimeMillis() - analysisStartedAt > ANALYSIS_TIMEOUT_MS + 10_000L) {
+                Log.w(TAG, "Analyse hängt seit über ${(ANALYSIS_TIMEOUT_MS + 10_000L) / 1000} Sekunden, Sperre wird gelöst")
+                isAnalyzing = false
+            }
+            return
+        }
+        if (!autoAnalyseEnabled) return
+        if (!isProjectionAlive()) return
+
+        ticksSinceAnalysis++
+
+        val rect = lastBoardRect
+        if (rect == null) {
+            // Noch kein Brett bekannt (die erste Analyse lief ins Leere): erneut versuchen
+            startAnalysis(force = true)
+            return
+        }
+
+        // Kommt kein neuer Frame, hat sich nichts bewegt: die zuletzt gelesenen Felder gelten weiter
+        val cells = captureBoardCells(rect) ?: lastKnownCells
+        if (cells == null) {
+            if (ticksSinceAnalysis >= SWEEP_TICKS) startAnalysis(force = false)
+            return
+        }
+        lastKnownCells = cells
+
+        val reference = referenceCells
+        if (reference == null) {
+            referenceCells = cells
+            lastTickCells = cells
+            return
+        }
+
+        // Steht auf einem Feld etwas anderes als bei der letzten Analyse?
+        val changedSinceAnalysis = UltraRobustClassifier.boardCellsChanged(
+            reference.means, reference.stds, cells.means, cells.stds
+        )
+        // Und stehen die Figuren gerade still, ist die Zuganimation also durch?
+        val sameAsLastTick = lastTickCells?.let {
+            !UltraRobustClassifier.boardCellsChanged(it.means, it.stds, cells.means, cells.stds)
+        } ?: false
+        lastTickCells = cells
+
+        stillTicks = if (sameAsLastTick) stillTicks + 1 else 0
+        changePendingTicks = if (changedSinceAnalysis) changePendingTicks + 1 else 0
+
+        val standsStill = stillTicks >= STILL_TICKS_REQUIRED
+
+        // Nach mehreren ergebnislosen Durchgängen wird der Abstand gestreckt: die Aufnahme
+        // taugt dann gerade nichts, und fünf Versuche pro Sekunde bringen nichts als Last.
+        val cooldown = if (undecidedRuns >= 3) SWEEP_TICKS else STILL_TICKS_REQUIRED
+        if (ticksSinceAnalysis < cooldown) return
+
+        // Ohne Veränderung auf dem Brett wird nicht analysiert - sonst liefe die Erkennung
+        // im Leerlauf und könnte dieselbe Empfehlung erneut auslösen.
+        val analyseNow = changedSinceAnalysis &&
+            (standsStill || changePendingTicks >= MAX_PENDING_TICKS)
+        if (!analyseNow) return
+
+        // Wer gezogen hat, entscheidet ausschließlich die vollständige Erkennung über den
+        // Brettvergleich. Eine zweite, billigere Abkürzung an dieser Stelle gab es früher;
+        // sie hat sich als Fehlerquelle erwiesen: griff sie daneben, blendete sie den Pfeil
+        // als vermeintlich eigenen Zug aus und der Zug des Gegners ging verloren.
+        Log.i(
+            TAG,
+            "Analyse ausgelöst (ruhige Takte=$stillTicks, wartende Takte=$changePendingTicks," +
+                " Takte seit Analyse=$ticksSinceAnalysis, ergebnislose Durchgänge=$undecidedRuns)"
+        )
+        startAnalysis(force = false)
+    }
+
+    /**
+     * Misst einmal je Sitzung nach, ob das Overlay in der Bildschirmaufnahme auftaucht.
+     *
+     * Verfahren: einmal mit sichtbarem Overlay abtasten, einmal mit ausgeblendetem. Bleiben die
+     * Felder gleich, war das Overlay ohnehin nie im Bild - dann darf es für alle weiteren
+     * Aufnahmen stehenbleiben. Unterscheiden sie sich, hält sich das Gerät nicht an FLAG_SECURE
+     * und es wird wieder ausgeblendet wie zuvor.
+     *
+     * Der Sonderfall "ganze Aufnahme schwarz" wird mit abgefangen: manche Geräte schwärzen bei
+     * einem sicheren Fenster das gesamte Bild statt nur dieses Fenster. Dann ist der sichere Weg
+     * unbrauchbar und es gilt ebenfalls das Rückfallverfahren.
+     */
+    private suspend fun runSecureCaptureSelfTest(rect: Rect) {
+        secureCaptureChecked = true
+        val withOverlay = captureBoardCells(rect) ?: lastKnownCells
+        if (withOverlay == null) {
+            // Ohne Messwert lässt sich nichts entscheiden: später erneut versuchen
+            secureCaptureChecked = false
+            return
+        }
+
+        // Ist das ganze Brett schwarz, hat das Gerät die Aufnahme geschwärzt
+        if (withOverlay.means.all { it < 2f }) {
+            secureCaptureOk = false
+            Log.i(TAG, "Aufnahme ist schwarz - FLAG_SECURE unbrauchbar, es wird wieder ausgeblendet")
+            return
+        }
+
+        transparentOverlay?.setContentVisible(false)
+        bubbleView?.visibility = View.INVISIBLE
+        menuView?.visibility = View.INVISIBLE
+        delay(120)
+        val withoutOverlay = captureBoardCells(rect)
+        transparentOverlay?.setContentVisible(true)
+        bubbleView?.visibility = View.VISIBLE
+        menuView?.visibility = View.VISIBLE
+
+        // Kein neuer Frame nach dem Ausblenden heißt: auf dem aufgenommenen Bild hat sich nichts
+        // geändert - das Overlay war also gar nicht darin enthalten.
+        val differs = withoutOverlay != null && UltraRobustClassifier.boardCellsChanged(
+            withOverlay.means, withOverlay.stds, withoutOverlay.means, withoutOverlay.stds
+        )
+        secureCaptureOk = !differs
+        Log.i(
+            TAG,
+            if (secureCaptureOk) "Overlay bleibt aus der Aufnahme heraus, es wird nicht mehr ausgeblendet"
+            else "Overlay erscheint in der Aufnahme, Rückfall auf Ausblenden"
+        )
+    }
+
+    /** Tiefe Kopie eines Bretts: die Erkennung gibt ihre Puffer weiter, die dürfen nicht altern */
+    private fun copyBoard(board: Array<CharArray>): Array<CharArray> =
+        Array(board.size) { r -> board[r].copyOf() }
 
     /** Vergleichsbasis und Zähler zurücksetzen; der nächste Takt nimmt das Brett neu auf */
     private fun resetMonitorState() {
@@ -721,6 +805,7 @@ class FloatingBubbleService : Service() {
         lastKnownCells = null
         changePendingTicks = 0
         ticksSinceAnalysis = 0
+        undecidedRuns = 0
     }
 
     private fun stopMonitoring() {
@@ -777,8 +862,8 @@ class FloatingBubbleService : Service() {
      * Die Streuung verrät, ob eine Figur auf dem Feld steht, die Helligkeit unterscheidet helle von
      * dunklen Figuren - zusammen ergibt das ein Abbild der Figurenstellung.
      *
-     * Blase und Pfeil werden dafür nicht ausgeblendet: die Felder unter dem Pfeil überspringt der
-     * Vergleich ohnehin, und so bleibt die Anzeige ruhig.
+     * Blase und Pfeil werden dafür nicht ausgeblendet: ihre Fenster tragen FLAG_SECURE und stehen
+     * gar nicht erst im aufgenommenen Bild.
      *
      * @return null, wenn gerade kein neuer Frame vorliegt - dann hat sich auf dem Bildschirm nichts bewegt
      */
@@ -917,24 +1002,39 @@ class FloatingBubbleService : Service() {
         }
 
         isAnalyzing = true
+        analysisStartedAt = System.currentTimeMillis()
 
         serviceScope.launch {
             var screenBitmap: Bitmap? = null
+            // Wurde dieser Durchgang zu einem Ergebnis geführt? Nur dann darf die Vergleichsbasis
+            // der Beobachtungsschleife fallengelassen werden. Ohne diese Unterscheidung nahm die
+            // Schleife nach einer unklaren Aufnahme den veränderten Bildschirm als neue Basis - der
+            // Zug des Gegners war damit verschluckt und die Anzeige rührte sich nicht mehr.
+            var analysisDecided = false
             try {
-                // Pfeil und Blase kurz unsichtbar schalten - das Fenster bleibt bestehen, sonst
-                // blitzt der Bildschirm bei jedem Anlegen sichtbar auf (Ursache des Flackerns)
-                transparentOverlay?.setContentVisible(false)
-                bubbleView?.visibility = View.INVISIBLE
-                menuView?.visibility = View.INVISIBLE
+                // Einmal je Sitzung nachmessen, ob FLAG_SECURE das Overlay wirklich aus der
+                // Aufnahme heraushält. Danach steht fest, ob überhaupt noch ausgeblendet werden muss.
+                if (!secureCaptureChecked) {
+                    lastBoardRect?.let { runSecureCaptureSelfTest(it) }
+                }
 
-                // Statt fest zu warten: alle noch gepufferten Frames verwerfen und den ersten Frame
-                // nehmen, der nach dem Ausblenden entsteht. Der ist garantiert sauber und kommt in
-                // der Regel schon nach wenigen Millisekunden - die Anzeige ist also kürzer weg.
+                // Der Normalfall: das Overlay bleibt stehen. Der Pfeil ist für die Aufnahme
+                // unsichtbar, für den Nutzer aber die ganze Zeit da - kein Flackern mehr.
+                val hideForCapture = !secureCaptureOk
+                if (hideForCapture) {
+                    transparentOverlay?.setContentVisible(false)
+                    bubbleView?.visibility = View.INVISIBLE
+                    menuView?.visibility = View.INVISIBLE
+                }
+
+                // Alle noch gepufferten Frames verwerfen und den nächsten frischen Frame nehmen
                 screenBitmap = captureFrameAfterHiding()
 
-                transparentOverlay?.setContentVisible(true)
-                bubbleView?.visibility = View.VISIBLE
-                menuView?.visibility = View.VISIBLE
+                if (hideForCapture) {
+                    transparentOverlay?.setContentVisible(true)
+                    bubbleView?.visibility = View.VISIBLE
+                    menuView?.visibility = View.VISIBLE
+                }
 
                 if (screenBitmap == null) {
                     Log.i(TAG, "Noch kein Frame verfügbar, dieser Durchgang wird übersprungen")
@@ -1041,12 +1141,25 @@ class FloatingBubbleService : Service() {
                         // eigenen hell oder dunkel sind, hat die Helligkeitsclusterung entschieden.
                         // Danach bleibt die Farbe für die ganze Sitzung stehen und kann nur per langem
                         // Druck auf die Blase von Hand geändert werden.
-                        if (!sideEstablished && !manualPerspectiveLock) {
+                        // Eine frische Grundstellung heißt: neue Partie. Dann wird die Farbe neu
+                        // bestimmt - der Nutzer spielt mal Weiß, mal Schwarz, und eine Sperre aus
+                        // der vorigen Partie wäre jetzt falsch herum.
+                        val freshGame = UltraRobustClassifier.isFreshStartPosition(res.rawBoard)
+                        if ((!sideEstablished || freshGame) && !manualPerspectiveLock) {
                             val sideFromRows = UltraRobustClassifier.sideFromStartingRows(res.rawBoard)
                             if (sideFromRows != null) {
+                                if (sideEstablished && sessionLockedPerspective != sideFromRows) {
+                                    // Farbwechsel: alles, was sich auf die alte Partie bezog, ist hinfällig
+                                    lastAcceptedBoard = null
+                                    lastShownMove = null
+                                }
                                 sessionLockedPerspective = sideFromRows
                                 sideEstablished = true
-                                Log.i(TAG, "Eigene Farbe aus der Ausgangsstellung: ${if (sideFromRows) "Weiß" else "Schwarz"}")
+                                Log.i(
+                                    TAG,
+                                    "Eigene Farbe aus der Ausgangsstellung: ${if (sideFromRows) "Weiß" else "Schwarz"}" +
+                                        (if (freshGame) " (neue Partie)" else "")
+                                )
                             }
                         }
 
@@ -1063,67 +1176,72 @@ class FloatingBubbleService : Service() {
 
                         // Brett merken, damit die Beobachtungsschleife weiß, welchen Ausschnitt sie vergleichen muss
                         lastBoardRect = Rect(res.boardRect)
-                        trackedScreenBoard = res.rawBoard
 
-                        // Kern der Dauerbeobachtung: gerechnet wird erst, wenn man wieder am Zug ist.
+                        // Kern der Dauerbeobachtung: wer hat gezogen?
                         //
-                        // Ablauf einer Partie: DuLo zeigt den besten Zug, man führt ihn aus - dabei ändern sich
-                        // nur die eigenen Felder, und genau dieser Zwischenstand wird übersprungen. Erst wenn
-                        // danach eine gegnerische Figur auf einem Feld auftaucht, das vorher nicht ihr gehörte,
-                        // ist der Gegner fertig und die nächste Empfehlung wird berechnet.
-                        val ownSquares = UltraRobustClassifier.sideSquares(res.standardBoard, res.isWhitePerspective)
-                        val opponentSquares = UltraRobustClassifier.sideSquares(res.standardBoard, !res.isWhitePerspective)
-                        val previousOpponentSquares = lastOpponentSquares
-                        val previousOwnSquares = lastOwnSquares
+                        // Entschieden wird das über den unmittelbaren Vergleich der beiden letzten
+                        // angenommenen Bretter. Die Figur, die auf einem Feld neu aufgetaucht ist,
+                        // benennt den Ziehenden - das trägt auch beim Schlagzug, bei dem eine Figur
+                        // der Gegenfarbe verschwindet. Die frühere Zählweise über Feldmengen konnte
+                        // genau das nicht unterscheiden und lag beim Schlagen regelmäßig daneben.
+                        //
+                        // Ist der Vergleich nicht eindeutig, passiert nichts: die Vergleichsbasis
+                        // bleibt stehen und der nächste Takt sieht erneut nach. Wichtig, denn ein
+                        // stillschweigendes Übergehen würde den Zug des Gegners verschlucken - die
+                        // App wirkte dann nach ein paar Sekunden wie eingefroren.
+                        val previousBoard = lastAcceptedBoard
+                        val myColourIsWhite = sessionLockedPerspective
 
-                        // Ergibt die Erkennung dieselbe Stellung wie beim letzten Mal, ist nichts passiert.
-                        // Ohne diese Sperre könnte ein Flackern in der Erkennung dieselbe Empfehlung
-                        // ein zweites Mal auslösen.
-                        if (!force && res.fullFen == lastAnalysedFen) {
-                            Log.i(TAG, "Unveränderte Stellung, keine neue Berechnung")
-                            return@launch
-                        }
+                        if (previousBoard == null || myColourIsWhite == null) {
+                            // Erster Durchgang der Sitzung: Stellung annehmen und rechnen
+                            lastAcceptedBoard = copyBoard(res.standardBoard)
+                            lastAnalysedFen = res.fullFen
+                            analysisDecided = true
+                        } else {
+                            val diff = UltraRobustClassifier.diffBoards(previousBoard, res.standardBoard)
+                            Log.i(
+                                TAG,
+                                "Brettvergleich: ${diff.changedSquares} Felder verändert, Zug von " +
+                                    when (diff.moverIsWhite) {
+                                        true -> "Weiß"
+                                        false -> "Schwarz"
+                                        null -> "unklar"
+                                    }
+                            )
 
-                        // Ein gewöhnlicher Zug lässt genau ein neues gegnerisches Feld entstehen,
-                        // eine Rochade zwei. Sind es mehr, hat die Erkennung gepatzt: dann lieber
-                        // abwarten, statt eine Empfehlung auf eine falsche Stellung zu setzen.
-                        val newOpponentSquares = previousOpponentSquares?.let { previous ->
-                            opponentSquares.count { it !in previous }
-                        } ?: 0
-                        if (previousOpponentSquares != null && newOpponentSquares > 2) {
-                            Log.i(TAG, "Erkennung unplausibel: $newOpponentSquares neue gegnerische Felder, wird verworfen")
-                            return@launch
-                        }
-
-                        val opponentMoved = previousOpponentSquares == null ||
-                            UltraRobustClassifier.opponentMovedSince(previousOpponentSquares, opponentSquares)
-                        val ownMoved = previousOwnSquares != null && previousOwnSquares != ownSquares
-                        val myTurn = force || opponentMoved
-
-                        Log.i(
-                            TAG,
-                            "Am Zug? $myTurn (force=$force, Gegner zog=$opponentMoved, ich zog=$ownMoved," +
-                                " gegnerische Felder vorher=${previousOpponentSquares?.size ?: -1}, jetzt=${opponentSquares.size})"
-                        )
-
-                        if (!myTurn) {
-                            if (ownMoved) {
-                                // Der eigene Zug ist ausgeführt: die Empfehlung ist erledigt. Pfeil weg und
-                                // warten, bis der Gegner gezogen hat.
-                                lastOwnSquares = ownSquares
-                                lastShownMove = null
-                                withContext(Dispatchers.Main) { transparentOverlay?.hide() }
+                            if (diff.changedSquares == 0) {
+                                // Nichts passiert. Der Pfeil bleibt stehen, wo er steht.
+                                analysisDecided = true
+                                return@launch
                             }
-                            // Sonst hat sich nichts Entscheidendes getan: der bisherige Pfeil wird
-                            // am Ende dieses Durchlaufs ohnehin wieder sichtbar geschaltet.
-                            return@launch
+                            if (diff.moverIsWhite == null) {
+                                // Unklare Aufnahme (Animation, Fehlerkennung): Basis behalten und
+                                // im nächsten Takt erneut nachsehen, nichts verwerfen.
+                                Log.i(TAG, "Vergleich nicht eindeutig, wird im nächsten Takt wiederholt")
+                                return@launch
+                            }
+
+                            lastAcceptedBoard = copyBoard(res.standardBoard)
+                            analysisDecided = true
+
+                            if (diff.moverIsWhite == myColourIsWhite) {
+                                // Eigener Zug ausgeführt: die Empfehlung ist erledigt, Pfeil weg,
+                                // und es wird gewartet, bis der Gegner gezogen hat.
+                                Log.i(TAG, "Eigener Zug erkannt, Pfeil wird ausgeblendet")
+                                lastShownMove = null
+                                lastAnalysedFen = res.fullFen
+                                withContext(Dispatchers.Main) { transparentOverlay?.clearSuggestion() }
+                                return@launch
+                            }
+
+                            // Der Gegner hat gezogen: jetzt bin ich am Zug und es wird gerechnet.
+                            lastAnalysedFen = res.fullFen
                         }
-                        lastOpponentSquares = opponentSquares
-                        lastOwnSquares = ownSquares
-                        lastAnalysedFen = res.fullFen
 
                         // Vorgegebene Bedenkzeit: go movetime 2000
-                        val eval = StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = StockfishBridge.DEFAULT_MOVE_TIME_MS)
+                        val eval = withTimeout(ANALYSIS_TIMEOUT_MS) {
+                            StockfishBridge.evaluateFen(res.fullFen, moveTimeMs = StockfishBridge.DEFAULT_MOVE_TIME_MS)
+                        }
 
                         // Sentinel der Erkennung (Befund aus bug_19/superbug): eine von der FEN-Vorprüfung abgefangene unmögliche Stellung ist weder ein Engine-Fehler noch ein Fall für den Fallback,
                         // deshalb wird kein Pfeil gezeichnet, sondern die rote Fehlertafel mit dem fehlerhaften FEN angezeigt
@@ -1178,20 +1296,36 @@ class FloatingBubbleService : Service() {
                         }
                     }
                 }
+            } catch (e: TimeoutCancellationException) {
+                // Sicherheitsnetz: hängt die Engine oder ein Aufnahmeschritt, wird der Durchgang
+                // abgeräumt. Ohne das blieb isAnalyzing für immer gesetzt und die Beobachtung
+                // rührte sich nicht mehr - von außen sah das aus, als sei die App abgestürzt.
+                Log.w(TAG, "Analyse hat zu lange gedauert und wurde abgebrochen")
             } catch (e: Exception) {
                 Log.w(TAG, "Analyse abgebrochen: ${e.javaClass.simpleName}: ${e.message}")
                 withContext(Dispatchers.Main) {
                     transparentOverlay?.showError("Ausnahme in der Analyse: ${e.javaClass.simpleName}")
                 }
             } finally {
-                transparentOverlay?.setContentVisible(true)
-                bubbleView?.visibility = View.VISIBLE
-                menuView?.visibility = View.VISIBLE
+                if (!secureCaptureOk) {
+                    // Nur im Rückfallverfahren war überhaupt etwas ausgeblendet
+                    transparentOverlay?.setContentVisible(true)
+                    bubbleView?.visibility = View.VISIBLE
+                    menuView?.visibility = View.VISIBLE
+                }
                 screenBitmap?.recycle()
-                // Die Vergleichsbasis wird erst jetzt fallengelassen: der nächste Takt nimmt das
-                // Brett samt frisch gezeichnetem Pfeil neu auf. So kann zwischen zwei Analysen
-                // kein Zug in der Basis verschwinden.
-                resetMonitorState()
+                if (analysisDecided) {
+                    // Der Durchgang hat etwas entschieden: der nächste Takt nimmt das Brett neu auf.
+                    resetMonitorState()
+                } else {
+                    // Nichts entschieden (kein Frame, unklare Aufnahme, abgewiesene Erkennung):
+                    // die Vergleichsbasis bleibt stehen, damit die Veränderung anhängig bleibt.
+                    // Nur die Zähler werden zurückgesetzt, sonst liefe sofort der nächste Versuch.
+                    changePendingTicks = 0
+                    stillTicks = 0
+                    ticksSinceAnalysis = 0
+                    undecidedRuns++
+                }
                 isAnalyzing = false
             }
         }

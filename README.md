@@ -50,21 +50,26 @@
 - 🔁 **Dauerbeobachtung statt Antippen**
   - Beim Einschalten legt DuLo die Seiten fest: was unten auf den beiden Reihen steht, sind die eigenen
     Figuren, oben steht der Gegner. Ob die eigenen hell oder dunkel sind, entscheidet die
-    Helligkeitsclusterung - daraus ergibt sich die eigene Farbe, und die bleibt für die Sitzung stehen.
+    Helligkeitsclusterung - daraus ergibt sich die eigene Farbe. Sie wird bei jeder neuen Grundstellung neu bestimmt, denn man spielt mal Weiß, mal Schwarz.
   - Danach zeigt DuLo den besten Zug für die eigene Farbe und wartet;
-  - **der eigene Zug wird übersprungen**: führt man die Empfehlung aus, verschwindet der Pfeil und es
-    passiert nichts weiter - erst wenn danach eine gegnerische Figur auf einem Feld auftaucht, das
-    vorher nicht ihr gehörte, wird die nächste Empfehlung berechnet;
+  - **wer gezogen hat, entscheidet der Brettvergleich**: die beiden zuletzt angenommenen Stellungen
+    werden Feld für Feld verglichen. Die Figur, die auf einem Feld neu auftaucht, benennt den
+    Ziehenden - das trägt auch beim Schlagzug, bei dem eine Figur der Gegenfarbe verschwindet;
+  - war es der eigene Zug, verschwindet der Pfeil und es passiert nichts weiter; war es der Gegner,
+    wird die nächste Empfehlung berechnet;
+  - ist der Vergleich **nicht eindeutig** (Animation, mehr als vier veränderte Felder,
+    widersprüchliche Farben), wird nichts entschieden und die Vergleichsbasis bleibt stehen. Genau
+    das ist wichtig: ein stillschweigendes Übergehen würde den Zug des Gegners verschlucken;
   - dafür verfolgt DuLo **fünfmal pro Sekunde jede Figurenposition**: je Feld werden Streuung (steht
     dort eine Figur?) und Helligkeit (hell oder dunkel?) gelesen, direkt aus dem Frame-Puffer und ohne
     Vollbild-Kopie;
-  - der gezeichnete Pfeil stört den Vergleich nicht: die Vergleichsbasis entsteht erst nach dem
-    Zeichnen, er steht also in beiden Aufnahmen gleich und hebt sich auf. Gerade die Felder unter dem
-    Pfeil sind die wichtigsten, denn dort führt man den empfohlenen Zug aus;
+  - **das Overlay bleibt dabei durchgehend stehen**: Blase, Menü und Zeichenebene tragen `FLAG_SECURE`
+    und erscheinen gar nicht erst in der Bildschirmaufnahme. Ob das Gerät sich daran hält, misst DuLo
+    einmal je Sitzung nach und fällt sonst auf kurzes Ausblenden zurück;
+  - die eigene Farbe kommt aus der Grundstellung (unten die eigenen Figuren) und wird bei jeder neuen
+    Partie neu bestimmt - mal spielt man Weiß, mal Schwarz;
   - die volle Erkennung läuft an, sobald die Figuren zwei Takte lang stillstehen - spätestens aber nach
-    rund drei Sekunden, damit dauerhafte Animationen der Oberfläche sie nicht aufhalten;
-  - zusätzlich sieht ein Sicherheitsnetz alle paar Sekunden von sich aus nach. Die Engine läuft dabei
-    nur, wenn der Gegner wirklich gezogen hat.
+    rund drei Sekunden, damit dauerhafte Animationen der Oberfläche sie nicht aufhalten.
 - 🔒 **Vollständig offline**
   - Bildverarbeitung und Engine laufen ausschließlich auf dem Gerät, es gibt keine Netzwerkanfragen und keine Datenübertragung.
 
