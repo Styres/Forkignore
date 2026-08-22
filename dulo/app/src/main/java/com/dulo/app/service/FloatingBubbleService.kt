@@ -360,6 +360,14 @@ class FloatingBubbleService : Service() {
      * mehr ändert. Das ist schneller und zugleich sicherer.
      */
     private var needStableReference = false
+
+    /**
+     * Wurde der Ausfall der Engine schon gemeldet?
+     *
+     * Springt der einfache Regelgenerator ein, soll das einmal auffallen - aber nicht bei jedem
+     * Zug erneut. Erholt sich die Engine, wird der Merker zurückgesetzt.
+     */
+    private var fallbackReported = false
     /** Beginn des laufenden Analysedurchgangs; Grundlage für den Wachhund gegen hängende Durchgänge */
     @Volatile
     private var analysisStartedAt = 0L
@@ -1041,6 +1049,7 @@ class FloatingBubbleService : Service() {
         resetMonitorState()
         markProgress()
         awaitingBoardChange = false
+        fallbackReported = false
         startAnalysis(force = false)
         startMonitoring()
     }
@@ -1062,6 +1071,12 @@ class FloatingBubbleService : Service() {
                 // beendet, und die App wirkte danach eingefroren.
                 try {
                     monitorTick()
+                } catch (e: TimeoutCancellationException) {
+                    // withTimeout wirft eine CancellationException - sie darf hier aber nicht als
+                    // Abbruch der Schleife durchgehen. Sonst beendete eine einzige zu lange
+                    // Berechnung die ganze Beobachtung, und der Auto-Zug stünde still, ohne dass
+                    // etwas darauf hindeutet.
+                    Log.w(TAG, "Ein Schritt im Takt hat zu lange gedauert und wurde abgebrochen")
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -1437,8 +1452,8 @@ class FloatingBubbleService : Service() {
             castlingRights = castlingRights
         )
 
-        // Für die Dauer der Berechnung als beschäftigt melden. Sonst könnte ein Tippen auf
-        // "Bester Zug" mitten hinein eine zweite Analyse starten, die dieselben Felder anfasst.
+        // Für die Dauer der Berechnung als beschäftigt melden, damit nicht gleichzeitig eine
+        // vollständige Erkennung anläuft und dieselben Felder anfasst.
         isAnalyzing = true
         analysisStartedAt = System.currentTimeMillis()
         try {
@@ -1450,6 +1465,12 @@ class FloatingBubbleService : Service() {
                 lastAcceptedBoard = null
                 clearPendingMove()
             }
+        } catch (e: TimeoutCancellationException) {
+            // Zu lange gerechnet: Der Durchgang wird verworfen, die Buchführung ebenfalls -
+            // aber die Schleife läuft weiter. Ein Weiterreichen käme einem Abbruch gleich.
+            Log.w(TAG, "Berechnung zum abgelesenen Zug hat zu lange gedauert")
+            lastAcceptedBoard = null
+            clearPendingMove()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -1480,12 +1501,26 @@ class FloatingBubbleService : Service() {
             return false
         }
 
+        // Stille Verschlechterung sichtbar machen: Antwortet Stockfish nicht mehr, springt ein
+        // einfacher Regelgenerator ein (erkennbar an Tiefe 0). Der zieht regelkonform, aber
+        // schwach - und ohne Hinweis spielte DuLo einfach weiter schlechte Züge, ohne dass
+        // irgendetwas darauf hindeutet. Gemeldet wird einmal je Sitzung, nicht bei jedem Zug.
         val isTrueFallback = eval.depth <= 0 &&
             eval.bestMove != "(checkmate)" && eval.bestMove != "(stalemate)"
         Log.i(
             TAG,
             "Zug=${eval.bestMove} Tiefe=${eval.depth}" + (if (isTrueFallback) " [Engine-Fallback]" else "")
         )
+        if (isTrueFallback) {
+            if (!fallbackReported) {
+                fallbackReported = true
+                Log.w(TAG, "Stockfish antwortet nicht, es zieht der einfache Regelgenerator")
+                reportError("Engine antwortet nicht, es zieht der Regelgenerator")
+            }
+        } else {
+            // Die Engine ist wieder da: der nächste Ausfall darf erneut gemeldet werden
+            fallbackReported = false
+        }
 
         // Die beiden Felder des Zuges merken: daran wird erkannt, wann er ausgeführt ist,
         // und darauf tippt der Auto-Zug.
@@ -1994,6 +2029,9 @@ class FloatingBubbleService : Service() {
                 // abgeräumt. Ohne das blieb isAnalyzing für immer gesetzt und die Beobachtung
                 // rührte sich nicht mehr - von außen sah das aus, als sei die App abgestürzt.
                 Log.w(TAG, "Analyse hat zu lange gedauert und wurde abgebrochen")
+            } catch (e: CancellationException) {
+                // Echter Abbruch (Dienst wird beendet): weiterreichen, nicht verschlucken
+                throw e
             } catch (e: Exception) {
                 Log.w(TAG, "Analyse abgebrochen: ${e.javaClass.simpleName}: ${e.message}")
                 reportError("Ausnahme in der Analyse: ${e.javaClass.simpleName}")
