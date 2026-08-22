@@ -106,8 +106,8 @@ class TransparentCanvasOverlay(private val context: Context) {
 
         view.errorMessage = reason
         view.statusAlpha = 0f
+        view.visibility = View.VISIBLE
         view.postInvalidate()
-        setContentVisible(true)
 
         errorJob?.cancel()
         errorJob = scope.launch {
@@ -147,16 +147,6 @@ class TransparentCanvasOverlay(private val context: Context) {
         }
         view.statusAlpha = to
         view.postInvalidate()
-    }
-
-    /**
-     * Inhalt vorübergehend unsichtbar schalten, ohne das Fenster abzureißen.
-     *
-     * Gebraucht für den Selbsttest der Aufnahme: Würde dafür das Fenster entfernt und gleich
-     * wieder angelegt, blitzt der Bildschirm sichtbar auf.
-     */
-    fun setContentVisible(visible: Boolean) {
-        overlayView?.visibility = if (visible) View.VISIBLE else View.INVISIBLE
     }
 
     private fun initOverlayView() {

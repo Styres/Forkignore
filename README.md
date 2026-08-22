@@ -66,6 +66,12 @@
     ist immer nur eines davon;
   - passt der Zug nicht in dieses Muster (Rochade, en passant, unklare Aufnahme), übernimmt die
     vollständige Erkennung als Rückfallebene;
+  - die **Blase wird vom Brett ferngehalten**: liegt sie darüber, verdeckt sie Felder in der
+    Aufnahme und fängt die Berührungen des Auto-Zugs ab, weil sie dort das oberste Fenster ist.
+    Nach jeder Vermessung wird sie bei Überlappung an den nächsten freien Rand geschoben - das ist
+    verlässlicher, als zu messen, ob sich das Gerät an `FLAG_SECURE` hält;
+  - die vollständige Erkennung hat eine **Bremse**: nach einem ergebnislosen Durchgang bringt ein
+    sofort folgender zweiter fast nie etwas Neues, liefe aber mehrmals je Sekunde;
   - das zuletzt gelieferte Bildschirmbild wird **bereitgehalten statt verworfen**: MediaProjection
     liefert nur bei Veränderungen ein neues, und bei stillstehendem Brett stand sonst überhaupt
     kein Bild zur Verfügung - ausgerechnet dann, wenn die vollständige Erkennung zum Aufräumen

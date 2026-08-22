@@ -129,6 +129,10 @@ class FloatingBubbleService : Service() {
         // So lange wird höchstens auf einen frischen Frame gewartet
         private const val FRAME_WAIT_MS = 400L
 
+        // Abstand zwischen zwei ergebnislosen vollständigen Erkennungen (wachsend, gedeckelt)
+        private const val FULL_SCAN_BACKOFF_MS = 500L
+        private const val FULL_SCAN_BACKOFF_MAX_MS = 3000L
+
         // Sicherheitsnetz: spätestens nach so vielen Takten (rund 2,5 Sekunden) wird ohnehin
         // nachgesehen, auch wenn der Feldvergleich nichts gemeldet hat. Damit bleibt ein Pfeil
         // selbst im schlechtesten Fall nicht länger stehen. Die Engine läuft dabei nur, wenn der
@@ -322,23 +326,20 @@ class FloatingBubbleService : Service() {
      * gestreckt, statt fünfmal pro Sekunde dieselbe unklare Stellung durchzurechnen.
      */
     private var undecidedRuns = 0
+
+    /**
+     * Frühester Zeitpunkt für die nächste vollständige Erkennung.
+     *
+     * Sie kostet ein Vollbild und den Musterabgleich über 64 Felder. Kommt sie zu keinem Ergebnis,
+     * bleibt die Vergleichsbasis absichtlich stehen - dadurch gilt das Brett weiterhin als
+     * verändert und der nächste Takt liefe sofort wieder an. Ohne Bremse wären das mehrere
+     * Durchgänge je Sekunde, ohne dass ein weiterer Versuch etwas brächte.
+     */
+    private var nextFullScanAt = 0L
     /** Beginn des laufenden Analysedurchgangs; Grundlage für den Wachhund gegen hängende Durchgänge */
     @Volatile
     private var analysisStartedAt = 0L
 
-    /**
-     * Bleibt das Overlay bei der Aufnahme außen vor?
-     *
-     * Die Fenster von Pfeil, Blase und Menü tragen FLAG_SECURE und werden deshalb nicht in die
-     * Bildschirmaufnahme komponiert. Trifft das zu, muss für eine Aufnahme gar nichts mehr
-     * ausgeblendet werden - die Anzeige steht dann ununterbrochen.
-     *
-     * Weil sich nicht jedes Gerät gleich verhält, wird die Annahme einmal je Sitzung nachgemessen
-     * (siehe [runSecureCaptureSelfTest]) und im Zweifel auf das alte Verfahren zurückgefallen.
-     */
-    @Volatile
-    private var secureCaptureOk = true
-    private var secureCaptureChecked = false
 
     private val serviceJob = Job()
     private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
@@ -773,6 +774,46 @@ class FloatingBubbleService : Service() {
     }
 
     /**
+     * Hält die Blase vom Brett fern.
+     *
+     * Zwei Gründe, beide ernst: Liegt die Blase über dem Brett, verdeckt sie Felder in der
+     * Aufnahme - deren Inhalt wäre dauerhaft falsch gelesen. Und sie fängt die Berührungen des
+     * Auto-Zugs ab, weil sie an dieser Stelle das oberste Fenster ist.
+     *
+     * Nach jeder Vermessung des Bretts wird deshalb geprüft und bei Überlappung an den nächsten
+     * freien Rand über oder unter dem Brett geschoben. Das ist verlässlicher, als zu messen, ob
+     * sich das Gerät an FLAG_SECURE hält.
+     */
+    private fun keepBubbleClearOfBoard(boardRect: Rect) {
+        val view = bubbleView ?: return
+        val params = bubbleParams ?: return
+        val size = dp(BUBBLE_SIZE_DP)
+        val margin = dp(8)
+
+        val overlaps = params.x < boardRect.right && params.x + size > boardRect.left &&
+            params.y < boardRect.bottom && params.y + size > boardRect.top
+        if (!overlaps) return
+
+        // Oberhalb oder unterhalb des Bretts ausweichen, je nachdem, wo Platz ist
+        val above = boardRect.top - size - margin
+        val below = boardRect.bottom + margin
+        val target = when {
+            above >= 0 -> above
+            below + size <= screenHeight -> below
+            else -> margin
+        }
+
+        Log.i(TAG, "Blase lag über dem Brett und wird nach y=$target verschoben")
+        params.y = target
+        try {
+            windowManager.updateViewLayout(view, params)
+            positionMenu()
+        } catch (e: Exception) {
+            Log.w(TAG, "Blase ließ sich nicht verschieben: ${e.message}")
+        }
+    }
+
+    /**
      * Blase und Menü für die Dauer des Tippens berührungsdurchlässig schalten.
      *
      * Der Bedienungshilfen-Dienst schickt die Berührung an den Bildschirmpunkt - empfangen wird sie
@@ -968,6 +1009,7 @@ class FloatingBubbleService : Service() {
             referenceCells = null
             lastTickCells = null
             undecidedRuns = 0
+            nextFullScanAt = 0L
             startAnalysis(force = true)
             return
         }
@@ -976,15 +1018,6 @@ class FloatingBubbleService : Service() {
         if (rect == null) {
             // Noch kein Brett bekannt (die erste Analyse lief ins Leere): erneut versuchen
             startAnalysis(force = true)
-            return
-        }
-
-        // Einmal je Sitzung nachmessen, ob FLAG_SECURE das Overlay wirklich aus der Aufnahme
-        // heraushält. Der Takt ist dafür der richtige Ort: Hier steht der Brettausschnitt fest,
-        // und im Auto-Betrieb läuft unter Umständen nie wieder eine vollständige Erkennung, in der
-        // die Messung sonst gestanden hätte.
-        if (!secureCaptureChecked) {
-            runSecureCaptureSelfTest(rect)
             return
         }
 
@@ -1126,6 +1159,10 @@ class FloatingBubbleService : Service() {
             if (tryIncrementalMove(reference, cells)) return
         }
 
+        // Die vollständige Erkennung bekommt eine Bremse: Nach einem ergebnislosen Durchgang
+        // bringt ein sofort folgender zweiter fast nie etwas Neues.
+        if (System.currentTimeMillis() < nextFullScanAt) return
+
         // Sonst die vollständige Erkennung: Bildschirmfoto, Brett vermessen, 64 Felder einordnen.
         Log.i(
             TAG,
@@ -1133,56 +1170,6 @@ class FloatingBubbleService : Service() {
                 " Takte seit Analyse=$ticksSinceAnalysis, ergebnislose Durchgänge=$undecidedRuns)"
         )
         startAnalysis(force = false)
-    }
-
-    /**
-     * Misst einmal je Sitzung nach, ob das Overlay in der Bildschirmaufnahme auftaucht.
-     *
-     * Verfahren: einmal mit sichtbarem Overlay abtasten, einmal mit ausgeblendetem. Bleiben die
-     * Felder gleich, war das Overlay ohnehin nie im Bild - dann darf es für alle weiteren
-     * Aufnahmen stehenbleiben. Unterscheiden sie sich, hält sich das Gerät nicht an FLAG_SECURE
-     * und es wird wieder ausgeblendet wie zuvor.
-     *
-     * Der Sonderfall "ganze Aufnahme schwarz" wird mit abgefangen: manche Geräte schwärzen bei
-     * einem sicheren Fenster das gesamte Bild statt nur dieses Fenster. Dann ist der sichere Weg
-     * unbrauchbar und es gilt ebenfalls das Rückfallverfahren.
-     */
-    private suspend fun runSecureCaptureSelfTest(rect: Rect) {
-        secureCaptureChecked = true
-        val withOverlay = captureBoardCells(rect) ?: lastKnownCells
-        if (withOverlay == null) {
-            // Ohne Messwert lässt sich nichts entscheiden: später erneut versuchen
-            secureCaptureChecked = false
-            return
-        }
-
-        // Ist das ganze Brett schwarz, hat das Gerät die Aufnahme geschwärzt
-        if (withOverlay.means.all { it < 2f }) {
-            secureCaptureOk = false
-            Log.i(TAG, "Aufnahme ist schwarz - FLAG_SECURE unbrauchbar, es wird wieder ausgeblendet")
-            return
-        }
-
-        transparentOverlay?.setContentVisible(false)
-        bubbleView?.visibility = View.INVISIBLE
-        menuView?.visibility = View.INVISIBLE
-        delay(120)
-        val withoutOverlay = captureBoardCells(rect)
-        transparentOverlay?.setContentVisible(true)
-        bubbleView?.visibility = View.VISIBLE
-        menuView?.visibility = View.VISIBLE
-
-        // Kein neuer Frame nach dem Ausblenden heißt: auf dem aufgenommenen Bild hat sich nichts
-        // geändert - das Overlay war also gar nicht darin enthalten.
-        val differs = withoutOverlay != null && UltraRobustClassifier.boardCellsChanged(
-            withOverlay.means, withOverlay.stds, withoutOverlay.means, withoutOverlay.stds
-        )
-        secureCaptureOk = !differs
-        Log.i(
-            TAG,
-            if (secureCaptureOk) "Overlay bleibt aus der Aufnahme heraus, es wird nicht mehr ausgeblendet"
-            else "Overlay erscheint in der Aufnahme, Rückfall auf Ausblenden"
-        )
     }
 
     /**
@@ -1454,18 +1441,11 @@ class FloatingBubbleService : Service() {
      * Alle bereits gepufferten Frames stammen noch aus der Zeit davor und werden verworfen. Das
      * Ausblenden selbst löst eine neue Bildkomposition aus, der nächste Frame ist also sauber.
      */
-    private suspend fun captureFullFrame(discardBuffered: Boolean): Bitmap? = withContext(Dispatchers.IO) {
+    private suspend fun captureFullFrame(): Bitmap? = withContext(Dispatchers.IO) {
         if (imageReader == null) return@withContext null
         try {
-            if (discardBuffered) {
-                // Nur im Rückfallverfahren: Das bereitgehaltene Bild stammt noch aus der Zeit vor
-                // dem Ausblenden und enthielte den eigenen Pfeil. Es wird verworfen und auf das
-                // erste Bild danach gewartet - das Ausblenden selbst löst eines aus.
-                dropLatestImage()
-            } else {
-                // Bleibt das Overlay stehen, ist das bereitgehaltene Bild bereits sauber.
-                withLatestImage { bitmapFromImage(it) }?.let { return@withContext it }
-            }
+            // Das bereitgehaltene Bild ist sauber und wird sofort genommen
+            withLatestImage { bitmapFromImage(it) }?.let { return@withContext it }
 
             val deadline = System.currentTimeMillis() + FRAME_WAIT_MS
             while (System.currentTimeMillis() < deadline) {
@@ -1645,23 +1625,10 @@ class FloatingBubbleService : Service() {
             // Zug des Gegners war damit verschluckt und die Anzeige rührte sich nicht mehr.
             var analysisDecided = false
             try {
-                // Der Normalfall: das Overlay bleibt stehen. Der Pfeil ist für die Aufnahme
-                // unsichtbar, für den Nutzer aber die ganze Zeit da - kein Flackern mehr.
-                val hideForCapture = !secureCaptureOk
-                if (hideForCapture) {
-                    transparentOverlay?.setContentVisible(false)
-                    bubbleView?.visibility = View.INVISIBLE
-                    menuView?.visibility = View.INVISIBLE
-                }
-
-                // Alle noch gepufferten Frames verwerfen und den nächsten frischen Frame nehmen
-                screenBitmap = captureFullFrame(discardBuffered = hideForCapture)
-
-                if (hideForCapture) {
-                    transparentOverlay?.setContentVisible(true)
-                    bubbleView?.visibility = View.VISIBLE
-                    menuView?.visibility = View.VISIBLE
-                }
+                // Nichts ausblenden: Blase und Menü hält keepBubbleClearOfBoard vom Brett fern,
+                // und die Störungsmeldung liegt in der Bildschirmmitte mit FLAG_SECURE. Es gibt
+                // also nichts, was die Aufnahme verfälschen könnte.
+                screenBitmap = captureFullFrame()
 
                 if (screenBitmap == null) {
                     Log.i(TAG, "Noch kein Frame verfügbar, dieser Durchgang wird übersprungen")
@@ -1800,6 +1767,8 @@ class FloatingBubbleService : Service() {
 
                         // Brett merken, damit die Beobachtungsschleife weiß, welchen Ausschnitt sie vergleichen muss
                         lastBoardRect = Rect(res.boardRect)
+                        // Die Blase darf weder Felder verdecken noch die eigenen Berührungen abfangen
+                        keepBubbleClearOfBoard(res.boardRect)
 
                         // Kern der Dauerbeobachtung: wer hat gezogen?
                         //
@@ -1899,18 +1868,13 @@ class FloatingBubbleService : Service() {
                 Log.w(TAG, "Analyse abgebrochen: ${e.javaClass.simpleName}: ${e.message}")
                 reportError("Ausnahme in der Analyse: ${e.javaClass.simpleName}")
             } finally {
-                if (!secureCaptureOk) {
-                    // Nur im Rückfallverfahren war überhaupt etwas ausgeblendet
-                    transparentOverlay?.setContentVisible(true)
-                    bubbleView?.visibility = View.VISIBLE
-                    menuView?.visibility = View.VISIBLE
-                }
                 screenBitmap?.recycle()
                 if (analysisDecided) {
                     // Der Durchgang hat etwas entschieden: der nächste Takt nimmt das Brett neu auf.
                     markProgress()
                     resetMonitorState()
                     undecidedRuns = 0
+                    nextFullScanAt = 0L
                 } else {
                     // Nichts entschieden (kein Frame, unklare Aufnahme, abgewiesene Erkennung):
                     // die Vergleichsbasis bleibt stehen, damit die Veränderung anhängig bleibt.
@@ -1919,6 +1883,10 @@ class FloatingBubbleService : Service() {
                     stillTicks = 0
                     ticksSinceAnalysis = 0
                     undecidedRuns++
+                    // Wachsender Abstand, gedeckelt: der erste Wiederholversuch kommt schnell,
+                    // danach wird es ruhiger, bis die Aufsichtsuhr ohnehin aufräumt.
+                    nextFullScanAt = System.currentTimeMillis() +
+                        (FULL_SCAN_BACKOFF_MS * undecidedRuns).coerceAtMost(FULL_SCAN_BACKOFF_MAX_MS)
                 }
                 isAnalyzing = false
             }
