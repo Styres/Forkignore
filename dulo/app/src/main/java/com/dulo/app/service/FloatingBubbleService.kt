@@ -1198,7 +1198,8 @@ class FloatingBubbleService : Service() {
                         },
                         screenWidth = screenWidth,
                         screenHeight = screenHeight,
-                        boardRect = boardRect,
+                        boardTop = boardRect.top,
+                        squareSize = boardRect.width() / 8.0f,
                         promoCell = promoCell
                     )
                 }

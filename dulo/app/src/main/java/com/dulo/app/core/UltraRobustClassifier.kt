@@ -978,7 +978,14 @@ class UltraRobustClassifier(context: Context? = null) {
          * vermutete Stelle zu tippen wäre schlimmer als ein unvollendeter Zug: Es könnte einen
          * ganz anderen Zug auslösen.
          *
+         * Bewusst mit blanken Zahlen statt einem Rect: In den Unit-Tests von Android sind die
+         * Methoden der Android-Klassen nicht belegt und liefern schlicht 0. Eine reine Funktion,
+         * die davon abhängt, ist auf dem Rechner nicht prüfbar - und genau das ist hier einmal
+         * durchgerutscht.
+         *
          * @param luminance liefert die Helligkeit (0..255) eines Bildpunkts
+         * @param boardTop  obere Kante des Bretts in Bildpunkten
+         * @param squareSize Kantenlänge eines Feldes in Bildpunkten
          * @param promoCell Bildschirmfeld, auf dem der Bauer angekommen ist
          * @return Bildpunkt der Dame, oder null
          */
@@ -986,16 +993,17 @@ class UltraRobustClassifier(context: Context? = null) {
             luminance: (Int, Int) -> Float,
             screenWidth: Int,
             screenHeight: Int,
-            boardRect: Rect,
+            boardTop: Int,
+            squareSize: Float,
             promoCell: Int,
             brightThreshold: Float = 150f
         ): Pair<Int, Int>? {
             if (promoCell !in 0..63) return null
-            val square = boardRect.width() / 8.0f
+            val square = squareSize
             if (square < 16f) return null
 
             val row = promoCell / 8
-            val centreY = boardRect.top + (row + 0.5f) * square
+            val centreY = boardTop + (row + 0.5f) * square
             // Die Tafel liegt zum Brett hin, also nach unten, wenn oben umgewandelt wird
             val direction = if (row <= 3) 1 else -1
 

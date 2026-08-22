@@ -1,6 +1,5 @@
 package com.dulo.app
 
-import android.graphics.Rect
 import com.dulo.app.core.UltraRobustClassifier
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -25,7 +24,7 @@ class UmwandlungsauswahlTest {
 
     private val screenWidth = 1080
     private val screenHeight = 2400
-    private val boardRect = Rect(0, 848, 1080, 1928)
+    private val boardTop = 848
     private val square = 135
 
     /** Symbolmitten und Höhe wie im echten Bildschirmfoto */
@@ -54,7 +53,8 @@ class UmwandlungsauswahlTest {
             luminance = bildschirm(),
             screenWidth = screenWidth,
             screenHeight = screenHeight,
-            boardRect = boardRect,
+            boardTop = boardTop,
+            squareSize = square.toFloat(),
             promoCell = 6
         )
         assertNotNull("Die Auswahl muss gefunden werden", treffer)
@@ -71,7 +71,8 @@ class UmwandlungsauswahlTest {
             luminance = bildschirm(mitten = emptyList()),
             screenWidth = screenWidth,
             screenHeight = screenHeight,
-            boardRect = boardRect,
+            boardTop = boardTop,
+            squareSize = square.toFloat(),
             promoCell = 6
         )
         assertNull(treffer)
@@ -84,7 +85,8 @@ class UmwandlungsauswahlTest {
             luminance = bildschirm(mitten = listOf(572)),
             screenWidth = screenWidth,
             screenHeight = screenHeight,
-            boardRect = boardRect,
+            boardTop = boardTop,
+            squareSize = square.toFloat(),
             promoCell = 6
         )
         assertNull(treffer)
@@ -99,7 +101,8 @@ class UmwandlungsauswahlTest {
             luminance = bildschirm(mitten = vollreihe, breite = (square * 0.98f).toInt()),
             screenWidth = screenWidth,
             screenHeight = screenHeight,
-            boardRect = boardRect,
+            boardTop = boardTop,
+            squareSize = square.toFloat(),
             promoCell = 6
         )
         assertNull(treffer)
@@ -108,13 +111,14 @@ class UmwandlungsauswahlTest {
     @Test
     fun testAuswahlBeiUmwandlungAmUnterenRand() {
         // Spielt man Schwarz, wandelt man unten um - die Tafel liegt dann darüber
-        val untenY = 1928 - 135 / 2
+        val untenY = boardTop + 8 * square - square / 2
         val tafelY = untenY - (2.2f * square).toInt()
         val treffer = UltraRobustClassifier.findPromotionChoice(
             luminance = bildschirm(zeile = tafelY),
             screenWidth = screenWidth,
             screenHeight = screenHeight,
-            boardRect = boardRect,
+            boardTop = boardTop,
+            squareSize = square.toFloat(),
             promoCell = 7 * 8 + 6
         )
         assertNotNull("Auch nach oben muss gesucht werden", treffer)
@@ -128,7 +132,8 @@ class UmwandlungsauswahlTest {
                 luminance = bildschirm(),
                 screenWidth = screenWidth,
                 screenHeight = screenHeight,
-                boardRect = boardRect,
+                boardTop = boardTop,
+            squareSize = square.toFloat(),
                 promoCell = 64
             )
         )
@@ -138,7 +143,8 @@ class UmwandlungsauswahlTest {
                 luminance = bildschirm(),
                 screenWidth = screenWidth,
                 screenHeight = screenHeight,
-                boardRect = Rect(0, 0, 40, 40),
+                boardTop = boardTop,
+                squareSize = 5f,
                 promoCell = 6
             )
         )
