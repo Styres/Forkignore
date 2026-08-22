@@ -94,8 +94,10 @@ class FloatingBubbleService : Service() {
         // Ab dieser Druckdauer gilt eine Berührung der Blase als langer Druck (Perspektive umschalten)
         private const val LONG_PRESS_MS = 500L
 
-        // Takt der Dauerbeobachtung: rund achtmal pro Sekunde wird jede Figurenposition nachgesehen
-        private const val POLL_INTERVAL_MS = 120L
+        // Takt der Dauerbeobachtung: rund zwölfmal pro Sekunde wird jede Figurenposition
+        // nachgesehen. Der Takt kostet fast nichts (gut zweitausend Bildpunkte), bestimmt aber
+        // unmittelbar, wie schnell der Zug des Gegners auffällt.
+        private const val POLL_INTERVAL_MS = 80L
 
         // So viele Takte am Stück müssen die Figuren stillstehen, bevor die volle Erkennung startet.
         // Ein Takt reicht: sobald sich zwischen zwei Aufnahmen nichts mehr rührt, ist die
@@ -105,7 +107,7 @@ class FloatingBubbleService : Service() {
 
         // Bewegt sich das Bild so lange ohne Ruhepause, wird trotzdem analysiert (rund 2 Sekunden).
         // Duolingo animiert nach einem Zug gern weiter (Hervorhebungen, Maskottchen).
-        private const val MAX_PENDING_TICKS = 16
+        private const val MAX_PENDING_TICKS = 24
 
         // So oft darf ein Durchgang ergebnislos bleiben, bevor die Stellung zwangsweise als neue
         // Grundlage angenommen und gerechnet wird. Ohne diese Notbremse konnte die Erkennung in
@@ -113,11 +115,13 @@ class FloatingBubbleService : Service() {
         // gar keine Anzeige mehr.
         private const val MAX_UNDECIDED_RUNS = 3
 
-        // Pause nach jeder Berührung des Auto-Zugs
-        private const val AUTO_MOVE_DELAY_MS = 300L
+        // Pause zwischen den beiden Berührungen des Auto-Zugs. Lang genug, dass die Oberfläche
+        // die erste als Auswahl der Figur verarbeitet, kurz genug, um nicht zu bremsen.
+        private const val AUTO_MOVE_DELAY_MS = 160L
 
-        // Beruhigungszeit nach der letzten Berührung: so lange läuft noch die Zuganimation
-        private const val AUTO_MOVE_SETTLE_MS = 700L
+        // Beruhigungszeit nach der letzten Berührung: so lange läuft noch die Zuganimation.
+        // Sie verzögert nicht den eigenen Zug, sondern nur das Erkennen des nächsten gegnerischen.
+        private const val AUTO_MOVE_SETTLE_MS = 350L
 
         // So lange wird auf die Ausführung eines vorgeschlagenen Zuges gewartet, danach gilt er
         // als nicht gespielt und die Stellung wird neu erkannt.
@@ -133,12 +137,12 @@ class FloatingBubbleService : Service() {
         private const val FULL_SCAN_BACKOFF_MS = 500L
         private const val FULL_SCAN_BACKOFF_MAX_MS = 3000L
 
-        // Sicherheitsnetz: spätestens nach so vielen Takten (rund 2,5 Sekunden) wird ohnehin
+        // Sicherheitsnetz: spätestens nach so vielen Takten wird ohnehin
         // nachgesehen, auch wenn der Feldvergleich nichts gemeldet hat. Damit bleibt ein Pfeil
         // selbst im schlechtesten Fall nicht länger stehen. Die Engine läuft dabei nur, wenn der
         // Gegner tatsächlich gezogen hat, und das Overlay wird nicht mehr abgerissen - der
         // Durchlauf kostet also kaum etwas.
-        private const val SWEEP_TICKS = 12
+        private const val SWEEP_TICKS = 18
 
 
         // Obergrenze für einen kompletten Analysedurchgang (Aufnahme, Erkennung, Bedenkzeit).

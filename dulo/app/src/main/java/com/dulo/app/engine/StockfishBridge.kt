@@ -265,6 +265,15 @@ object StockfishBridge {
     const val MAX_SEARCH_DEPTH = 30
 
     /**
+     * Ab dieser Tiefe darf die Suche vorzeitig enden, wenn der beste Zug stabil bleibt.
+     * Darunter ist die Aussage zu jung, um ihr zu trauen.
+     */
+    const val MIN_SETTLED_DEPTH = 16
+
+    /** So viele Tiefen in Folge muss derselbe Zug herauskommen, bevor abgebrochen wird */
+    const val STABLE_DEPTHS_REQUIRED = 5
+
+    /**
      * Reine Funktion: baut den Suchbefehl.
      *
      * Beide Grenzen zusammen, weil sie unterschiedliche Fälle abdecken: die Tiefe beendet eine
@@ -761,6 +770,13 @@ object StockfishBridge {
             var bestMoveResult: String? = null
             val deadline = System.currentTimeMillis() + moveTimeMs + 4000L
 
+            // Verfolgt, wie lange die Engine schon beim selben Zug bleibt: Grundlage für den
+            // vorzeitigen Abbruch. Die Bedenkzeit ist eine Obergrenze, kein Soll.
+            var stableMove: String? = null
+            var stableDepths = 0
+            var lastSeenDepth = -1
+            var stopSent = false
+
             // Ausgabe reaktiv und suspendierend lesen
             while (System.currentTimeMillis() < deadline) {
                 val remaining = deadline - System.currentTimeMillis()
@@ -787,6 +803,23 @@ object StockfishBridge {
                 val parsedInfo = parseInfoLine(line)
                 if (parsedInfo != null) {
                     lastEval = parsedInfo
+                }
+
+                // Vorzeitiger Abbruch: Bleibt der beste Zug über mehrere Tiefen derselbe, ist die
+                // Sache entschieden und die restliche Bedenkzeit wäre reine Wartezeit.
+                if (!stopSent) {
+                    val pvMove = parsePvMove(line)
+                    val pvDepth = parsedInfo?.depth ?: -1
+                    if (pvMove != null && pvDepth > lastSeenDepth) {
+                        lastSeenDepth = pvDepth
+                        stableDepths = if (pvMove == stableMove) stableDepths + 1 else 1
+                        stableMove = pvMove
+                        if (searchIsSettled(stableDepths, pvDepth, parsedInfo?.isMate == true)) {
+                            Log.i(TAG, "Zug $pvMove steht seit $stableDepths Tiefen fest (Tiefe $pvDepth), Suche wird beendet")
+                            sendCommand("stop")
+                            stopSent = true
+                        }
+                    }
                 }
 
                 val bm = parseBestMoveLine(line)
@@ -1042,6 +1075,42 @@ object StockfishBridge {
     fun parseBestMoveLine(line: String): String? {
         val matcher = bestMovePattern.matcher(line.trim())
         return if (matcher.find()) matcher.group(1) else null
+    }
+
+    /**
+     * Reine Funktion: liest den ersten Zug der Hauptvariante aus einer info-Zeile.
+     *
+     * Stockfish meldet nach jeder Tiefe seine beste Fortsetzung als "... pv e2e4 e7e5 ...".
+     * Der erste Zug darin ist der Zug, den die Engine bei dieser Tiefe spielen würde.
+     */
+    fun parsePvMove(line: String): String? {
+        if (!line.startsWith("info ")) return null
+        val marker = line.indexOf(" pv ")
+        if (marker < 0) return null
+        val rest = line.substring(marker + 4).trim()
+        val move = rest.substringBefore(' ')
+        return if (move.matches(Regex("[a-h][1-8][a-h][1-8][qrbnQRBN]?"))) move else null
+    }
+
+    /**
+     * Reine Funktion: Steht der beste Zug fest genug, um die Suche abzubrechen?
+     *
+     * Die Bedenkzeit ist eine Obergrenze, kein Soll. Bleibt die Engine über mehrere Tiefen hinweg
+     * beim selben Zug und hat dabei schon ordentlich weit gerechnet, ändert weitere Rechenzeit das
+     * Ergebnis so gut wie nie mehr - sie kostet nur Wartezeit vor dem Zug. Ein erzwungener Zug oder
+     * ein klarer Schlagabtausch ist oft nach einem Bruchteil der Zeit entschieden.
+     *
+     * Bewusst zurückhaltend: In einer scharfen Stellung wechselt der beste Zug zwischen den Tiefen,
+     * dort greift der Abbruch nicht und es bleibt bei der vollen Bedenkzeit.
+     *
+     * @param stableDepths Wie viele Tiefen in Folge denselben Zug ergeben haben
+     * @param depth        Zuletzt erreichte Suchtiefe
+     * @param isMate       Steht bereits ein Matt fest?
+     */
+    fun searchIsSettled(stableDepths: Int, depth: Int, isMate: Boolean): Boolean {
+        // Ein gefundenes Matt ist das Ende der Fahnenstange, da hilft kein Weiterrechnen
+        if (isMate && depth >= MIN_SETTLED_DEPTH) return true
+        return depth >= MIN_SETTLED_DEPTH && stableDepths >= STABLE_DEPTHS_REQUIRED
     }
 
     fun parseInfoLine(line: String): EngineEvaluation? {

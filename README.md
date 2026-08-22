@@ -176,10 +176,16 @@ unterstützte Option meldet; alles andere wird übersprungen und in der Diagnose
 | SyzygyProbeDepth    | 1 (nur mit Tablebases)                                                            |
 | SyzygyProbeLimit    | 5 (nur mit Tablebases)                                                            |
 | Syzygy50MoveRule    | true (nur mit Tablebases)                                                         |
-| Suchbefehl          | `go depth 30 movetime 2000`; `ucinewgame` nur bei einer wirklich neuen Partie     |
+| Suchbefehl          | `go depth 30 movetime 2000` mit vorzeitigem Abbruch; `ucinewgame` nur bei einer neuen Partie |
 
 Weitere Punkte der Vorgabe:
 
+- **Bedenkzeit ist eine Obergrenze, kein Soll**: Bleibt der beste Zug über fünf Suchtiefen hinweg
+  derselbe und ist dabei mindestens Tiefe 16 erreicht, wird die Suche mit `stop` beendet. Weitere
+  Rechenzeit ändert das Ergebnis dann so gut wie nie mehr, kostet aber unmittelbar Wartezeit vor
+  dem Zug. Ein gefundenes Matt beendet die Suche ebenfalls. In scharfen Stellungen, in denen der
+  beste Zug zwischen den Tiefen wechselt, greift der Abbruch nicht und es bleiben die vollen zwei
+  Sekunden.
 - **Transpositionstabelle**: `ucinewgame` leert sie und wird deshalb nur gesendet, wenn die neue
   Stellung keine Fortsetzung der vorherigen ist - erkennbar daran, dass Figuren hinzugekommen sind
   (innerhalb einer Partie verschwinden sie nur) oder die Grundstellung auf dem Brett steht. Die
