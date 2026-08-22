@@ -45,9 +45,11 @@ import com.dulo.app.ui.DuloToggleView
 import com.dulo.app.ui.MainActivity
 import com.dulo.app.ui.TransparentCanvasOverlay
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -363,8 +365,21 @@ class FloatingBubbleService : Service() {
     private var analysisStartedAt = 0L
 
 
-    private val serviceJob = Job()
-    private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
+    /**
+     * Aufsicht statt gewöhnlicher Auftrag.
+     *
+     * Mit einem gewöhnlichen [Job] reißt eine einzige unbehandelte Ausnahme in irgendeiner
+     * Nebenläufigkeit den ganzen Bereich mit: Der Auftrag bricht ab, alle Geschwister werden
+     * abgebrochen, und die Beobachtungsschleife lässt sich danach nicht einmal mehr neu starten -
+     * der Dienst liefe weiter, täte aber nichts mehr. Ein SupervisorJob hält die Geschwister
+     * heraus, der zusätzliche Handler sorgt dafür, dass so etwas im Protokoll auftaucht statt
+     * stillschweigend zu verschwinden.
+     */
+    private val serviceJob = SupervisorJob()
+    private val serviceExceptionHandler = CoroutineExceptionHandler { _, e ->
+        Log.e(TAG, "Unbehandelte Ausnahme in einer Nebenläufigkeit: ${e.javaClass.simpleName}: ${e.message}", e)
+    }
+    private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob + serviceExceptionHandler)
 
     override fun onCreate() {
         super.onCreate()
@@ -458,6 +473,81 @@ class FloatingBubbleService : Service() {
         }
     }
 
+    /**
+     * Dreht sich der Bildschirm, ändern sich Breite und Höhe - die Aufnahmefläche nicht.
+     *
+     * VirtualDisplay und ImageReader werden mit fester Größe angelegt. Nach einer Drehung liefert
+     * die Aufnahme deshalb weiterhin Bilder im alten Format: Das Brett läge an völlig anderer
+     * Stelle, jede Feldabtastung ginge daneben, und DuLo wäre bis zum Neustart unbrauchbar.
+     *
+     * Deshalb wird die Aufnahmefläche neu aufgesetzt. Die Freigabe selbst (MediaProjection) bleibt
+     * gültig, es müssen nur Anzeige und Leser in der neuen Größe entstehen.
+     */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val previousWidth = screenWidth
+        val previousHeight = screenHeight
+        updateScreenMetrics()
+        if (screenWidth == previousWidth && screenHeight == previousHeight) return
+
+        Log.i(TAG, "Bildschirm gedreht (${previousWidth}x$previousHeight -> ${screenWidth}x$screenHeight), Aufnahme wird neu aufgesetzt")
+        if (mediaProjection == null) return
+
+        // Alles verwerfen, was sich auf die alte Größe bezog
+        lastBoardRect = null
+        lastAcceptedBoard = null
+        castlingRights = null
+        clearPendingMove()
+        resetMonitorState()
+        lastKnownCells = null
+        markProgress()
+
+        recreateCaptureSurface()
+    }
+
+    /**
+     * Anzeige und Leser in der aktuellen Bildschirmgröße anlegen.
+     *
+     * Wird beim Aufbau der Sitzung und nach jeder Drehung gebraucht - die Freigabe selbst
+     * (MediaProjection) bleibt dabei bestehen. Bewusst eine gemeinsame Stelle: Zwei Fassungen
+     * derselben Einrichtung laufen früher oder später auseinander.
+     */
+    private fun recreateCaptureSurface() {
+        try {
+            dropLatestImage()
+            try { virtualDisplay?.release() } catch (_: Exception) {}
+            try { imageReader?.close() } catch (_: Exception) {}
+            virtualDisplay = null
+            imageReader = null
+
+            imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 3)
+            imageReader?.setOnImageAvailableListener({ reader ->
+                val img = try { reader.acquireLatestImage() } catch (e: Exception) { null }
+                if (img != null) {
+                    synchronized(imageLock) {
+                        try { latestImage?.close() } catch (_: Exception) {}
+                        latestImage = img
+                    }
+                }
+            }, captureHandler)
+
+            virtualDisplay = mediaProjection?.createVirtualDisplay(
+                "DuLoScreenCapture",
+                screenWidth,
+                screenHeight,
+                screenDensity,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                imageReader!!.surface,
+                null,
+                captureHandler
+            )
+            recordProjectionState("Aufnahmefläche nach Drehung neu angelegt (${screenWidth}x${screenHeight})")
+        } catch (e: Exception) {
+            Log.w(TAG, "Aufnahmefläche ließ sich nicht neu anlegen: ${e.message}")
+            recordProjectionState("Neuanlegen der Aufnahmefläche fehlgeschlagen: ${e.message}")
+        }
+    }
+
     private fun setupMediaProjection(resultCode: Int, resultData: Intent) {
         try {
             mediaProjection = mediaProjectionManager?.getMediaProjection(resultCode, resultData)
@@ -470,29 +560,13 @@ class FloatingBubbleService : Service() {
             // Lebenszyklus der Sitzung beobachten: beendet das System die Freigabe, werden die Referenzen sofort freigegeben und der Nutzer informiert, damit kein Zombie-Zustand entsteht (Referenz vorhanden, Sitzung tot)
             mediaProjection?.registerCallback(projectionCallback, captureHandler)
 
-            imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 3)
-
-            virtualDisplay = mediaProjection?.createVirtualDisplay(
-                "ChessScreenCapture",
-                screenWidth,
-                screenHeight,
-                screenDensity,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                imageReader!!.surface,
-                null,
-                captureHandler
-            )
-
-            imageReader?.setOnImageAvailableListener({ reader ->
-                // Immer nur das neueste Bild behalten; ältere schließt acquireLatestImage selbst.
-                val img = try { reader.acquireLatestImage() } catch (e: Exception) { null }
-                if (img != null) {
-                    synchronized(imageLock) {
-                        try { latestImage?.close() } catch (_: Exception) {}
-                        latestImage = img
-                    }
-                }
-            }, captureHandler)
+            recreateCaptureSurface()
+            if (virtualDisplay == null) {
+                recordProjectionState("Initialisierung fehlgeschlagen: die Aufnahmefläche ließ sich nicht anlegen")
+                rollbackProjection()
+                Toast.makeText(this, "Die Bildschirmaufnahme ließ sich nicht anlegen", Toast.LENGTH_LONG).show()
+                return
+            }
 
             recordProjectionState("Aufnahmesitzung erfolgreich aufgebaut (${screenWidth}x${screenHeight}, dpi=$screenDensity)")
             Toast.makeText(this, "DuLo ist bereit", Toast.LENGTH_SHORT).show()
@@ -510,9 +584,17 @@ class FloatingBubbleService : Service() {
             recordProjectionState("Das System hat die Bildschirmfreigabe beendet (MediaProjection.Callback#onStop)")
             rollbackProjection()
             serviceScope.launch(Dispatchers.Main) {
+                // Ohne Freigabe kann der Auto-Zug nichts mehr ausrichten. Bisher lief die
+                // Beobachtung weiter und prüfte zwölfmal je Sekunde vergeblich, während der
+                // Schalter unverändert auf "On" stand - für den Nutzer sah alles in Ordnung aus.
+                autoMoveEnabled = false
+                autoAnalyseEnabled = false
+                setOverlayTouchable(true)
+                stopMonitoring()
+                autoMoveToggle?.setOn(false, animate = true)
                 Toast.makeText(
                     this@FloatingBubbleService,
-                    "Die Bildschirmfreigabe wurde vom System beendet. Bitte auf die Blase tippen und erneut freigeben",
+                    "Die Bildschirmfreigabe wurde vom System beendet. Bitte DuLo neu starten",
                     Toast.LENGTH_LONG
                 ).show()
             }
@@ -523,6 +605,8 @@ class FloatingBubbleService : Service() {
      * Projektionsressourcen zurücknehmen, ohne selbst stop() aufzurufen (im onStop-Callback hat das System die Sitzung bereits beendet)
      */
     private fun rollbackProjection() {
+        // Erst das bereitgehaltene Bild freigeben, dann den Leser schließen
+        dropLatestImage()
         try { virtualDisplay?.release() } catch (_: Exception) {}
         try { imageReader?.close() } catch (_: Exception) {}
         virtualDisplay = null

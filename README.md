@@ -80,6 +80,9 @@
     König, der nach f1 und zurück gegangen ist, steht wieder zu Hause und darf trotzdem nie wieder
     rochieren. Geraten würde das Recht zurückgegeben und die Engine schlüge eine Rochade vor, die
     das Spiel ablehnt;
+  - eine **Drehung des Bildschirms** setzt die Aufnahmefläche neu auf: VirtualDisplay und
+    ImageReader haben eine feste Größe, nach einer Drehung kämen sonst weiterhin Bilder im alten
+    Format und jede Feldabtastung ginge daneben;
   - über allem wacht eine **Aufsichtsuhr**: geschieht zwölf Sekunden lang gar nichts mehr, wird die
     Buchführung verworfen und die Stellung frisch vom Bildschirm gelesen. Jede Sackgasse ist damit
     höchstens ein Aussetzer von wenigen Sekunden.
