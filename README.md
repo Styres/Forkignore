@@ -142,8 +142,13 @@
   - getippt wird erst das Startfeld, dann das Zielfeld, mit 0,35 Sekunden Pause dazwischen. Die
     Pause ist mit Absicht reichlich: Die erste Berührung wählt die Figur aus, und kommt die zweite
     zu früh, wird sie verworfen und der Zug findet nicht statt;
-  - bei einer **Umwandlung** kommt eine dritte Berührung auf dasselbe Zielfeld dazu: Dort erscheint
-    die Auswahl der neuen Figur mit der Dame obenauf;
+  - bei einer **Umwandlung** blendet Duolingo eine Tafel mit vier Figuren ein (Dame, Turm, Läufer,
+    Springer). Wo sie steht, lässt sich nicht ausrechnen: Sie hängt am Umwandlungsfeld, wird aber
+    an den Bildschirmrand gerückt, wenn sie sonst hinausragen würde. DuLo **sucht** sie deshalb an
+    ihrem unverwechselbaren Muster - vier helle Symbole nebeneinander, jedes rund ein halbes Feld
+    breit, im Abstand von je einem Feld - und tippt die Dame an. Wird sie nicht gefunden, wird
+    nichts getippt: Blind auf eine vermutete Stelle zu tippen wäre schlimmer als ein unvollendeter
+    Zug, denn es könnte einen ganz anderen Zug auslösen;
   - nach der letzten Berührung ist DuLo schon nach 0,1 Sekunden wieder aufnahmebereit. Die
     Vergleichsbasis wird dabei erst genommen, wenn das Brett zwischen zwei Takten stillsteht - die
     Zuganimation muss also nicht pauschal abgewartet werden. Die

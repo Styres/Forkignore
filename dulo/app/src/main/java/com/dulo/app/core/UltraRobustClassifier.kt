@@ -962,6 +962,123 @@ class UltraRobustClassifier(context: Context? = null) {
         }
 
         /**
+         * Reine Funktion: findet die Auswahl der Umwandlungsfigur auf dem Bildschirm.
+         *
+         * Erreicht ein Bauer die letzte Reihe, blendet Duolingo eine Tafel mit vier Figuren ein -
+         * Dame, Turm, Läufer, Springer, in dieser Reihenfolge nebeneinander. Ohne eine Berührung
+         * darauf bleibt der Zug unvollendet und die Partie steht.
+         *
+         * Wo die Tafel erscheint, lässt sich nicht zuverlässig ausrechnen: Sie hängt am
+         * Umwandlungsfeld, wird aber an den Bildschirmrand gerückt, wenn sie sonst hinausragen
+         * würde. Deshalb wird sie gesucht statt geraten - an ihrem unverwechselbaren Muster:
+         * vier helle Symbole nebeneinander, jedes rund ein halbes Feld breit, im Abstand von je
+         * einem Feld. Nichts auf einem Schachbrett sieht sonst so aus.
+         *
+         * Wird nichts gefunden, kommt bewusst null zurück und es wird nicht getippt. Blind auf eine
+         * vermutete Stelle zu tippen wäre schlimmer als ein unvollendeter Zug: Es könnte einen
+         * ganz anderen Zug auslösen.
+         *
+         * @param luminance liefert die Helligkeit (0..255) eines Bildpunkts
+         * @param promoCell Bildschirmfeld, auf dem der Bauer angekommen ist
+         * @return Bildpunkt der Dame, oder null
+         */
+        fun findPromotionChoice(
+            luminance: (Int, Int) -> Float,
+            screenWidth: Int,
+            screenHeight: Int,
+            boardRect: Rect,
+            promoCell: Int,
+            brightThreshold: Float = 150f
+        ): Pair<Int, Int>? {
+            if (promoCell !in 0..63) return null
+            val square = boardRect.width() / 8.0f
+            if (square < 16f) return null
+
+            val row = promoCell / 8
+            val centreY = boardRect.top + (row + 0.5f) * square
+            // Die Tafel liegt zum Brett hin, also nach unten, wenn oben umgewandelt wird
+            val direction = if (row <= 3) 1 else -1
+
+            val half = (0.25f * square).toInt().coerceAtLeast(4)
+            val start = (centreY + direction * 1.2f * square).toInt()
+            val end = (centreY + direction * 3.5f * square).toInt()
+            val step = 6 * direction
+
+            val treffer = mutableListOf<Pair<Int, Int>>()
+            var probe = start
+            while (if (direction > 0) probe < end else probe > end) {
+                val queenX = scanChoiceRow(
+                    luminance, screenWidth, screenHeight, probe, half, square, brightThreshold
+                )
+                if (queenX != null) treffer.add(queenX to probe)
+                probe += step
+            }
+            if (treffer.isEmpty()) return null
+
+            // Die mittlere der passenden Höhen trifft das Symbol am sichersten - die erste läge
+            // an seinem oberen Rand.
+            return treffer[treffer.size / 2]
+        }
+
+        /**
+         * Sucht in einem waagerechten Streifen vier helle Symbole im Abstand von je einem Feld.
+         * @return x-Mitte des linken Symbols (die Dame), oder null
+         */
+        private fun scanChoiceRow(
+            luminance: (Int, Int) -> Float,
+            screenWidth: Int,
+            screenHeight: Int,
+            probeY: Int,
+            half: Int,
+            square: Float,
+            brightThreshold: Float
+        ): Int? {
+            val counts = IntArray(screenWidth)
+            var y = (probeY - half).coerceAtLeast(0)
+            val yEnd = (probeY + half).coerceAtMost(screenHeight)
+            while (y < yEnd) {
+                for (x in 0 until screenWidth) {
+                    if (luminance(x, y) > brightThreshold) counts[x]++
+                }
+                y += 3
+            }
+
+            // Spalten mit mehreren hellen Zeilen zu Blöcken zusammenfassen. Die Mindestzahl hält
+            // einzelne helle Punkte heraus, die sonst zwei Symbole zu einem verbinden.
+            val blocks = mutableListOf<IntRange>()
+            var blockStart = -1
+            var lastOn = -1
+            for (x in 0 until screenWidth) {
+                if (counts[x] >= 3) {
+                    if (blockStart < 0) blockStart = x
+                    lastOn = x
+                } else if (blockStart >= 0 && x - lastOn > 8) {
+                    blocks.add(blockStart..lastOn)
+                    blockStart = -1
+                }
+            }
+            if (blockStart >= 0) blocks.add(blockStart..lastOn)
+
+            // Nur Blöcke in der Größe eines Figurensymbols
+            val symbols = blocks.filter {
+                val width = it.last - it.first
+                width >= 0.3f * square && width <= 0.95f * square
+            }
+            if (symbols.size < 4) return null
+
+            val centres = symbols.map { (it.first + it.last) / 2 }
+            // Vier Symbole im Abstand von je rund einem Feld
+            for (i in 0..centres.size - 4) {
+                val vier = centres.subList(i, i + 4)
+                val abstaende = (0..2).map { vier[it + 1] - vier[it] }
+                if (abstaende.all { it >= 0.7f * square && it <= 1.3f * square }) {
+                    return vier[0]
+                }
+            }
+            return null
+        }
+
+        /**
          * Reine Funktion: welche Bildschirmfelder muss der Auto-Zug antippen?
          *
          * Ein gewöhnlicher Zug braucht zwei Berührungen: Figur wählen, Ziel wählen. Eine
@@ -977,6 +1094,10 @@ class UltraRobustClassifier(context: Context? = null) {
             if (uci.length < 4) return null
             val from = screenCellForSquare(uci.substring(0, 2), isWhitePerspective) ?: return null
             val to = screenCellForSquare(uci.substring(2, 4), isWhitePerspective) ?: return null
+            // Auch bei einer Umwandlung nur Start und Ziel: Welche Figur es wird, entscheidet
+            // danach eine Berührung auf der eingeblendeten Tafel, und die wird gesucht statt
+            // geraten (siehe findPromotionChoice).
+            return listOf(from, to)
             return if (uci.length >= 5) listOf(from, to, to) else listOf(from, to)
         }
 

@@ -165,12 +165,12 @@ class AutoZugTest {
     }
 
     @Test
-    fun testUmwandlungBrauchtEineDritteBeruehrung() {
-        // Die Oberfläche fragt nach der Figur; die Auswahl erscheint auf dem Umwandlungsfeld
-        // selbst, mit der Dame obenauf. Der dritte Tipp geht deshalb noch einmal dorthin.
+    fun testUmwandlungTipptNurStartUndZiel() {
+        // Welche Figur es wird, entscheidet danach eine Berührung auf der eingeblendeten Tafel -
+        // und die wird auf dem Bildschirm gesucht, nicht aus dem Zielfeld abgeleitet.
         // e7 = Feld 12, e8 = Feld 4
         assertEquals(
-            listOf(12, 4, 4),
+            listOf(12, 4),
             UltraRobustClassifier.tapCellsForMove("e7e8q", isWhitePerspective = true)
         )
     }
@@ -179,7 +179,7 @@ class AutoZugTest {
     fun testUmwandlungAusSchwarzerSicht() {
         // Aus schwarzer Sicht kehren sich die Feldnummern um: e2 = 63 - 52 = 11, e1 = 63 - 60 = 3
         assertEquals(
-            listOf(11, 3, 3),
+            listOf(11, 3),
             UltraRobustClassifier.tapCellsForMove("e2e1q", isWhitePerspective = false)
         )
     }

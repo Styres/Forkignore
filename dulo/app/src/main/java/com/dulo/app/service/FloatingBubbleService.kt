@@ -177,6 +177,9 @@ class FloatingBubbleService : Service() {
         // So lange wird höchstens auf einen frischen Frame gewartet
         private const val FRAME_WAIT_MS = 400L
 
+        // So lange braucht die Tafel mit der Umwandlungsfigur, um zu erscheinen
+        private const val PROMOTION_DIALOG_WAIT_MS = 450L
+
         // So oft darf ein Zug nicht auf dem Brett ankommen, bevor der Nutzer es erfährt
         private const val MAX_FAILED_MOVE_ATTEMPTS = 3
 
@@ -1136,14 +1139,87 @@ class FloatingBubbleService : Service() {
             (points.size - 1) * AUTO_MOVE_DELAY_MS + AUTO_MOVE_SETTLE_MS
 
         DuloAutoMoveService.tapSequence(points, AUTO_MOVE_DELAY_MS) { ok ->
-            setOverlayTouchable(true)
             if (!ok) {
+                setOverlayTouchable(true)
                 Log.w(TAG, "Auto-Zug konnte nicht vollständig ausgeführt werden")
                 // Nicht weiter blockieren: die gewöhnliche Erkennung soll sofort wieder greifen
                 autoMoveBusyUntil = 0L
                 return@tapSequence
             }
+
+            if (isPromotion) {
+                // Jetzt fragt die Oberfläche nach der neuen Figur. Wo die Tafel steht, wird
+                // gesucht statt geraten - sie rückt an den Bildschirmrand, wenn sie sonst
+                // hinausragen würde.
+                autoMoveBusyUntil = System.currentTimeMillis() + PROMOTION_DIALOG_WAIT_MS + AUTO_MOVE_SETTLE_MS
+                serviceScope.launch { tapPromotionChoice(boardRect, tapCells.last()) }
+                return@tapSequence
+            }
+
+            setOverlayTouchable(true)
             // Ab der letzten Berührung noch die Beruhigungszeit abwarten
+            autoMoveBusyUntil = System.currentTimeMillis() + AUTO_MOVE_SETTLE_MS
+        }
+    }
+
+    /**
+     * Sucht die Auswahl der Umwandlungsfigur auf dem Bildschirm und tippt die Dame an.
+     *
+     * Erreicht ein Bauer die letzte Reihe, blendet Duolingo eine Tafel mit vier Figuren ein.
+     * Ohne eine Berührung darauf bleibt der Zug unvollendet und die Partie steht - genau das war
+     * bisher der Fall, weil blind ein zweites Mal auf das Umwandlungsfeld getippt wurde.
+     *
+     * Wird die Tafel nicht gefunden, wird nichts getippt. Auf gut Glück irgendwohin zu tippen
+     * wäre schlimmer als ein unvollendeter Zug: Es könnte einen ganz anderen Zug auslösen. Der
+     * ausstehende Zug verfällt dann auf dem gewöhnlichen Weg und wird neu angegangen.
+     */
+    private suspend fun tapPromotionChoice(boardRect: Rect, promoCell: Int) {
+        try {
+            delay(PROMOTION_DIALOG_WAIT_MS)
+
+            val punkt = withContext(Dispatchers.IO) {
+                withLatestImage { frame ->
+                    val plane = frame.planes[0]
+                    val buffer = plane.buffer
+                    val pixelStride = plane.pixelStride
+                    val rowStride = plane.rowStride
+
+                    UltraRobustClassifier.findPromotionChoice(
+                        luminance = { x, y ->
+                            val offset = y * rowStride + x * pixelStride
+                            if (offset < 0 || offset + 2 >= buffer.capacity()) {
+                                0f
+                            } else {
+                                val red = buffer.get(offset).toInt() and 0xFF
+                                val green = buffer.get(offset + 1).toInt() and 0xFF
+                                val blue = buffer.get(offset + 2).toInt() and 0xFF
+                                0.299f * red + 0.587f * green + 0.114f * blue
+                            }
+                        },
+                        screenWidth = screenWidth,
+                        screenHeight = screenHeight,
+                        boardRect = boardRect,
+                        promoCell = promoCell
+                    )
+                }
+            }
+
+            if (punkt == null) {
+                Log.w(TAG, "Auswahl der Umwandlungsfigur nicht gefunden, es wird nicht getippt")
+                return
+            }
+
+            Log.i(TAG, "Umwandlung: Dame wird bei (${punkt.first}, ${punkt.second}) angetippt")
+            DuloAutoMoveService.tapSequence(
+                listOf(punkt.first.toFloat() to punkt.second.toFloat()),
+                AUTO_MOVE_DELAY_MS
+            ) { }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Auswahl der Umwandlungsfigur fehlgeschlagen: ${e.javaClass.simpleName}: ${e.message}")
+        } finally {
+            setOverlayTouchable(true)
             autoMoveBusyUntil = System.currentTimeMillis() + AUTO_MOVE_SETTLE_MS
         }
     }
