@@ -268,10 +268,13 @@ object StockfishBridge {
      * Ab dieser Tiefe darf die Suche vorzeitig enden, wenn der beste Zug stabil bleibt.
      * Darunter ist die Aussage zu jung, um ihr zu trauen.
      */
-    const val MIN_SETTLED_DEPTH = 16
+    const val MIN_SETTLED_DEPTH = 20
 
     /** So viele Tiefen in Folge muss derselbe Zug herauskommen, bevor abgebrochen wird */
-    const val STABLE_DEPTHS_REQUIRED = 5
+    const val STABLE_DEPTHS_REQUIRED = 6
+
+    /** Ab dieser Tiefe gilt ein gefundenes Matt als belastbar */
+    const val MATE_SETTLED_DEPTH = 12
 
     /**
      * Reine Funktion: baut den Suchbefehl.
@@ -814,7 +817,8 @@ object StockfishBridge {
                         lastSeenDepth = pvDepth
                         stableDepths = if (pvMove == stableMove) stableDepths + 1 else 1
                         stableMove = pvMove
-                        if (searchIsSettled(stableDepths, pvDepth, parsedInfo?.isMate == true)) {
+                        val elapsed = System.currentTimeMillis() - evalStartTime
+                        if (searchIsSettled(stableDepths, pvDepth, parsedInfo?.isMate == true, elapsed, moveTimeMs)) {
                             Log.i(TAG, "Zug $pvMove steht seit $stableDepths Tiefen fest (Tiefe $pvDepth), Suche wird beendet")
                             sendCommand("stop")
                             stopSent = true
@@ -1085,6 +1089,9 @@ object StockfishBridge {
      */
     fun parsePvMove(line: String): String? {
         if (!line.startsWith("info ")) return null
+        // Zeilen aus einer fehlgeschlagenen Fenstersuche sind nur Zwischenstände: Ihre Bewertung
+        // ist eine Schranke, kein Ergebnis, und die Hauptvariante darin kann in die Irre führen.
+        if (line.contains("lowerbound") || line.contains("upperbound")) return null
         val marker = line.indexOf(" pv ")
         if (marker < 0) return null
         val rest = line.substring(marker + 4).trim()
@@ -1107,10 +1114,24 @@ object StockfishBridge {
      * @param depth        Zuletzt erreichte Suchtiefe
      * @param isMate       Steht bereits ein Matt fest?
      */
-    fun searchIsSettled(stableDepths: Int, depth: Int, isMate: Boolean): Boolean {
+    fun searchIsSettled(
+        stableDepths: Int,
+        depth: Int,
+        isMate: Boolean,
+        elapsedMs: Long,
+        moveTimeMs: Long
+    ): Boolean {
         // Ein gefundenes Matt ist das Ende der Fahnenstange, da hilft kein Weiterrechnen
-        if (isMate && depth >= MIN_SETTLED_DEPTH) return true
-        return depth >= MIN_SETTLED_DEPTH && stableDepths >= STABLE_DEPTHS_REQUIRED
+        if (isMate && depth >= MATE_SETTLED_DEPTH) return true
+
+        // Sonst bewusst streng. Der Abbruch soll die Wartezeit in offensichtlichen Stellungen
+        // sparen und nirgends sonst - Spielstärke ist wichtiger als eine Sekunde. Deshalb müssen
+        // drei Dinge zusammenkommen: eine belastbare Tiefe, ein über viele Tiefen unveränderter
+        // Zug, und mindestens die halbe Bedenkzeit muss verbraucht sein. Fehlt eines davon,
+        // wird bis zum Schluss gerechnet.
+        return depth >= MIN_SETTLED_DEPTH &&
+            stableDepths >= STABLE_DEPTHS_REQUIRED &&
+            elapsedMs >= moveTimeMs / 2
     }
 
     fun parseInfoLine(line: String): EngineEvaluation? {

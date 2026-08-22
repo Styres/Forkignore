@@ -83,6 +83,13 @@
   - eine **Drehung des Bildschirms** setzt die Aufnahmefläche neu auf: VirtualDisplay und
     ImageReader haben eine feste Größe, nach einer Drehung kämen sonst weiterhin Bilder im alten
     Format und jede Feldabtastung ginge daneben;
+  - alle sechs Halbzüge wird die fortgeschriebene Stellung **gegen den Bildschirm geprüft**. Das
+    Fortschreiben hat keine Rückkopplung: Wird ein Zug einmal falsch abgelesen, rechnet die Engine
+    ab da auf einer Stellung, die es gar nicht gibt - ihre Vorschläge sind dann auf dem echten
+    Brett Unsinn und verschenken Figuren, ohne dass etwas nach einem Fehler aussieht. Der Abgleich
+    bringt zugleich den Brettausschnitt auf den neuesten Stand, an dem die Berührungen hängen;
+  - ein **unverändertes Brett gilt nicht als Stillstand**: Der Gegner überlegt, das ist der
+    Normalfall und kein Grund einzugreifen;
   - über allem wacht eine **Aufsichtsuhr**: geschieht zwölf Sekunden lang gar nichts mehr, wird die
     Buchführung verworfen und die Stellung frisch vom Bildschirm gelesen. Jede Sackgasse ist damit
     höchstens ein Aussetzer von wenigen Sekunden.
@@ -190,12 +197,12 @@ unterstützte Option meldet; alles andere wird übersprungen und in der Diagnose
 
 Weitere Punkte der Vorgabe:
 
-- **Bedenkzeit ist eine Obergrenze, kein Soll**: Bleibt der beste Zug über fünf Suchtiefen hinweg
-  derselbe und ist dabei mindestens Tiefe 16 erreicht, wird die Suche mit `stop` beendet. Weitere
-  Rechenzeit ändert das Ergebnis dann so gut wie nie mehr, kostet aber unmittelbar Wartezeit vor
-  dem Zug. Ein gefundenes Matt beendet die Suche ebenfalls. In scharfen Stellungen, in denen der
-  beste Zug zwischen den Tiefen wechselt, greift der Abbruch nicht und es bleiben die vollen zwei
-  Sekunden.
+- **Bedenkzeit ist eine Obergrenze, kein Soll** - aber der Abbruch ist bewusst streng: Er greift
+  erst, wenn Tiefe 20 erreicht ist, derselbe Zug über sechs Suchtiefen steht **und** mindestens die
+  halbe Bedenkzeit verbraucht ist. Fehlt eines davon, wird bis zum Schluss gerechnet. Ein
+  gefundenes Matt beendet die Suche ohne Zeitschranke. Zwischenstände einer fehlgeschlagenen
+  Fenstersuche (`lowerbound`/`upperbound`) zählen nicht mit - ihre Hauptvariante kann in die Irre
+  führen. Spielstärke geht hier vor einer gesparten Sekunde.
 - **Transpositionstabelle**: `ucinewgame` leert sie und wird deshalb nur gesendet, wenn die neue
   Stellung keine Fortsetzung der vorherigen ist - erkennbar daran, dass Figuren hinzugekommen sind
   (innerhalb einer Partie verschwinden sie nur) oder die Grundstellung auf dem Brett steht. Die

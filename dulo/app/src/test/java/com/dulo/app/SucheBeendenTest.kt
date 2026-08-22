@@ -44,7 +44,9 @@ class SucheBeendenTest {
             StockfishBridge.searchIsSettled(
                 stableDepths = StockfishBridge.STABLE_DEPTHS_REQUIRED,
                 depth = StockfishBridge.MIN_SETTLED_DEPTH,
-                isMate = false
+                isMate = false,
+                elapsedMs = 1000L,
+                moveTimeMs = 2000L
             )
         )
     }
@@ -56,7 +58,24 @@ class SucheBeendenTest {
             StockfishBridge.searchIsSettled(
                 stableDepths = 20,
                 depth = StockfishBridge.MIN_SETTLED_DEPTH - 1,
-                isMate = false
+                isMate = false,
+                elapsedMs = 1900L,
+                moveTimeMs = 2000L
+            )
+        )
+    }
+
+    @Test
+    fun testZuFrueheZeitBeendetNicht() {
+        // Selbst bei tiefer und stabiler Suche wird nicht nach einem Wimpernschlag abgebrochen:
+        // Spielstärke geht vor einer gesparten Sekunde.
+        assertFalse(
+            StockfishBridge.searchIsSettled(
+                stableDepths = 30,
+                depth = 30,
+                isMate = false,
+                elapsedMs = 200L,
+                moveTimeMs = 2000L
             )
         )
     }
@@ -68,23 +87,41 @@ class SucheBeendenTest {
             StockfishBridge.searchIsSettled(
                 stableDepths = 1,
                 depth = 25,
-                isMate = false
+                isMate = false,
+                elapsedMs = 1900L,
+                moveTimeMs = 2000L
             )
         )
     }
 
     @Test
     fun testMattBeendetSofort() {
-        // Ein gefundenes Matt ist das Ende der Fahnenstange, Weiterrechnen ändert nichts mehr
+        // Ein gefundenes Matt ist das Ende der Fahnenstange, Weiterrechnen ändert nichts mehr -
+        // und dafür gilt die Zeitschranke nicht.
         assertTrue(
             StockfishBridge.searchIsSettled(
                 stableDepths = 1,
-                depth = StockfishBridge.MIN_SETTLED_DEPTH,
-                isMate = true
+                depth = StockfishBridge.MATE_SETTLED_DEPTH,
+                isMate = true,
+                elapsedMs = 50L,
+                moveTimeMs = 2000L
             )
         )
         // Aber auch das erst ab einer belastbaren Tiefe
-        assertFalse(StockfishBridge.searchIsSettled(stableDepths = 1, depth = 3, isMate = true))
+        assertFalse(
+            StockfishBridge.searchIsSettled(
+                stableDepths = 1, depth = 3, isMate = true, elapsedMs = 50L, moveTimeMs = 2000L
+            )
+        )
+    }
+
+    @Test
+    fun testZwischenstaendeAusDerFenstersucheZaehlenNicht() {
+        // Zeilen mit lowerbound/upperbound sind Zwischenstände einer fehlgeschlagenen
+        // Fenstersuche: ihre Hauptvariante kann in die Irre führen und darf den Abbruch
+        // nicht auslösen.
+        assertNull(StockfishBridge.parsePvMove("info depth 22 score cp 45 lowerbound pv d2d4"))
+        assertNull(StockfishBridge.parsePvMove("info depth 22 score cp 45 upperbound pv d2d4"))
     }
 
     @Test

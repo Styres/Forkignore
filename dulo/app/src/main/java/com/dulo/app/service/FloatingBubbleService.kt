@@ -142,6 +142,11 @@ class FloatingBubbleService : Service() {
         // So lange wird höchstens auf einen frischen Frame gewartet
         private const val FRAME_WAIT_MS = 400L
 
+        // So viele fortgeschriebene Züge, dann wird die Stellung gegen den Bildschirm geprüft.
+        // Sechs Halbzüge sind ein guter Kompromiss: Ein Ablesefehler wirkt sich höchstens ein paar
+        // Züge lang aus, und der Abgleich fällt kaum ins Gewicht.
+        private const val VERIFY_EVERY_MOVES = 6
+
         // Abstand zwischen zwei ergebnislosen vollständigen Erkennungen (wachsend, gedeckelt)
         private const val FULL_SCAN_BACKOFF_MS = 500L
         private const val FULL_SCAN_BACKOFF_MAX_MS = 3000L
@@ -368,6 +373,21 @@ class FloatingBubbleService : Service() {
      * Zug erneut. Erholt sich die Engine, wird der Merker zurückgesetzt.
      */
     private var fallbackReported = false
+
+    /**
+     * Wie viele Züge seit der letzten vollständigen Erkennung fortgeschrieben wurden.
+     *
+     * Das Fortschreiben ist schnell und genau - aber es hat keine Rückkopplung: Wird ein Zug
+     * einmal falsch abgelesen, rechnet die Engine ab da auf einer Stellung, die es auf dem
+     * Bildschirm gar nicht gibt. Ihre Vorschläge sind dann auf dem echten Brett Unsinn und
+     * verschenken Figuren, ohne dass irgendetwas nach einem Fehler aussieht: Das FEN ist
+     * regelkonform, nur eben nicht das, was dasteht.
+     *
+     * Deshalb wird die gemerkte Stellung regelmäßig gegen den Bildschirm geprüft. Das kostet
+     * einen Durchgang und bringt die Buchführung zurück auf den Boden - und nebenbei den
+     * Brettausschnitt, an dem die Berührungen des Auto-Zugs hängen.
+     */
+    private var movesSinceVerification = 0
     /** Beginn des laufenden Analysedurchgangs; Grundlage für den Wachhund gegen hängende Durchgänge */
     @Volatile
     private var analysisStartedAt = 0L
@@ -391,6 +411,10 @@ class FloatingBubbleService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        // Die Engine schon beim Start des Dienstes hochfahren. Der erste Aufruf muss sonst den
+        // Prozessstart samt Handshake mitbezahlen - und der fällt genau dann an, wenn der Nutzer
+        // gerade den Schalter umgelegt hat und auf den ersten Zug wartet.
+        StockfishBridge.init(this)
         isRunning = true
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -505,6 +529,7 @@ class FloatingBubbleService : Service() {
         lastBoardRect = null
         lastAcceptedBoard = null
         castlingRights = null
+        movesSinceVerification = 0
         clearPendingMove()
         resetMonitorState()
         lastKnownCells = null
@@ -973,10 +998,21 @@ class FloatingBubbleService : Service() {
         val stepY = boardRect.height() / 8.0f
         if (stepX < 4f || stepY < 4f) return
 
+        // Genau in die Feldmitte, auf ganze Bildpunkte gerundet.
+        //
+        // Am Rand des Bretts summiert sich jede Ungenauigkeit der Vermessung auf: Liegt der
+        // gefundene Rahmen ein paar Bildpunkte daneben, ist der Fehler auf Feld h1 achtmal so groß
+        // wie auf a1. Deshalb wird zusätzlich sichergestellt, dass der Punkt im inneren Bereich
+        // des Feldes liegt - dort trifft er auch dann noch, wenn der Rahmen leicht verrutscht ist.
         fun centreOf(cell: Int): Pair<Float, Float> {
             val row = cell / 8
             val col = cell % 8
-            return (boardRect.left + (col + 0.5f) * stepX) to (boardRect.top + (row + 0.5f) * stepY)
+            val cx = boardRect.left + (col + 0.5f) * stepX
+            val cy = boardRect.top + (row + 0.5f) * stepY
+            // Innerhalb des Bildschirms bleiben, sonst verwirft das System die Geste
+            val x = cx.coerceIn(1f, (screenWidth - 2).toFloat())
+            val y = cy.coerceIn(1f, (screenHeight - 2).toFloat())
+            return kotlin.math.round(x) to kotlin.math.round(y)
         }
 
         val points = tapCells.map { centreOf(it) }
@@ -1216,6 +1252,7 @@ class FloatingBubbleService : Service() {
                             playedMove,
                             piece
                         )
+                        movesSinceVerification++
                     }
                 }
                 clearPendingMove()
@@ -1261,6 +1298,13 @@ class FloatingBubbleService : Service() {
 
         stillTicks = if (sameAsLastTick) stillTicks + 1 else 0
         changePendingTicks = if (changedSinceAnalysis) changePendingTicks + 1 else 0
+
+        // Ein unverändertes Brett ist kein Stillstand, sondern der Normalfall: Der Gegner überlegt.
+        // Ohne diese Unterscheidung schlug die Aufsichtsuhr nach zwölf Sekunden zu, warf die
+        // gemerkte Stellung weg und tippte einen Zug, obwohl gar nicht wir am Zug waren. Der wurde
+        // abgelehnt, es folgten acht Sekunden Verfallszeit - und genau in dieser Zeit zog der
+        // Gegner. Wer lange überlegt, hat DuLo damit zuverlässig aus dem Tritt gebracht.
+        if (!changedSinceAnalysis && pendingSince == 0L) markProgress()
 
         val standsStill = stillTicks >= STILL_TICKS_REQUIRED
 
@@ -1398,6 +1442,13 @@ class FloatingBubbleService : Service() {
         val board = lastAcceptedBoard ?: return false
         val myColourIsWhite = sessionLockedPerspective ?: return false
 
+        // Turnusmäßiger Abgleich: Die vollständige Erkennung übernimmt und bringt die gemerkte
+        // Stellung wieder mit dem Bildschirm in Deckung.
+        if (movesSinceVerification >= VERIFY_EVERY_MOVES) {
+            Log.i(TAG, "Turnusmäßiger Abgleich der Stellung mit dem Bildschirm")
+            return false
+        }
+
         // Erst die Rochade: Sie räumt zwei Felder und passt deshalb nicht in das Muster eines
         // gewöhnlichen Zuges. Ohne diesen Zweig fiele sie in die vollständige Erkennung.
         val uci = UltraRobustClassifier.detectCastling(
@@ -1422,6 +1473,7 @@ class FloatingBubbleService : Service() {
 
         val nextBoard = UltraRobustClassifier.applyUciMove(board, uci) ?: return false
         lastAcceptedBoard = nextBoard
+        movesSinceVerification++
         castlingRights = UltraRobustClassifier.updateCastlingRights(
             castlingRights ?: UltraRobustClassifier.computeCastlingRights(board),
             uci,
@@ -1932,6 +1984,8 @@ class FloatingBubbleService : Service() {
 
                         // Brett merken, damit die Beobachtungsschleife weiß, welchen Ausschnitt sie vergleichen muss
                         lastBoardRect = Rect(res.boardRect)
+                        // Die Stellung stammt jetzt wieder unmittelbar vom Bildschirm
+                        movesSinceVerification = 0
                         // Die Blase darf weder Felder verdecken noch die eigenen Berührungen abfangen
                         keepBubbleClearOfBoard(res.boardRect)
 
