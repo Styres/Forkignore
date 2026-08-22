@@ -5,6 +5,7 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import android.util.LruCache
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -248,6 +249,21 @@ object StockfishBridge {
      */
     @Volatile
     private var lastSearchedFen: String? = null
+
+    /**
+     * Laeuft in Stockfish gerade noch eine Suche, deren "bestmove" niemand abgeholt hat?
+     *
+     * Das passiert, sobald ein Aufrufer waehrend der Rechnung abbricht (Zeitgrenze der
+     * Beobachtungsschleife, Abschalten des Schalters). Die Engine rechnet dann weiter und legt ihr
+     * Ergebnis irgendwann in den Zeilenkanal - unter Umstaenden erst, nachdem die naechste Suche
+     * schon losgeschickt wurde. Diese Zeile beantwortete dann die falsche Stellung: ein Zug aus der
+     * vorigen Stellung, in der neuen meist unmoeglich. Genau das erzeugte die Stoerungsmeldung.
+     *
+     * Deshalb wird gemerkt, ob noch ein Ergebnis aussteht, und die naechste Suche wartet es
+     * zuerst ab.
+     */
+    @Volatile
+    private var searchInFlight = false
 
     // Bedenkzeit pro Zug: "go movetime 2000". Mehr Zeit ist der wirksamste Hebel für Spielstärke -
     // je Verdopplung der Bedenkzeit gewinnt Stockfish grob 50 bis 70 Elo hinzu. Zwei Sekunden sind
@@ -742,7 +758,21 @@ object StockfishBridge {
             // schicken bringt die Engine aus dem Tritt; sie antwortet danach nicht mehr sinnvoll,
             // wird für tot gehalten und neu gestartet, und es zieht der Regelgenerator.
             // Deshalb erst beenden, dann alle Restzeilen verwerfen.
-            sendCommand("stop")
+            if (searchInFlight) {
+                sendCommand("stop")
+                // "stop" wirkt nicht sofort: Stockfish beendet die Suche und schreibt danach sein
+                // "bestmove". Bis dahin muss gewartet werden, sonst landet genau diese Zeile im
+                // Lesedurchgang der neuen Suche und wird fuer deren Antwort gehalten.
+                // Auf "isready" antwortet die Engine auch waehrend der Suche, "readyok" taugt als
+                // Schranke also gerade nicht.
+                val beendet = waitForResponse(SEARCH_TERMINATION_MARKER, timeoutMs = 3000)
+                searchInFlight = false
+                if (!beendet) {
+                    Log.w(TAG, "Vorige Suche endete nicht auf stop, Prozess wird neu gestartet")
+                    destroyProcessLocked()
+                    return null
+                }
+            }
             while (lineChannel?.tryReceive()?.getOrNull() != null) {}
 
             // ucinewgame nur bei einer wirklich neuen Partie senden.
@@ -773,6 +803,8 @@ object StockfishBridge {
             val sanitizedFen = sanitizeCastlingRights(fen)
             sendCommand("position fen $sanitizedFen")
             sendCommand(buildGoCommand(moveTimeMs))
+            // Ab hier steht ein Ergebnis aus, bis es unten gelesen wird
+            searchInFlight = true
 
             var lastEval: EngineEvaluation? = null
             var bestMoveResult: String? = null
@@ -838,6 +870,9 @@ object StockfishBridge {
                 }
             }
 
+            // Das Ergebnis ist abgeholt - die Engine rechnet nicht mehr
+            if (bestMoveResult != null) searchInFlight = false
+
             // Lektion aus bug_19/superbug: bestmove (none) ist die korrekte Sofortantwort der Engine auf eine Stellung ohne legale Züge
             // (meist zusammen mit info depth 0 score mate 0) und kein Engine-Tod. Früher galt das als Fehlschlag, mit Dauerneustarts und wildem Fallback.
             // Schon vorhandene Ausgabezeilen beweisen, dass der Prozess lebt: Ergebnis als Partieende verbuchen, Prozess unangetastet lassen
@@ -880,6 +915,13 @@ object StockfishBridge {
             Log.w(TAG, "Stockfish evaluate attempt produced no bestmove, resetting process\n$diag")
             destroyProcessLocked()
             return null
+        } catch (e: CancellationException) {
+            // Der Aufrufer hat aufgegeben (Zeitgrenze der Beobachtungsschleife, Schalter aus).
+            // Der Prozess bleibt ausdruecklich stehen: ihn hier abzuraeumen kostete beim naechsten
+            // Zug den vollstaendigen Neustart samt Netz laden - mehrere Sekunden, in denen DuLo
+            // stillstand. searchInFlight bleibt gesetzt, die naechste Suche raeumt sauber auf.
+            Log.i(TAG, "Suche abgebrochen, Prozess bleibt bestehen")
+            throw e
         } catch (e: Exception) {
             val diag = "[Ausnahme in der Stockfish-Analyse, Abstieg in den Fallback]\nAusnahme: ${e.javaClass.simpleName}: ${e.message}"
             Log.w(TAG, "Stockfish evaluateFen exception: ${e.message}\n$diag", e)
@@ -1076,10 +1118,26 @@ object StockfishBridge {
         lineChannel = null
         readerJob = null
         isEngineReady = false
+        // Mit dem Prozess verschwindet auch die laufende Suche
+        searchInFlight = false
         // Ein frischer Prozess beginnt mit leerer Transpositionstabelle: die nächste Suche gilt
         // wieder als unabhängig.
         lastSearchedFen = null
     }
+
+    /**
+     * Kennzeichen der Zeile, mit der Stockfish eine Suche abschliesst.
+     *
+     * Wird als Schranke benutzt, um eine abgebrochene Vorsuche sauber auslaufen zu lassen. Der
+     * Vergleich laeuft ueber Teilzeichenketten, deshalb muss sicher sein, dass keine andere
+     * Ausgabezeile das Wort enthaelt - dafuer gibt es [isSearchTerminationLine] und seinen Test.
+     */
+    const val SEARCH_TERMINATION_MARKER = "bestmove"
+
+    /**
+     * Reine Funktion: Schliesst diese Ausgabezeile eine Suche ab?
+     */
+    fun isSearchTerminationLine(line: String): Boolean = line.contains(SEARCH_TERMINATION_MARKER)
 
     fun parseBestMoveLine(line: String): String? {
         val matcher = bestMovePattern.matcher(line.trim())

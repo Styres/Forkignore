@@ -2127,9 +2127,18 @@ class FloatingBubbleService : Service() {
      * Eine vollständige Analyse: sauberes Bild aufnehmen, Brett lokalisieren, Figuren erkennen,
      * Engine fragen und den Pfeil zeichnen.
      *
-     * @param force true beim Einschalten des Schalters - dann wird gerechnet, ohne vorher zu prüfen,
-     *        ob sich eine eigene Figur bewegt hat. false in der Dauerbeobachtung: dort bricht die
-     *        Analyse vor dem Engine-Aufruf ab, wenn die eigenen Figuren unverändert stehen.
+     * @param force true, wenn ohne Rücksicht auf den Brettvergleich gerechnet werden soll: beim
+     *        Einschalten, nach einer Drehung und immer dann, wenn die Beobachtung feststeckt. Ohne
+     *        das bricht der Durchgang ab, sobald sich seit dem letzten angenommenen Brett nichts
+     *        geändert hat oder der Vergleich unklar bleibt.
+     *
+     *        Der eine Fall, den auch force nicht übergeht: Der Vergleich zeigt einen eigenen Zug.
+     *        Dann ist der Gegner am Zug, und ein zweiter eigener Zug wäre in jedem Fall falsch.
+     *
+     *        Hinweis für später: Dieser Schalter war eine Zeit lang ohne Wirkung - er wurde
+     *        übergeben, aber nie gelesen. Die Aufrufstellen, die auf ihn bauen (etwa der zweite
+     *        Versuch nach einem nicht angekommenen Zug), warteten deshalb still auf die
+     *        Stillstandsuhr, statt sofort neu zu rechnen.
      */
     private fun startAnalysis(force: Boolean) {
         if (isAnalyzing) return
@@ -2335,12 +2344,12 @@ class FloatingBubbleService : Service() {
                                     }
                             )
 
-                            if (diff.changedSquares == 0) {
-                                // Nichts passiert. Der Pfeil bleibt stehen, wo er steht.
+                            if (diff.changedSquares == 0 && !force) {
+                                // Nichts passiert. Es bleibt alles, wie es ist.
                                 analysisDecided = true
                                 return@launch
                             }
-                            if (diff.moverIsWhite == null && undecidedRuns < MAX_UNDECIDED_RUNS) {
+                            if (diff.moverIsWhite == null && undecidedRuns < MAX_UNDECIDED_RUNS && !force) {
                                 // Unklare Aufnahme (Animation, Fehlerkennung): Basis behalten und
                                 // im nächsten Takt erneut nachsehen, nichts verwerfen.
                                 Log.i(TAG, "Vergleich nicht eindeutig, wird im nächsten Takt wiederholt")

@@ -164,4 +164,27 @@ class UciProtocolParserTest {
         val problem = StockfishBridge.validateFenSanity(inCheckFen)
         assertNull("validateFenSanity must allow active king in check position", problem)
     }
+
+    /**
+     * Eine abgebrochene Suche muss abgewartet werden, bevor die naechste losgeschickt wird -
+     * sonst beantwortet ihr "bestmove" die falsche Stellung. Als Schranke dient das Wort
+     * "bestmove". Dieser Test haelt fest, dass keine andere Ausgabezeile darauf anschlaegt:
+     * eine info-Zeile duerfte die Schranke nicht vorzeitig oeffnen.
+     */
+    @Test
+    fun testNurDieAbschlusszeileBeendetDieSuche() {
+        assertTrue(StockfishBridge.isSearchTerminationLine("bestmove e2e4 ponder e7e5"))
+        assertTrue(StockfishBridge.isSearchTerminationLine("bestmove (none)"))
+        assertTrue(StockfishBridge.isSearchTerminationLine("bestmove e7e8q"))
+
+        assertFalse(
+            StockfishBridge.isSearchTerminationLine(
+                "info depth 22 seldepth 30 multipv 1 score cp 34 nodes 1234567 nps 900000 " +
+                    "hashfull 210 tbhits 0 time 1400 pv e2e4 e7e5 g1f3 b8c6"
+            )
+        )
+        assertFalse(StockfishBridge.isSearchTerminationLine("info depth 1 currmove e2e4 currmovenumber 1"))
+        assertFalse(StockfishBridge.isSearchTerminationLine("readyok"))
+        assertFalse(StockfishBridge.isSearchTerminationLine("info string NNUE evaluation using nn-xxxx.nnue"))
+    }
 }
