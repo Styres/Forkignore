@@ -26,6 +26,23 @@
             </intent-filter>
         </activity>
 
+        <!--
+          Auto-Zug: Nur über einen Bedienungshilfen-Dienst darf eine App Berührungen an eine
+          fremde App schicken. Der Nutzer muss ihn einmalig in den Systemeinstellungen freigeben;
+          ohne Freigabe bleibt der Schalter wirkungslos.
+        -->
+        <service
+            android:name=".service.DuloAutoMoveService"
+            android:exported="false"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/dulo_autozug_dienst" />
+        </service>
+
         <!-- Vordergrunddienst für Blase und Bildschirmanalyse (Typ mediaProjection ab Android 14) -->
         <service
             android:name=".service.FloatingBubbleService"

@@ -313,4 +313,71 @@ class BrettVergleichTest {
         // Mit nachgespieltem eigenem Zug ist der Gegnerzug dagegen eindeutig
         assertEquals(false, UltraRobustClassifier.diffBoards(nachEigenem, nachGegner).moverIsWhite)
     }
+
+    @Test
+    fun testVerwechselteFigurenartStoertDenVergleichNicht() {
+        // Der Musterabgleich liest den Laeufer auf c8 als Springer und den Turm auf a8 als Dame -
+        // beide Felder waren am Zug gar nicht beteiligt. Frueher zaehlte das als Veraenderung,
+        // die Summe sprengte die Schwelle und der Vergleich meldete dauerhaft "unklar".
+        val vorher = board(
+            "rnbqkbnr",
+            "pppppppp",
+            "........",
+            "........",
+            "........",
+            "........",
+            "PPPPPPPP",
+            "RNBQKBNR"
+        )
+        val nachher = board(
+            "qnnqkbnr",
+            "pppp.ppp",
+            "........",
+            "....p...",
+            "........",
+            "........",
+            "PPPPPPPP",
+            "RNBQKBNR"
+        )
+        val diff = UltraRobustClassifier.diffBoards(vorher, nachher)
+        // Nur der tatsaechliche Zug e7-e5 zaehlt: zwei Felder, gezogen hat Schwarz
+        assertEquals(2, diff.changedSquares)
+        assertEquals(false, diff.moverIsWhite)
+    }
+
+    @Test
+    fun testFarbklasseFasstFigurenartZusammen() {
+        assertEquals('W', UltraRobustClassifier.colourClass('Q'))
+        assertEquals('W', UltraRobustClassifier.colourClass('P'))
+        assertEquals('B', UltraRobustClassifier.colourClass('q'))
+        assertEquals('.', UltraRobustClassifier.colourClass('.'))
+    }
+
+    @Test
+    fun testFarbwechselAufEinemFeldBleibtEinSchlagzug() {
+        // Die groebere Betrachtung darf den Schlagzug nicht verschlucken: dort wechselt die Farbe
+        val vorher = board(
+            "....k...",
+            "........",
+            "........",
+            "...p....",
+            "....P...",
+            "........",
+            "........",
+            "....K..."
+        )
+        val nachher = board(
+            "....k...",
+            "........",
+            "........",
+            "........",
+            "....p...",
+            "........",
+            "........",
+            "....K..."
+        )
+        val diff = UltraRobustClassifier.diffBoards(vorher, nachher)
+        assertEquals(2, diff.changedSquares)
+        assertEquals(false, diff.moverIsWhite)
+    }
 }

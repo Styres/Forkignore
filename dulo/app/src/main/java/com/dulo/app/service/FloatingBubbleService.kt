@@ -94,20 +94,30 @@ class FloatingBubbleService : Service() {
         // Ab dieser Druckdauer gilt eine Berührung der Blase als langer Druck (Perspektive umschalten)
         private const val LONG_PRESS_MS = 500L
 
-        // Takt der Dauerbeobachtung: fünfmal pro Sekunde wird jede Figurenposition nachgesehen
-        private const val POLL_INTERVAL_MS = 200L
+        // Takt der Dauerbeobachtung: rund achtmal pro Sekunde wird jede Figurenposition nachgesehen
+        private const val POLL_INTERVAL_MS = 120L
 
         // So viele Takte am Stück müssen die Figuren stillstehen, bevor die volle Erkennung startet.
-        // Zwei Takte sind 0,4 Sekunden - lang genug, damit eine Zuganimation durch ist.
-        private const val STILL_TICKS_REQUIRED = 2
+        // Ein Takt reicht: sobald sich zwischen zwei Aufnahmen nichts mehr rührt, ist die
+        // Zuganimation durch. Jeder zusätzliche Takt wäre spürbare Verzögerung bis zum Pfeil.
+        private const val STILL_TICKS_REQUIRED = 1
 
         // Ab dieser mittleren Helligkeitsdifferenz je Kachel gilt das Brett als verändert.
         // Darunter liegen Kompressionsrauschen und leichte Animationen der Oberfläche.
         private const val BOARD_CHANGE_THRESHOLD = 1.8f
 
-        // Bewegt sich das Bild so lange ohne Ruhepause, wird trotzdem analysiert (rund 3 Sekunden).
+        // Bewegt sich das Bild so lange ohne Ruhepause, wird trotzdem analysiert (rund 2 Sekunden).
         // Duolingo animiert nach einem Zug gern weiter (Hervorhebungen, Maskottchen).
-        private const val MAX_PENDING_TICKS = 15
+        private const val MAX_PENDING_TICKS = 16
+
+        // So oft darf ein Durchgang ergebnislos bleiben, bevor die Stellung zwangsweise als neue
+        // Grundlage angenommen und gerechnet wird. Ohne diese Notbremse konnte die Erkennung in
+        // einen Zustand geraten, aus dem sie nie wieder herausfand - nach ein paar Zügen kam dann
+        // gar keine Anzeige mehr.
+        private const val MAX_UNDECIDED_RUNS = 3
+
+        // Pause nach jeder Berührung des Auto-Zugs
+        private const val AUTO_MOVE_DELAY_MS = 300L
 
         // Sicherheitsnetz: spätestens nach so vielen Takten (rund 2,5 Sekunden) wird ohnehin
         // nachgesehen, auch wenn der Feldvergleich nichts gemeldet hat. Damit bleibt ein Pfeil
@@ -158,6 +168,16 @@ class FloatingBubbleService : Service() {
     private var menuView: View? = null
     private var menuParams: WindowManager.LayoutParams? = null
     private var analyseToggle: DuloToggleView? = null
+    private var autoMoveToggle: DuloToggleView? = null
+
+    /**
+     * Auto-Zug: DuLo tippt den empfohlenen Zug selbst auf das Brett.
+     *
+     * Standardmäßig aus. Eingeschaltet wird nach jeder neuen Empfehlung zuerst das Startfeld und
+     * dann das Zielfeld angetippt, mit einer kurzen Pause dazwischen.
+     */
+    @Volatile
+    private var autoMoveEnabled = false
 
     // Dauerbeobachtung: läuft der Schalter, wird das Brett im Takt POLL_INTERVAL_MS abgeklopft
     @Volatile
@@ -540,10 +560,20 @@ class FloatingBubbleService : Service() {
 
         // Schalter im Stil der Systemkacheln: Pille mit weißem Knopf, darunter "Off" bzw. "On"
         val toggle = DuloToggleView(this).apply {
+            title = "Hilfe"
             setOn(autoAnalyseEnabled, animate = false)
             onSwitched = { on -> setAutoAnalyse(on) }
         }
         analyseToggle = toggle
+
+        // Auto-Zug: DuLo tippt den empfohlenen Zug selbst. Braucht die Freigabe in den
+        // Bedienungshilfen, sonst kann keine App Berührungen an eine fremde App schicken.
+        val autoMove = DuloToggleView(this).apply {
+            title = "Auto"
+            setOn(autoMoveEnabled, animate = false)
+            onSwitched = { on -> setAutoMove(on) }
+        }
+        autoMoveToggle = autoMove
 
         // Beenden in derselben Kachelform, nur in Rot
         val destroyButton = TextView(this).apply {
@@ -561,6 +591,13 @@ class FloatingBubbleService : Service() {
         }
 
         container.addView(toggle)
+        container.addView(
+            autoMove,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = gap }
+        )
         container.addView(
             destroyButton,
             LinearLayout.LayoutParams(dp(BUBBLE_SIZE_DP), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
@@ -616,6 +653,82 @@ class FloatingBubbleService : Service() {
         }
         menuView = null
         analyseToggle = null
+        autoMoveToggle = null
+    }
+
+    /**
+     * Schalter "Auto" im Menü: DuLo führt den empfohlenen Zug selbst aus.
+     *
+     * Getippt werden kann nur über einen Bedienungshilfen-Dienst - das ist unter Android der
+     * einzige vorgesehene Weg, eine Berührung an eine andere App zu schicken. Fehlt die Freigabe,
+     * springt der Schalter zurück und die Einstellungen werden geöffnet.
+     */
+    private fun setAutoMove(enabled: Boolean) {
+        if (!enabled) {
+            autoMoveEnabled = false
+            Toast.makeText(this, "Auto-Zug aus", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (!DuloAutoMoveService.isAvailable) {
+            autoMoveEnabled = false
+            autoMoveToggle?.setOn(false, animate = true)
+            Toast.makeText(
+                this,
+                "Für den Auto-Zug muss DuLo unter Einstellungen > Bedienungshilfen freigegeben werden",
+                Toast.LENGTH_LONG
+            ).show()
+            openAccessibilitySettings()
+            return
+        }
+
+        autoMoveEnabled = true
+        Toast.makeText(this, "Auto-Zug an", Toast.LENGTH_SHORT).show()
+    }
+
+    /** Systemeinstellungen für die Bedienungshilfen öffnen */
+    private fun openAccessibilitySettings() {
+        try {
+            val intent = Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.w(TAG, "Einstellungen für Bedienungshilfen ließen sich nicht öffnen: ${e.message}")
+        }
+    }
+
+    /**
+     * Tippt den empfohlenen Zug auf dem Brett: erst das Startfeld, dann das Zielfeld.
+     *
+     * Die Feldmitten ergeben sich aus dem vermessenen Brettrechteck und den beiden
+     * Bildschirmfeldern des Pfeils - genau denselben, die auch für das Wegnehmen des Pfeils
+     * beobachtet werden. Zwischen den Berührungen liegt eine kurze Pause, sonst wertet die App
+     * darunter die zweite womöglich als Doppeltippen.
+     */
+    private fun performAutoMove(boardRect: Rect, fromCell: Int, toCell: Int) {
+        if (!autoMoveEnabled) return
+        if (!DuloAutoMoveService.isAvailable) {
+            Log.w(TAG, "Auto-Zug angefordert, aber der Bedienungshilfen-Dienst ist nicht freigegeben")
+            return
+        }
+        if (fromCell !in 0..63 || toCell !in 0..63) return
+
+        val stepX = boardRect.width() / 8.0f
+        val stepY = boardRect.height() / 8.0f
+        if (stepX < 4f || stepY < 4f) return
+
+        fun centreOf(cell: Int): Pair<Float, Float> {
+            val row = cell / 8
+            val col = cell % 8
+            return (boardRect.left + (col + 0.5f) * stepX) to (boardRect.top + (row + 0.5f) * stepY)
+        }
+
+        val points = listOf(centreOf(fromCell), centreOf(toCell))
+        Log.i(TAG, "Auto-Zug tippt auf ${points.map { "(${it.first.toInt()}, ${it.second.toInt()})" }}")
+        DuloAutoMoveService.tapSequence(points, AUTO_MOVE_DELAY_MS) { ok ->
+            if (!ok) Log.w(TAG, "Auto-Zug konnte nicht vollständig ausgeführt werden")
+        }
     }
 
     // ================= Dauerbeobachtung =================
@@ -776,11 +889,6 @@ class FloatingBubbleService : Service() {
 
         val standsStill = stillTicks >= STILL_TICKS_REQUIRED
 
-        // Nach mehreren ergebnislosen Durchgängen wird der Abstand gestreckt: die Aufnahme
-        // taugt dann gerade nichts, und fünf Versuche pro Sekunde bringen nichts als Last.
-        val cooldown = if (undecidedRuns >= 3) SWEEP_TICKS else STILL_TICKS_REQUIRED
-        if (ticksSinceAnalysis < cooldown) return
-
         // Ohne Veränderung auf dem Brett wird nicht analysiert - sonst liefe die Erkennung
         // im Leerlauf und könnte dieselbe Empfehlung erneut auslösen.
         //
@@ -877,6 +985,10 @@ class FloatingBubbleService : Service() {
         pendingMoveUci = bestMove
         pendingMoveReference = cells
         Log.i(TAG, "Pfeil zeigt $bestMove, beobachtet werden die Felder $from und $to")
+
+        // Auto-Zug: denselben Zug gleich selbst tippen. Der Pfeil verschwindet danach über den
+        // gewöhnlichen Weg, sobald die Figur auf dem Zielfeld angekommen ist.
+        performAutoMove(boardRect, from, to)
     }
 
     /**
@@ -1320,11 +1432,20 @@ class FloatingBubbleService : Service() {
                                 analysisDecided = true
                                 return@launch
                             }
-                            if (diff.moverIsWhite == null) {
+                            if (diff.moverIsWhite == null && undecidedRuns < MAX_UNDECIDED_RUNS) {
                                 // Unklare Aufnahme (Animation, Fehlerkennung): Basis behalten und
                                 // im nächsten Takt erneut nachsehen, nichts verwerfen.
                                 Log.i(TAG, "Vergleich nicht eindeutig, wird im nächsten Takt wiederholt")
                                 return@launch
+                            }
+
+                            if (diff.moverIsWhite == null) {
+                                // Notbremse: Bleibt der Vergleich mehrfach unklar, wird die aktuelle
+                                // Stellung zwangsweise als neue Grundlage angenommen und gerechnet.
+                                // Ohne diesen Ausweg blieb die Anzeige nach einigen Zügen dauerhaft
+                                // stehen - lieber eine Empfehlung, die einen Halbzug zu früh kommt,
+                                // als gar keine mehr.
+                                Log.i(TAG, "Vergleich bleibt unklar, Stellung wird neu als Grundlage genommen")
                             }
 
                             lastAcceptedBoard = copyBoard(res.standardBoard)
@@ -1421,6 +1542,7 @@ class FloatingBubbleService : Service() {
                 if (analysisDecided) {
                     // Der Durchgang hat etwas entschieden: der nächste Takt nimmt das Brett neu auf.
                     resetMonitorState()
+                    undecidedRuns = 0
                 } else {
                     // Nichts entschieden (kein Frame, unklare Aufnahme, abgewiesene Erkennung):
                     // die Vergleichsbasis bleibt stehen, damit die Veränderung anhängig bleibt.

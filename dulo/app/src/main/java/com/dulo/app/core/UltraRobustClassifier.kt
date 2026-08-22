@@ -953,19 +953,21 @@ class UltraRobustClassifier(context: Context? = null) {
 
             for (r in 0 until 8) {
                 for (c in 0 until 8) {
-                    val before = previous.getOrNull(r)?.getOrNull(c) ?: '.'
-                    val after = current.getOrNull(r)?.getOrNull(c) ?: '.'
+                    val before = colourClass(previous.getOrNull(r)?.getOrNull(c) ?: '.')
+                    val after = colourClass(current.getOrNull(r)?.getOrNull(c) ?: '.')
                     if (before == after) continue
                     changed++
 
-                    // Neu belegt oder mit einer anderen Figur belegt: das ist ein Zielfeld.
+                    // Neu belegt oder von der Gegenfarbe übernommen: das ist ein Zielfeld.
                     // Die Farbe der dort stehenden Figur ist die Farbe des Ziehenden.
-                    if (after != '.') {
-                        if (after.isUpperCase()) appearedWhite++ else appearedBlack++
+                    when (after) {
+                        'W' -> appearedWhite++
+                        'B' -> appearedBlack++
                     }
                     // Geräumt: Startfeld eines Zuges oder geschlagene Figur
-                    if (before != '.') {
-                        if (before.isUpperCase()) vacatedWhite++ else vacatedBlack++
+                    when (before) {
+                        'W' -> vacatedWhite++
+                        'B' -> vacatedBlack++
                     }
                 }
             }
@@ -986,6 +988,25 @@ class UltraRobustClassifier(context: Context? = null) {
                 else -> null
             }
             return BoardDiff(changed, mover)
+        }
+
+        /**
+         * Reine Funktion: reduziert ein Feld auf leer, hell oder dunkel.
+         *
+         * Der Brettvergleich läuft bewusst auf dieser groben Stufe und nicht auf der Figurenart.
+         * Grund: Welche Figur auf einem Feld steht, verwechselt der Musterabgleich gelegentlich
+         * (Läufer und Springer sehen klein sehr ähnlich aus) - ob dort überhaupt etwas steht und
+         * ob es hell oder dunkel ist, kommt dagegen aus der Helligkeitsclusterung und ist deutlich
+         * verlässlicher.
+         *
+         * Genau daran scheiterte die Erkennung nach einigen Zügen: Eine einzelne verwechselte
+         * Figur auf einem unberührten Feld zählte als Veränderung. Mit jedem Zug kamen weitere
+         * dazu, bis der Vergleich dauerhaft "unklar" meldete und nichts mehr angezeigt wurde.
+         */
+        fun colourClass(symbol: Char): Char = when {
+            symbol == '.' -> '.'
+            symbol.isUpperCase() -> 'W'
+            else -> 'B'
         }
 
         /**

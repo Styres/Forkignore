@@ -59,9 +59,15 @@
     Felder des Pfeils nachzusehen - Startfeld leer, Zielfeld besetzt. Genau wie in der Zuganzeige
     auf lichess verschwindet der Pfeil in dem Moment, in dem die Figur angekommen ist;
   - spielt man etwas anderes, fällt das nach ein paar Sekunden auf und es wird neu erkannt;
+  - verglichen wird nur **leer / hell / dunkel**, nicht die Figurenart: welche Figur auf einem Feld
+    steht, verwechselt der Musterabgleich gelegentlich, und eine einzelne Verwechslung auf einem
+    unberührten Feld hätte sonst als Veränderung gezählt;
   - ist der Vergleich **nicht eindeutig** (Animation, mehr als vier veränderte Felder,
     widersprüchliche Farben), wird nichts entschieden und die Vergleichsbasis bleibt stehen. Genau
     das ist wichtig: ein stillschweigendes Übergehen würde den Zug des Gegners verschlucken;
+  - bleibt der Vergleich mehrfach hintereinander unklar, greift eine **Notbremse**: die aktuelle
+    Stellung wird als neue Grundlage angenommen und gerechnet. So kann die Anzeige nicht dauerhaft
+    stehenbleiben;
   - dafür verfolgt DuLo **fünfmal pro Sekunde jede Figurenposition**: je Feld werden Streuung (steht
     dort eine Figur?) und Helligkeit (hell oder dunkel?) gelesen, direkt aus dem Frame-Puffer und ohne
     Vollbild-Kopie;
@@ -72,6 +78,15 @@
     Partie neu bestimmt - mal spielt man Weiß, mal Schwarz;
   - die volle Erkennung läuft an, sobald die Figuren zwei Takte lang stillstehen - spätestens aber nach
     rund drei Sekunden, damit dauerhafte Animationen der Oberfläche sie nicht aufhalten.
+- 🤖 **Auto-Zug (Schalter „Auto", standardmäßig aus)**
+  - DuLo tippt den empfohlenen Zug selbst: erst das Startfeld, dann das Zielfeld, mit 0,3 Sekunden
+    Pause dazwischen. Die Feldmitten kommen aus demselben vermessenen Brettrechteck wie der Pfeil.
+  - Dafür ist ein **Bedienungshilfen-Dienst** nötig: Unter Android darf eine App Berührungen nur
+    über `AccessibilityService.dispatchGesture` an eine andere App schicken. DuLo muss deshalb
+    einmalig unter **Einstellungen › Bedienungshilfen** freigegeben werden; ohne Freigabe springt
+    der Schalter zurück und die Einstellungen werden geöffnet.
+  - Der Dienst wertet keine Ereignisse aus und liest keine Bildschirminhalte; er schickt
+    ausschließlich die beiden Tippgesten.
 - 🔒 **Vollständig offline**
   - Bildverarbeitung und Engine laufen ausschließlich auf dem Gerät, es gibt keine Netzwerkanfragen und keine Datenübertragung.
 

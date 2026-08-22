@@ -21,6 +21,13 @@ class DuloToggleView(context: Context) : View(context) {
     /** Wird nach jedem Umschalten mit dem neuen Zustand aufgerufen */
     var onSwitched: ((Boolean) -> Unit)? = null
 
+    /** Überschrift der Kachel, etwa "Auto". Ohne Angabe bleibt die Kachel unbeschriftet. */
+    var title: String? = null
+        set(value) {
+            field = value
+            invalidate()
+        }
+
     private val density = resources.displayMetrics.density
     private val tilePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(28, 28, 30) }
     private val trackPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -28,6 +35,11 @@ class DuloToggleView(context: Context) : View(context) {
     private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         textSize = 11f * density
+        isFakeBoldText = true
+    }
+    private val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(160, 160, 165)
+        textSize = 10f * density
         isFakeBoldText = true
     }
 
@@ -84,9 +96,16 @@ class DuloToggleView(context: Context) : View(context) {
         // Kachel
         canvas.drawRoundRect(RectF(0f, 0f, w, h), tileRadius, tileRadius, tilePaint)
 
+        // Überschrift, falls die Kachel eine trägt
+        val heading = title
+        if (heading != null) {
+            val headingWidth = titlePaint.measureText(heading)
+            canvas.drawText(heading, (w - headingWidth) / 2f, 13f * density, titlePaint)
+        }
+
         // Spur: grau im Aus-Zustand, grün im An-Zustand, dazwischen weich überblendet
         val trackLeft = (w - trackWidth) / 2f
-        val trackTop = h * 0.28f
+        val trackTop = if (heading != null) h * 0.36f else h * 0.28f
         trackPaint.color = blend(Color.rgb(99, 99, 102), Color.rgb(0, 230, 118), progress)
         canvas.drawRoundRect(
             RectF(trackLeft, trackTop, trackLeft + trackWidth, trackTop + trackHeight),
